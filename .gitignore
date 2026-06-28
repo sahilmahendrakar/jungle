@@ -1,0 +1,9 @@
+node_modules/
+dist/
+build/
+.env
+.env.*
+.jungle-ids.json
+*.log
+.DS_Store
+/tmp-shots/

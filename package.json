@@ -1,0 +1,10 @@
+{
+  "name": "jungle",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "description": "Jungle — Slack-style app for chatting with cloud agents that do real work",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.106.0"
+  }
+}
