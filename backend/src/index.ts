@@ -111,19 +111,26 @@ async function fanOut(channelId: string, payload: unknown) {
   }
 }
 
+// A human message starts a cascade with this budget; each agent->agent hop decrements
+// it. At 0, agents stop auto-replying until a human speaks again. Bounds loops + cost.
+const DEFAULT_CASCADE_BUDGET = 3;
+
 // If a message addresses an agent (via @mention, or by being the other member of a DM),
-// run that agent's turn and post its reply back into the channel. Async / fire-and-forget
-// so posting stays fast; the reply streams in when ready (the async UX).
+// run that agent's turn and post its reply back. Async / fire-and-forget so posting stays
+// fast. The reply itself re-enters this function (agent->agent), gated by cascade_budget.
 async function triggerMentionedAgents(channelId: string, message: db.PersistedMessage) {
   try {
+    const budget = message.cascade_budget ?? 0;
+    if (budget <= 0) return; // cascade exhausted — wait for a human to speak again
     const channel = await db.getChannel(channelId);
     if (!channel) return;
-    let agents = await db.agentsByIds(message.mentions.map((m) => m.id));
-    if (channel.kind === "dm" && !agents.length) {
-      const others = (await db.channelMemberIds(channelId)).filter((id) => id !== message.sender_id);
-      agents = await db.agentsByIds(others);
+    let candidateIds = message.mentions.map((m) => m.id);
+    if (channel.kind === "dm" && !candidateIds.length) {
+      candidateIds = await db.channelMemberIds(channelId);
     }
-    for (const agent of agents) void runAgentReply(channelId, channel.name, agent);
+    candidateIds = candidateIds.filter((id) => id !== message.sender_id); // never self-trigger
+    const agents = await db.agentsByIds(candidateIds);
+    for (const agent of agents) void runAgentReply(channelId, channel.name, agent, budget - 1);
   } catch (e) {
     console.error("triggerMentionedAgents:", e);
   }
@@ -133,17 +140,25 @@ async function runAgentReply(
   channelId: string,
   channelName: string,
   agent: { id: string; handle: string; ma_session_id: string },
+  replyBudget: number,
 ) {
   try {
     const context = await db.getRecentContext(channelId, 20);
     const input =
       `You are @${agent.handle} in the #${channelName} channel of a Slack-like app. ` +
       `Here is the recent conversation:\n\n${context}\n\n` +
-      `Reply to the most recent message addressed to you. Keep it brief and conversational.`;
+      `Reply to the most recent message addressed to you. Keep it brief and conversational. ` +
+      `You may address another participant by writing @their_handle.`;
     const reply = await ma.runAgentTurn(agent.ma_session_id, input);
     if (reply.trim()) {
-      const msg = await db.persistMessage({ channelId, senderId: agent.id, body: reply });
+      const msg = await db.persistMessage({
+        channelId,
+        senderId: agent.id,
+        body: reply,
+        cascadeBudget: replyBudget,
+      });
       await fanOut(channelId, { type: "message", message: msg });
+      void triggerMentionedAgents(channelId, msg); // the reply may address another agent
     }
   } catch (e) {
     console.error("runAgentReply:", e);
@@ -179,13 +194,10 @@ wss.on("connection", (ws, req) => {
           senderId: participantId,
           body: evt.body,
           clientMsgId: evt.clientMsgId ?? null,
+          cascadeBudget: DEFAULT_CASCADE_BUDGET, // human messages start a fresh cascade
         });
         await fanOut(evt.channelId, { type: "message", message });
-
-        // Step 4: if a human addressed an agent, run that agent's turn (async).
-        // (Agent replies re-triggering other agents + the cascade budget come in Step 6.)
-        const sender = await db.getParticipant(participantId);
-        if (sender?.kind === "human") void triggerMentionedAgents(evt.channelId, message);
+        void triggerMentionedAgents(evt.channelId, message);
       } catch (e) {
         ws.send(JSON.stringify({ type: "error", error: String((e as Error).message ?? e) }));
       }

@@ -22,6 +22,7 @@ export interface PersistedMessage {
   sender_handle: string;
   body: string;
   created_at: string;
+  cascade_budget: number | null;
   mentions: { id: string; handle: string }[];
 }
 
@@ -107,17 +108,18 @@ export async function persistMessage(args: {
   senderId: string;
   body: string;
   clientMsgId?: string | null;
+  cascadeBudget?: number | null;
 }): Promise<PersistedMessage> {
   const mentions = await resolveMentions(args.body);
   const client = await pool.connect();
   try {
     await client.query("begin");
     const ins = await client.query(
-      `insert into messages (channel_id, sender_id, body, client_msg_id)
-       values ($1, $2, $3, $4)
+      `insert into messages (channel_id, sender_id, body, client_msg_id, cascade_budget)
+       values ($1, $2, $3, $4, $5)
        on conflict (sender_id, client_msg_id) where client_msg_id is not null do nothing
        returning *`,
-      [args.channelId, args.senderId, args.body, args.clientMsgId ?? null],
+      [args.channelId, args.senderId, args.body, args.clientMsgId ?? null, args.cascadeBudget ?? null],
     );
     let msg = ins.rows[0];
     if (msg) {
@@ -145,6 +147,7 @@ export async function persistMessage(args: {
       sender_handle: sender?.handle ?? "?",
       body: msg.body,
       created_at: msg.created_at,
+      cascade_budget: msg.cascade_budget ?? null,
       mentions,
     };
   } catch (e) {
@@ -171,6 +174,7 @@ export async function getMessages(channelId: string, afterSeq = 0): Promise<Pers
     sender_handle: r.sender_handle,
     body: r.body,
     created_at: r.created_at,
+    cascade_budget: r.cascade_budget ?? null,
     mentions: [],
   }));
 }
