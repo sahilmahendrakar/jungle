@@ -21,22 +21,49 @@ export async function createAgentSession(title: string): Promise<string> {
   return session.id;
 }
 
-// Run one turn: send input, stream until the turn is done, return the full reply text.
-export async function runAgentTurn(sessionId: string, inputText: string): Promise<string> {
+export type SendMessageInput = { to?: string; body?: string };
+export type SendMessageResult = { ok: boolean; error?: string; messageId?: string };
+
+// Run one turn. The agent communicates ONLY via the `send_message` custom tool: each call
+// is handled by `onSend` (which posts into Jungle) and acked so the turn continues. The
+// agent's plain text output is intentionally ignored. Returns the count of messages sent.
+export async function runAgentTurn(
+  sessionId: string,
+  inputText: string,
+  onSend: (input: SendMessageInput) => Promise<SendMessageResult>,
+): Promise<number> {
   const stream = await client.beta.sessions.events.stream(sessionId);
   await client.beta.sessions.events.send(sessionId, {
     events: [{ type: "user.message", content: [{ type: "text", text: inputText }] }],
   });
 
-  let reply = "";
+  let sent = 0;
   for await (const event of stream as AsyncIterable<any>) {
-    if (event.type === "agent.message") {
-      for (const block of event.content) if (block.type === "text") reply += block.text;
+    if (event.type === "agent.custom_tool_use" && event.name === "send_message") {
+      let result: SendMessageResult;
+      try {
+        result = await onSend((event.input ?? {}) as SendMessageInput);
+      } catch (e) {
+        result = { ok: false, error: String((e as Error).message ?? e) };
+      }
+      if (result.ok) sent++;
+      await client.beta.sessions.events.send(sessionId, {
+        events: [
+          {
+            type: "user.custom_tool_result",
+            custom_tool_use_id: event.id,
+            content: [{ type: "text", text: JSON.stringify(result) }],
+          },
+        ],
+      });
     } else if (event.type === "session.status_idle") {
-      if (event.stop_reason?.type !== "requires_action") break;
+      if (event.stop_reason?.type !== "requires_action") break; // terminal turn end
     } else if (event.type === "session.status_terminated") {
+      break;
+    } else if (event.type === "session.error") {
+      console.error("session.error:", JSON.stringify(event));
       break;
     }
   }
-  return reply;
+  return sent;
 }

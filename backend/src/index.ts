@@ -137,32 +137,54 @@ async function triggerMentionedAgents(channelId: string, message: db.PersistedMe
 }
 
 async function runAgentReply(
-  channelId: string,
-  channelName: string,
+  triggerChannelId: string,
+  triggerChannelName: string,
   agent: { id: string; handle: string; ma_session_id: string },
   replyBudget: number,
 ) {
   try {
-    const context = await db.getRecentContext(channelId, 20);
+    const context = await db.getRecentContext(triggerChannelId, 20);
     const input =
-      `You are @${agent.handle} in the #${channelName} channel of a Slack-like app. ` +
-      `Here is the recent conversation:\n\n${context}\n\n` +
-      `Reply to the most recent message addressed to you. Keep it brief and conversational. ` +
-      `You may address another participant by writing @their_handle.`;
-    const reply = await ma.runAgentTurn(agent.ma_session_id, input);
-    if (reply.trim()) {
-      const msg = await db.persistMessage({
-        channelId,
-        senderId: agent.id,
-        body: reply,
-        cascadeBudget: replyBudget,
-      });
-      await fanOut(channelId, { type: "message", message: msg });
-      void triggerMentionedAgents(channelId, msg); // the reply may address another agent
-    }
+      `You are @${agent.handle} in Jungle. You were addressed in #${triggerChannelName}.\n\n` +
+      `Recent conversation:\n${context}\n\n` +
+      `Respond by calling send_message — to reply in this channel use to:"#${triggerChannelName}". ` +
+      `You may also DM someone with to:"@handle", or post in another channel you belong to.`;
+    await ma.runAgentTurn(agent.ma_session_id, input, (toolInput) =>
+      deliverAgentMessage(agent, toolInput, replyBudget),
+    );
   } catch (e) {
     console.error("runAgentReply:", e);
   }
+}
+
+// Execute one send_message tool call from an agent: resolve the destination (#channel or
+// @handle), post via the routing rule (persist + fan out + cascade), and report back.
+async function deliverAgentMessage(
+  agent: { id: string; handle: string },
+  toolInput: ma.SendMessageInput,
+  budget: number,
+): Promise<ma.SendMessageResult> {
+  const to = String(toolInput.to ?? "").trim();
+  const body = String(toolInput.body ?? "").trim();
+  if (!body) return { ok: false, error: "body is required" };
+
+  let channelId: string;
+  if (to.startsWith("#")) {
+    const ch = await db.getChannelByNameForMember(to.slice(1), agent.id);
+    if (!ch) return { ok: false, error: `you are not a member of channel ${to} (or it doesn't exist)` };
+    channelId = ch.id;
+  } else if (to.startsWith("@")) {
+    const other = await db.getParticipantByHandle(to.slice(1));
+    if (!other) return { ok: false, error: `no participant named ${to}` };
+    channelId = await db.findOrCreateDm(agent.id, other.id);
+  } else {
+    return { ok: false, error: `"to" must start with "#" (channel) or "@" (handle)` };
+  }
+
+  const msg = await db.persistMessage({ channelId, senderId: agent.id, body, cascadeBudget: budget });
+  await fanOut(channelId, { type: "message", message: msg });
+  void triggerMentionedAgents(channelId, msg);
+  return { ok: true, messageId: msg.id };
 }
 
 wss.on("connection", (ws, req) => {

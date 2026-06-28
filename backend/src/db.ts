@@ -227,3 +227,52 @@ export async function listChannels(
   const { rows } = await pool.query(`select id, name, kind from channels order by created_at`);
   return rows;
 }
+
+export async function getChannelByNameForMember(
+  name: string,
+  participantId: string,
+): Promise<{ id: string; name: string; kind: string } | null> {
+  const { rows } = await pool.query(
+    `select c.id, c.name, c.kind from channels c
+     join channel_members cm on cm.channel_id = c.id
+     where c.name = $1 and cm.participant_id = $2 order by c.created_at limit 1`,
+    [name, participantId],
+  );
+  return rows[0] ?? null;
+}
+
+export async function getParticipantByHandle(handle: string): Promise<Participant | null> {
+  const { rows } = await pool.query<Participant>(`select * from participants where handle = $1`, [handle]);
+  return rows[0] ?? null;
+}
+
+// Find the 1:1 DM channel between two participants, creating it if needed.
+export async function findOrCreateDm(aId: string, bId: string): Promise<string> {
+  const found = await pool.query(
+    `select c.id from channels c
+     where c.kind = 'dm'
+       and (select count(*) from channel_members m where m.channel_id = c.id) = 2
+       and exists (select 1 from channel_members m where m.channel_id = c.id and m.participant_id = $1)
+       and exists (select 1 from channel_members m where m.channel_id = c.id and m.participant_id = $2)
+     limit 1`,
+    [aId, bId],
+  );
+  if (found.rows[0]) return found.rows[0].id;
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const { rows } = await client.query(`insert into channels (name, kind) values ('dm', 'dm') returning id`);
+    const cid = rows[0].id;
+    await client.query(
+      `insert into channel_members (channel_id, participant_id) values ($1, $2), ($1, $3)`,
+      [cid, aId, bId],
+    );
+    await client.query("commit");
+    return cid;
+  } catch (e) {
+    await client.query("rollback");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
