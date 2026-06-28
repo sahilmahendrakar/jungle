@@ -4,6 +4,16 @@
   "type": "module",
   "version": "0.0.0",
   "description": "Jungle — Slack-style app for chatting with cloud agents that do real work",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "smoke": "node scripts/smoke.mjs",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "dev:backend": "npm run dev -w @jungle/backend",
+    "dev:frontend": "npm run dev -w @jungle/frontend"
+  },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.106.0"
   }
