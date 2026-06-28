@@ -95,7 +95,7 @@ export async function resolveMentions(body: string): Promise<{ id: string; handl
   return rows;
 }
 
-async function getParticipant(id: string): Promise<Participant | null> {
+export async function getParticipant(id: string): Promise<Participant | null> {
   const { rows } = await pool.query<Participant>(`select * from participants where id = $1`, [id]);
   return rows[0] ?? null;
 }
@@ -173,4 +173,37 @@ export async function getMessages(channelId: string, afterSeq = 0): Promise<Pers
     created_at: r.created_at,
     mentions: [],
   }));
+}
+
+export async function getChannel(
+  id: string,
+): Promise<{ id: string; name: string; kind: string } | null> {
+  const { rows } = await pool.query(`select id, name, kind from channels where id = $1`, [id]);
+  return rows[0] ?? null;
+}
+
+// Recent messages oldest -> newest, rendered for feeding an agent context on mention.
+export async function getRecentContext(channelId: string, limit = 20): Promise<string> {
+  const { rows } = await pool.query<{ handle: string; body: string }>(
+    `select p.handle, m.body from messages m join participants p on p.id = m.sender_id
+     where m.channel_id = $1 order by m.seq desc limit $2`,
+    [channelId, limit],
+  );
+  return rows
+    .reverse()
+    .map((r) => `@${r.handle}: ${r.body}`)
+    .join("\n");
+}
+
+// Of the given participant ids, the ones that are agents (with their MA session id).
+export async function agentsByIds(
+  ids: string[],
+): Promise<{ id: string; handle: string; ma_session_id: string }[]> {
+  if (!ids.length) return [];
+  const { rows } = await pool.query<{ id: string; handle: string; ma_session_id: string }>(
+    `select id, handle, ma_session_id from participants
+     where kind = 'agent' and ma_session_id is not null and id = any($1)`,
+    [ids],
+  );
+  return rows;
 }
