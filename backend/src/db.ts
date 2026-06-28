@@ -207,3 +207,19 @@ export async function agentsByIds(
   );
   return rows;
 }
+
+export async function listChannels(
+  participantId?: string,
+): Promise<{ id: string; name: string; kind: string }[]> {
+  if (participantId) {
+    const { rows } = await pool.query(
+      `select c.id, c.name, c.kind from channels c
+       join channel_members cm on cm.channel_id = c.id
+       where cm.participant_id = $1 order by c.created_at`,
+      [participantId],
+    );
+    return rows;
+  }
+  const { rows } = await pool.query(`select id, name, kind from channels order by created_at`);
+  return rows;
+}

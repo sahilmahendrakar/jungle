@@ -8,6 +8,19 @@ import * as ma from "./ma";
 const app = express();
 app.use(express.json());
 
+// MVP CORS: the frontend (a different origin in dev) needs to read API responses.
+// Lock the origin down before any real deployment.
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Headers", "content-type");
+  res.header("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
+  if (req.method === "OPTIONS") {
+    res.sendStatus(204);
+    return;
+  }
+  next();
+});
+
 app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "jungle-backend" });
 });
@@ -45,6 +58,15 @@ app.post("/api/agents", async (req, res) => {
     }
     const maSessionId = await ma.createAgentSession(`jungle agent @${handle}`);
     res.status(201).json(await db.createParticipant({ kind: "agent", handle, displayName, maSessionId }));
+  } catch (e) {
+    res.status(500).json({ error: String((e as Error).message ?? e) });
+  }
+});
+
+app.get("/api/channels", async (req, res) => {
+  try {
+    const participantId = (req.query.participantId as string | undefined) || undefined;
+    res.json(await db.listChannels(participantId));
   } catch (e) {
     res.status(500).json({ error: String((e as Error).message ?? e) });
   }
