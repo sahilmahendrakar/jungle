@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { listChannels, getMessages, WS_BASE, type Channel, type Message } from "./api";
 
+function mergeById(a: Message[], b: Message[]): Message[] {
+  const map = new Map<string, Message>();
+  for (const m of [...a, ...b]) map.set(m.id, m);
+  return [...map.values()].sort((x, y) => Number(x.seq) - Number(y.seq));
+}
+
 export function App() {
   const participantId = new URLSearchParams(location.search).get("as");
   const [channels, setChannels] = useState<Channel[]>([]);
@@ -26,19 +32,37 @@ export function App() {
     getMessages(selected).then(setMessages);
   }, [selected]);
 
-  // One WebSocket for the session; append live messages for the open channel.
+  // One auto-reconnecting WebSocket. On (re)connect, backfill history for the open
+  // channel so anything that arrived while disconnected isn't missed (cross-device).
   useEffect(() => {
     if (!participantId) return;
-    const ws = new WebSocket(`${WS_BASE}/?participantId=${participantId}`);
-    wsRef.current = ws;
-    ws.onmessage = (e) => {
-      const evt = JSON.parse(e.data);
-      if (evt.type !== "message") return;
-      const m: Message = evt.message;
-      if (m.channel_id !== selectedRef.current) return;
-      setMessages((prev) => (prev.some((x) => x.id === m.id) ? prev : [...prev, m]));
+    let stopped = false;
+    let ws: WebSocket;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    const connect = () => {
+      ws = new WebSocket(`${WS_BASE}/?participantId=${participantId}`);
+      wsRef.current = ws;
+      ws.onopen = () => {
+        const ch = selectedRef.current;
+        if (ch) getMessages(ch).then((hist) => setMessages((prev) => mergeById(prev, hist)));
+      };
+      ws.onmessage = (e) => {
+        const evt = JSON.parse(e.data);
+        if (evt.type !== "message") return;
+        const m: Message = evt.message;
+        if (m.channel_id !== selectedRef.current) return;
+        setMessages((prev) => (prev.some((x) => x.id === m.id) ? prev : [...prev, m]));
+      };
+      ws.onclose = () => {
+        if (!stopped) retry = setTimeout(connect, 1500);
+      };
     };
-    return () => ws.close();
+    connect();
+    return () => {
+      stopped = true;
+      if (retry) clearTimeout(retry);
+      ws?.close();
+    };
   }, [participantId]);
 
   function send() {
