@@ -1,5 +1,18 @@
 import { useEffect, useRef, useState } from "react";
-import { listChannels, getMessages, WS_BASE, type Channel, type Message } from "./api";
+import { listChannels, getMessages, fetchDevBootstrap, WS_BASE, type Channel, type Message } from "./api";
+
+const DEV_PARTICIPANT_KEY = "jungle-as";
+
+function readParticipantId(): string | null {
+  return new URLSearchParams(location.search).get("as") ?? localStorage.getItem(DEV_PARTICIPANT_KEY);
+}
+
+function saveParticipantId(id: string) {
+  localStorage.setItem(DEV_PARTICIPANT_KEY, id);
+  const url = new URL(location.href);
+  url.searchParams.set("as", id);
+  history.replaceState(null, "", url);
+}
 
 function mergeById(a: Message[], b: Message[]): Message[] {
   const map = new Map<string, Message>();
@@ -8,7 +21,9 @@ function mergeById(a: Message[], b: Message[]): Message[] {
 }
 
 export function App() {
-  const participantId = new URLSearchParams(location.search).get("as");
+  const [participantId, setParticipantId] = useState<string | null>(readParticipantId);
+  const [bootstrapping, setBootstrapping] = useState(false);
+  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -16,6 +31,19 @@ export function App() {
   const wsRef = useRef<WebSocket | null>(null);
   const selectedRef = useRef<string | null>(null);
   selectedRef.current = selected;
+
+  // Dev: auto-login via the backend bootstrap endpoint when ?as= is missing.
+  useEffect(() => {
+    if (participantId || !import.meta.env.DEV) return;
+    setBootstrapping(true);
+    fetchDevBootstrap()
+      .then(({ participantId: id }) => {
+        saveParticipantId(id);
+        setParticipantId(id);
+      })
+      .catch((e) => setBootstrapError(String((e as Error).message ?? e)))
+      .finally(() => setBootstrapping(false));
+  }, [participantId]);
 
   // Load the channels this participant belongs to.
   useEffect(() => {
@@ -78,7 +106,19 @@ export function App() {
     return (
       <main style={{ fontFamily: "system-ui, sans-serif", padding: "2rem" }}>
         <h1>🌴 Jungle</h1>
-        <p>Add <code>?as=&lt;participantId&gt;</code> to the URL to sign in.</p>
+        {bootstrapping ? (
+          <p>Signing in…</p>
+        ) : bootstrapError ? (
+          <>
+            <p>Could not sign in automatically. Is the backend running on port 3001?</p>
+            <p style={{ color: "#888", fontSize: 14 }}>{bootstrapError}</p>
+            <p>
+              Or add <code>?as=&lt;participantId&gt;</code> to the URL manually.
+            </p>
+          </>
+        ) : (
+          <p>Add <code>?as=&lt;participantId&gt;</code> to the URL to sign in.</p>
+        )}
       </main>
     );
   }

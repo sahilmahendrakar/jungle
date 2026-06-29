@@ -3,6 +3,7 @@ import express from "express";
 import { createServer } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
 import * as db from "./db";
+import * as dev from "./dev";
 import * as ma from "./ma";
 
 const app = express();
@@ -23,6 +24,16 @@ app.use((req, res, next) => {
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "jungle-backend" });
+});
+
+// Dev-only: fixed participant + #general so the frontend can auto-login without ?as=.
+app.get("/api/dev/bootstrap", async (_req, res) => {
+  if (!dev.isDevMode()) return res.status(404).json({ error: "not found" });
+  try {
+    res.json(await dev.ensureDevBootstrap());
+  } catch (e) {
+    res.status(500).json({ error: String((e as Error).message ?? e) });
+  }
 });
 
 // --- REST: setup + history (used by the test now, the frontend later) ---
@@ -230,4 +241,13 @@ wss.on("connection", (ws, req) => {
 });
 
 const PORT = Number(process.env.PORT ?? 3001);
-server.listen(PORT, () => console.log(`jungle-backend on http://localhost:${PORT}`));
+server.listen(PORT, () => {
+  console.log(`jungle-backend on http://localhost:${PORT}`);
+  if (dev.isDevMode()) {
+    void dev.ensureDevBootstrap().then((b) => {
+      console.log(`dev bootstrap: @${b.handle} -> http://localhost:5173/?as=${b.participantId}`);
+    }).catch((e) => {
+      console.warn("dev bootstrap skipped:", (e as Error).message ?? e);
+    });
+  }
+});
