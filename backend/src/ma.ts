@@ -7,15 +7,33 @@ import { dirname, join } from "node:path";
 // IDs of the shared agent config + cloud environment, created by scripts/smoke.mjs.
 const here = dirname(fileURLToPath(import.meta.url)); // backend/src
 const idsPath = join(here, "../../.jungle-ids.json"); // jungle/.jungle-ids.json
-const ids: { agentId: string; environmentId: string } = JSON.parse(readFileSync(idsPath, "utf8"));
+
+let ids: { agentId: string; environmentId: string } | null = null;
+
+function loadIds(): { agentId: string; environmentId: string } {
+  if (ids) return ids;
+  try {
+    ids = JSON.parse(readFileSync(idsPath, "utf8"));
+    if (!ids?.agentId || !ids?.environmentId) {
+      throw new Error("missing agentId or environmentId");
+    }
+    return ids;
+  } catch {
+    throw new Error(
+      `Managed Agents not configured (${idsPath} missing or incomplete). ` +
+        `Run: set -a; . ~/.config/jungle/.env; set +a; node scripts/smoke.mjs`,
+    );
+  }
+}
 
 const client = new Anthropic(); // ANTHROPIC_API_KEY from env (loaded by ./env)
 
 // One MA session per agent participant — clean memory per agent.
 export async function createAgentSession(title: string): Promise<string> {
+  const { agentId, environmentId } = loadIds();
   const session = await client.beta.sessions.create({
-    agent: ids.agentId,
-    environment_id: ids.environmentId,
+    agent: agentId,
+    environment_id: environmentId,
     title,
   });
   return session.id;
