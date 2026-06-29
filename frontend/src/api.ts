@@ -25,3 +25,16 @@ export function listChannels(participantId: string): Promise<Channel[]> {
 export function getMessages(channelId: string): Promise<Message[]> {
   return fetch(`${BASE}/api/channels/${channelId}/messages`).then((r) => r.json());
 }
+
+export interface DevBootstrap {
+  participantId: string;
+  handle: string;
+  channelId: string;
+}
+
+export function fetchDevBootstrap(): Promise<DevBootstrap> {
+  return fetch(`${BASE}/api/dev/bootstrap`).then((r) => {
+    if (!r.ok) throw new Error(`bootstrap failed (${r.status})`);
+    return r.json();
+  });
+}
