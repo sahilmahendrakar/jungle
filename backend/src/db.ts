@@ -16,6 +16,9 @@ export interface Participant {
   vault_id: string | null;
   repo_resource_id: string | null;
   mcp_credential_id: string | null;
+  firebase_uid: string | null;
+  email: string | null;
+  avatar_url: string | null;
 }
 
 export interface PersistedMessage {
@@ -39,17 +42,37 @@ export async function createParticipant(p: {
   vaultId?: string | null;
   repoResourceId?: string | null;
   mcpCredentialId?: string | null;
+  firebaseUid?: string | null;
+  email?: string | null;
+  avatarUrl?: string | null;
 }): Promise<Participant> {
   const { rows } = await pool.query<Participant>(
     `insert into participants
-       (kind, handle, display_name, ma_session_id, repo, vault_id, repo_resource_id, mcp_credential_id)
-     values ($1, $2, $3, $4, $5, $6, $7, $8) returning *`,
+       (kind, handle, display_name, ma_session_id, repo, vault_id, repo_resource_id,
+        mcp_credential_id, firebase_uid, email, avatar_url)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) returning *`,
     [
       p.kind, p.handle, p.displayName, p.maSessionId ?? null,
       p.repo ?? null, p.vaultId ?? null, p.repoResourceId ?? null, p.mcpCredentialId ?? null,
+      p.firebaseUid ?? null, p.email ?? null, p.avatarUrl ?? null,
     ],
   );
   return rows[0];
+}
+
+// Look up the human participant linked to a Firebase Auth uid (null if not onboarded yet).
+export async function getParticipantByFirebaseUid(uid: string): Promise<Participant | null> {
+  const { rows } = await pool.query<Participant>(
+    `select * from participants where firebase_uid = $1`,
+    [uid],
+  );
+  return rows[0] ?? null;
+}
+
+// Is a handle free? (case-insensitive; handles are unique). Used to validate onboarding.
+export async function handleAvailable(handle: string): Promise<boolean> {
+  const { rows } = await pool.query(`select 1 from participants where lower(handle) = lower($1)`, [handle]);
+  return rows.length === 0;
 }
 
 export async function createChannel(c: {

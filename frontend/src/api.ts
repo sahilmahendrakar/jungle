@@ -5,6 +5,15 @@ const secure = typeof location !== "undefined" && location.protocol === "https:"
 const BASE = `${secure ? "https" : "http"}://${host}:3001`;
 export const WS_BASE = `${secure ? "wss" : "ws"}://${host}:3001`;
 
+// Current Firebase ID token, set by the auth provider; attached to authed requests.
+let authToken: string | null = null;
+export function setAuthToken(t: string | null) {
+  authToken = t;
+}
+function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  return authToken ? { authorization: `Bearer ${authToken}`, ...extra } : extra;
+}
+
 export interface Channel {
   id: string;
   name: string;
@@ -97,4 +106,52 @@ export function createDm(participantId: string, otherId: string): Promise<{ id: 
     if (!r.ok) throw new Error(j.error ?? "failed to open DM");
     return j;
   });
+}
+
+// --- Identity / onboarding (Firebase auth) ---
+
+export interface GoogleProfile {
+  uid: string;
+  email: string | null;
+  name: string | null;
+  picture: string | null;
+}
+
+export interface Me {
+  onboarded: boolean;
+  participant?: Participant;
+  profile?: GoogleProfile;
+  suggestedHandle?: string;
+  github?: { connected: boolean; login?: string };
+}
+
+async function json<T>(r: Response, fallbackErr: string): Promise<T> {
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error((j as { error?: string }).error ?? fallbackErr);
+  return j as T;
+}
+
+export function getMe(): Promise<Me> {
+  return fetch(`${BASE}/api/me`, { headers: authHeaders() }).then((r) => json<Me>(r, "failed to load profile"));
+}
+
+export function checkHandle(handle: string): Promise<{ available: boolean; valid: boolean }> {
+  return fetch(`${BASE}/api/handle-available?handle=${encodeURIComponent(handle)}`).then((r) =>
+    json(r, "failed to check handle"),
+  );
+}
+
+export function completeOnboarding(handle: string, displayName: string): Promise<Participant> {
+  return fetch(`${BASE}/api/onboarding`, {
+    method: "POST",
+    headers: authHeaders({ "content-type": "application/json" }),
+    body: JSON.stringify({ handle, displayName }),
+  }).then((r) => json<Participant>(r, "onboarding failed"));
+}
+
+export function githubConnectUrl(): Promise<{ url: string }> {
+  return fetch(`${BASE}/api/github/connect-url`, {
+    method: "POST",
+    headers: authHeaders(),
+  }).then((r) => json<{ url: string }>(r, "failed to start GitHub connect"));
 }

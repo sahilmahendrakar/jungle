@@ -73,8 +73,18 @@ function WorkingDots() {
   );
 }
 
-export function App() {
-  const participantId = new URLSearchParams(location.search).get("as");
+export function App({
+  authParticipantId,
+  getWsToken,
+  me: meProp,
+  onSignOut,
+}: {
+  authParticipantId?: string; // from Firebase onboarding; overrides the ?as= dev path
+  getWsToken?: () => Promise<string | null>; // fresh ID token for the WS handshake
+  me?: Participant; // current user (Firebase mode)
+  onSignOut?: () => void; // Firebase sign-out (else clears ?as=)
+} = {}) {
+  const participantId = authParticipantId ?? new URLSearchParams(location.search).get("as");
   const [channels, setChannels] = useState<Channel[]>([]);
   const [people, setPeople] = useState<Participant[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -98,7 +108,7 @@ export function App() {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   selectedRef.current = selected;
 
-  const me = people.find((p) => p.id === participantId);
+  const me = meProp ?? people.find((p) => p.id === participantId);
 
   function reloadChannels(selectId?: string) {
     if (!participantId) return;
@@ -134,8 +144,13 @@ export function App() {
     let stopped = false;
     let ws: WebSocket;
     let retry: ReturnType<typeof setTimeout> | undefined;
-    const connect = () => {
-      ws = new WebSocket(`${WS_BASE}/?participantId=${participantId}`);
+    const connect = async () => {
+      // Firebase mode: authenticate the socket with a fresh ID token. Dev mode: ?participantId=.
+      const qs = getWsToken
+        ? `token=${encodeURIComponent((await getWsToken()) ?? "")}`
+        : `participantId=${encodeURIComponent(participantId)}`;
+      if (stopped) return;
+      ws = new WebSocket(`${WS_BASE}/?${qs}`);
       wsRef.current = ws;
       ws.onopen = () => {
         setNotice("");
@@ -217,7 +232,8 @@ export function App() {
   }
 
   function signOut() {
-    window.location.search = ""; // drop ?as= -> back to the sign-in screen
+    if (onSignOut) onSignOut(); // Firebase sign-out
+    else window.location.search = ""; // dev path: drop ?as= -> back to the sign-in screen
   }
 
   async function openDm(otherId: string) {

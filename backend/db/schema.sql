@@ -20,6 +20,12 @@ alter table participants add column if not exists vault_id           text;
 alter table participants add column if not exists repo_resource_id   text;
 alter table participants add column if not exists mcp_credential_id  text;
 
+-- Identity: a human participant is linked to a Firebase Auth user (Google sign-in). These
+-- are null for agents and for legacy/dev participants created via the ?as= dev path.
+alter table participants add column if not exists firebase_uid       text unique;
+alter table participants add column if not exists email              text;
+alter table participants add column if not exists avatar_url         text;
+
 create table if not exists channels (
   id          uuid primary key default gen_random_uuid(),
   name        text not null,
