@@ -1,6 +1,9 @@
-// MVP: backend is hardcoded to localhost. Swap to an env-configured URL when deployed.
-const BASE = "http://localhost:3001";
-export const WS_BASE = "ws://localhost:3001";
+// Backend runs on :3001 on the same host the frontend is served from. Deriving from
+// location (rather than hardcoding localhost) means access via an IP/hostname works too.
+const host = typeof location !== "undefined" && location.hostname ? location.hostname : "localhost";
+const secure = typeof location !== "undefined" && location.protocol === "https:";
+const BASE = `${secure ? "https" : "http"}://${host}:3001`;
+export const WS_BASE = `${secure ? "wss" : "ws"}://${host}:3001`;
 
 export interface Channel {
   id: string;
@@ -59,6 +62,23 @@ export function createParticipant(p: {
 
 export function listChannels(participantId: string): Promise<Channel[]> {
   return fetch(`${BASE}/api/channels?participantId=${participantId}`).then((r) => r.json());
+}
+
+// Create a channel (kind "channel") or DM (kind "dm") with the given member handles.
+export function createChannel(c: {
+  name: string;
+  kind: "channel" | "dm";
+  memberHandles: string[];
+}): Promise<Channel> {
+  return fetch(`${BASE}/api/channels`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(c),
+  }).then(async (r) => {
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error ?? "failed to create channel");
+    return j;
+  });
 }
 
 export function getMessages(channelId: string): Promise<Message[]> {
