@@ -17,7 +17,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Dialog,
   DialogContent,
@@ -289,7 +288,7 @@ export function App() {
       {/* ---------- Sidebar ---------- */}
       <aside className="flex w-72 shrink-0 flex-col bg-sidebar text-sidebar-foreground">
         {/* Workspace header */}
-        <div className="flex items-center gap-2.5 border-b border-sidebar-border px-4 py-3.5">
+        <div className="flex shrink-0 items-center gap-2.5 border-b border-sidebar-border px-4 py-3.5">
           <div className="flex size-8 items-center justify-center rounded-lg bg-sidebar-primary text-lg shadow-sm">
             🌴
           </div>
@@ -301,7 +300,7 @@ export function App() {
           </div>
         </div>
 
-        <ScrollArea className="flex-1">
+        <div className="min-h-0 flex-1 overflow-y-auto">
           <div className="px-2 py-3">
             {/* Channels */}
             <SectionHeader
@@ -388,11 +387,11 @@ export function App() {
             ))}
             {others.length === 0 && <EmptyHint>No one else yet.</EmptyHint>}
           </div>
-        </ScrollArea>
+        </div>
 
         {/* User footer */}
         {me && (
-          <div className="flex items-center gap-2.5 border-t border-sidebar-border px-3 py-2.5">
+          <div className="flex shrink-0 items-center gap-2.5 border-t border-sidebar-border px-3 py-2.5">
             <PersonAvatar name={me.display_name} handle={me.handle} />
             <div className="min-w-0 flex-1">
               <div className="truncate text-sm font-semibold">
@@ -444,7 +443,7 @@ export function App() {
         </header>
 
         {/* Messages */}
-        <ScrollArea className="flex-1" viewportRef={viewportRef}>
+        <div ref={viewportRef} className="min-h-0 flex-1 overflow-y-auto">
           <div data-testid="message-list" className="flex flex-col gap-5 px-5 py-6">
             {sel && grouped.length === 0 && (
               <div className="flex flex-1 flex-col items-center justify-center gap-2 pt-16 text-center">
@@ -505,7 +504,7 @@ export function App() {
               );
             })}
           </div>
-        </ScrollArea>
+        </div>
 
         {/* Working indicator (conditionally rendered: absent when idle) */}
         {workingHere.length > 0 && (
