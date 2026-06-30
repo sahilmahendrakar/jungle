@@ -6,15 +6,20 @@ import { randomBytes } from "node:crypto";
 import * as db from "./db";
 import * as ma from "./ma";
 import * as gh from "./github";
+import * as auth from "./auth";
+
+// Where the SPA is served — GitHub OAuth callback redirects back here after connecting.
+const FRONTEND_URL = process.env.FRONTEND_URL ?? "http://localhost:5173";
 
 const app = express();
 app.use(express.json());
+app.use(auth.attachAuth); // populates req.auth when a valid Firebase token is present
 
 // MVP CORS: the frontend (a different origin in dev) needs to read API responses.
 // Lock the origin down before any real deployment.
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Headers", "content-type");
+  res.header("Access-Control-Allow-Headers", "content-type, authorization");
   res.header("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
   if (req.method === "OPTIONS") {
     res.sendStatus(204);
@@ -44,6 +49,68 @@ app.post("/api/participants", async (req, res) => {
       return res.status(400).json({ error: "kind, handle, displayName required" });
     }
     res.status(201).json(await db.createParticipant({ kind, handle, displayName, maSessionId }));
+  } catch (e) {
+    res.status(500).json({ error: String((e as Error).message ?? e) });
+  }
+});
+
+// --- Identity & onboarding (real auth: Firebase Google sign-in) ---
+
+const HANDLE_RE = /^[a-z0-9][a-z0-9_-]{1,29}$/; // 2–30 chars, lowercase/digits/_/-, no leading symbol
+
+// Derive a starter handle from the Google profile (email local-part or name).
+function suggestHandle(u: auth.AuthUser): string {
+  const base = (u.email?.split("@")[0] || u.name || "user")
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 30);
+  return base.length >= 2 ? base : "user";
+}
+
+// Who am I? Returns the linked participant, or onboarding hints if this Google user is new.
+app.get("/api/me", auth.requireAuth, async (req, res) => {
+  try {
+    const u = auth.authedUser(req)!;
+    const p = await db.getParticipantByFirebaseUid(u.uid);
+    if (p) {
+      const gid = await db.getGithubIdentity(p.id);
+      return res.json({ onboarded: true, participant: p, github: gid ? { connected: true, login: gid.github_login } : { connected: false } });
+    }
+    let suggested = suggestHandle(u);
+    if (!(await db.handleAvailable(suggested))) suggested = `${suggested}-${Math.random().toString(36).slice(2, 5)}`;
+    res.json({ onboarded: false, profile: u, suggestedHandle: suggested });
+  } catch (e) {
+    res.status(500).json({ error: String((e as Error).message ?? e) });
+  }
+});
+
+// Is a handle valid + free? (drives the onboarding handle field)
+app.get("/api/handle-available", async (req, res) => {
+  const handle = String(req.query.handle ?? "").trim();
+  if (!HANDLE_RE.test(handle)) return res.json({ available: false, valid: false });
+  res.json({ available: await db.handleAvailable(handle), valid: true });
+});
+
+// Complete onboarding: create the human participant linked to this Firebase user. Idempotent.
+app.post("/api/onboarding", auth.requireAuth, async (req, res) => {
+  try {
+    const u = auth.authedUser(req)!;
+    const existing = await db.getParticipantByFirebaseUid(u.uid);
+    if (existing) return res.status(200).json(existing);
+    const handle = String(req.body?.handle ?? "").trim();
+    const displayName = String(req.body?.displayName ?? "").trim() || u.name || handle;
+    if (!HANDLE_RE.test(handle)) {
+      return res.status(400).json({ error: "handle must be 2–30 chars: lowercase letters, digits, - or _" });
+    }
+    if (!(await db.handleAvailable(handle))) {
+      return res.status(409).json({ error: "that handle is taken" });
+    }
+    const p = await db.createParticipant({
+      kind: "human", handle, displayName,
+      firebaseUid: u.uid, email: u.email, avatarUrl: u.picture,
+    });
+    res.status(201).json(p);
   } catch (e) {
     res.status(500).json({ error: String((e as Error).message ?? e) });
   }
@@ -132,7 +199,7 @@ app.get("/api/channels/:id/messages", async (req, res) => {
 const pendingOAuth = new Map<string, { participantId: string; createdAt: number }>();
 
 // Step 1 of connect: a human hits this (e.g. a "Connect GitHub" button) and is redirected
-// to GitHub to authorize. ?participantId identifies who is connecting.
+// to GitHub to authorize. ?participantId identifies who is connecting (dev path).
 app.get("/auth/github", (req, res) => {
   if (!gh.isConfigured()) return res.status(500).send("GitHub App not configured");
   const participantId = (req.query.participantId as string | undefined) || "";
@@ -140,6 +207,22 @@ app.get("/auth/github", (req, res) => {
   const state = randomBytes(16).toString("hex");
   pendingOAuth.set(state, { participantId, createdAt: Date.now() });
   res.redirect(gh.authorizeUrl(state));
+});
+
+// Auth'd variant for the onboarding flow: the server binds the OAuth `state` to the verified
+// user's participant (not a client-supplied id), then the SPA navigates to the returned URL.
+app.post("/api/github/connect-url", auth.requireAuth, async (req, res) => {
+  try {
+    if (!gh.isConfigured()) return res.status(500).json({ error: "GitHub App not configured" });
+    const u = auth.authedUser(req)!;
+    const p = await db.getParticipantByFirebaseUid(u.uid);
+    if (!p) return res.status(409).json({ error: "finish onboarding first" });
+    const state = randomBytes(16).toString("hex");
+    pendingOAuth.set(state, { participantId: p.id, createdAt: Date.now() });
+    res.json({ url: gh.authorizeUrl(state) });
+  } catch (e) {
+    res.status(500).json({ error: String((e as Error).message ?? e) });
+  }
 });
 
 // Step 2: GitHub redirects back here with ?code & ?state. Exchange + store the identity.
@@ -151,9 +234,10 @@ app.get("/auth/github/callback", async (req, res) => {
     if (!code || !pending) return res.status(400).send("invalid or expired OAuth state");
     pendingOAuth.delete(state);
     const { login } = await gh.exchangeCodeAndStore(pending.participantId, code);
-    res.send(`<h2>✅ GitHub connected as @${login}</h2><p>You can close this tab.</p>`);
+    // Back to the SPA, which reads ?github=connected to advance/refresh the onboarding step.
+    res.redirect(`${FRONTEND_URL}/?github=connected&login=${encodeURIComponent(login)}`);
   } catch (e) {
-    res.status(500).send(`GitHub connect failed: ${String((e as Error).message ?? e)}`);
+    res.redirect(`${FRONTEND_URL}/?github=error&reason=${encodeURIComponent(String((e as Error).message ?? e))}`);
   }
 });
 
@@ -337,11 +421,25 @@ async function deliverAgentMessage(
   return { ok: true, messageId: msg.id };
 }
 
-wss.on("connection", (ws, req) => {
+wss.on("connection", async (ws, req) => {
   const url = new URL(req.url ?? "/", "http://localhost");
-  const participantId = url.searchParams.get("participantId");
+  // Real auth: a Firebase ID token (?token=) is verified and mapped to the user's participant.
+  // Dev/test: when DEV_BYPASS is on, fall back to a trusted ?participantId=.
+  let participantId: string | null = null;
+  const token = url.searchParams.get("token");
+  if (token && auth.firebaseConfigured()) {
+    try {
+      const u = await auth.verifyIdToken(token);
+      participantId = (await db.getParticipantByFirebaseUid(u.uid))?.id ?? null;
+    } catch {
+      /* invalid token — fall through to (possible) dev bypass / reject */
+    }
+  }
+  if (!participantId && auth.DEV_BYPASS) {
+    participantId = url.searchParams.get("participantId");
+  }
   if (!participantId) {
-    ws.close(4001, "participantId required");
+    ws.close(4001, "auth required");
     return;
   }
   addSocket(participantId, ws);

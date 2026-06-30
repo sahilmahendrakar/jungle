@@ -17,7 +17,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Dialog,
   DialogContent,
@@ -74,8 +73,18 @@ function WorkingDots() {
   );
 }
 
-export function App() {
-  const participantId = new URLSearchParams(location.search).get("as");
+export function App({
+  authParticipantId,
+  getWsToken,
+  me: meProp,
+  onSignOut,
+}: {
+  authParticipantId?: string; // from Firebase onboarding; overrides the ?as= dev path
+  getWsToken?: () => Promise<string | null>; // fresh ID token for the WS handshake
+  me?: Participant; // current user (Firebase mode)
+  onSignOut?: () => void; // Firebase sign-out (else clears ?as=)
+} = {}) {
+  const participantId = authParticipantId ?? new URLSearchParams(location.search).get("as");
   const [channels, setChannels] = useState<Channel[]>([]);
   const [people, setPeople] = useState<Participant[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -99,7 +108,7 @@ export function App() {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   selectedRef.current = selected;
 
-  const me = people.find((p) => p.id === participantId);
+  const me = meProp ?? people.find((p) => p.id === participantId);
 
   function reloadChannels(selectId?: string) {
     if (!participantId) return;
@@ -135,8 +144,13 @@ export function App() {
     let stopped = false;
     let ws: WebSocket;
     let retry: ReturnType<typeof setTimeout> | undefined;
-    const connect = () => {
-      ws = new WebSocket(`${WS_BASE}/?participantId=${participantId}`);
+    const connect = async () => {
+      // Firebase mode: authenticate the socket with a fresh ID token. Dev mode: ?participantId=.
+      const qs = getWsToken
+        ? `token=${encodeURIComponent((await getWsToken()) ?? "")}`
+        : `participantId=${encodeURIComponent(participantId)}`;
+      if (stopped) return;
+      ws = new WebSocket(`${WS_BASE}/?${qs}`);
       wsRef.current = ws;
       ws.onopen = () => {
         setNotice("");
@@ -218,7 +232,8 @@ export function App() {
   }
 
   function signOut() {
-    window.location.search = ""; // drop ?as= -> back to the sign-in screen
+    if (onSignOut) onSignOut(); // Firebase sign-out
+    else window.location.search = ""; // dev path: drop ?as= -> back to the sign-in screen
   }
 
   async function openDm(otherId: string) {
@@ -289,7 +304,7 @@ export function App() {
       {/* ---------- Sidebar ---------- */}
       <aside className="flex w-72 shrink-0 flex-col bg-sidebar text-sidebar-foreground">
         {/* Workspace header */}
-        <div className="flex items-center gap-2.5 border-b border-sidebar-border px-4 py-3.5">
+        <div className="flex shrink-0 items-center gap-2.5 border-b border-sidebar-border px-4 py-3.5">
           <div className="flex size-8 items-center justify-center rounded-lg bg-sidebar-primary text-lg shadow-sm">
             🌴
           </div>
@@ -301,7 +316,7 @@ export function App() {
           </div>
         </div>
 
-        <ScrollArea className="flex-1">
+        <div className="min-h-0 flex-1 overflow-y-auto">
           <div className="px-2 py-3">
             {/* Channels */}
             <SectionHeader
@@ -388,11 +403,11 @@ export function App() {
             ))}
             {others.length === 0 && <EmptyHint>No one else yet.</EmptyHint>}
           </div>
-        </ScrollArea>
+        </div>
 
         {/* User footer */}
         {me && (
-          <div className="flex items-center gap-2.5 border-t border-sidebar-border px-3 py-2.5">
+          <div className="flex shrink-0 items-center gap-2.5 border-t border-sidebar-border px-3 py-2.5">
             <PersonAvatar name={me.display_name} handle={me.handle} />
             <div className="min-w-0 flex-1">
               <div className="truncate text-sm font-semibold">
@@ -444,7 +459,7 @@ export function App() {
         </header>
 
         {/* Messages */}
-        <ScrollArea className="flex-1" viewportRef={viewportRef}>
+        <div ref={viewportRef} className="min-h-0 flex-1 overflow-y-auto">
           <div data-testid="message-list" className="flex flex-col gap-5 px-5 py-6">
             {sel && grouped.length === 0 && (
               <div className="flex flex-1 flex-col items-center justify-center gap-2 pt-16 text-center">
@@ -505,7 +520,7 @@ export function App() {
               );
             })}
           </div>
-        </ScrollArea>
+        </div>
 
         {/* Working indicator (conditionally rendered: absent when idle) */}
         {workingHere.length > 0 && (
