@@ -376,11 +376,27 @@ async function runAgentReply(
       }
     }
     const context = await db.getRecentContext(triggerChannelId, 20);
-    const input =
+    let input =
       `You are @${agent.handle} in Jungle. You were addressed in #${triggerChannelName}.\n\n` +
       `Recent conversation:\n${context}\n\n` +
       `Respond by calling send_message — to reply in this channel use to:"#${triggerChannelName}". ` +
       `You may also DM someone with to:"@handle", or post in another channel you belong to.`;
+
+    // Attribute git work to the agent (not the shared app bot). Commits made via git in the
+    // mounted repo carry whatever git identity is configured, so we set it to the agent and
+    // tell it to commit with git — using the GitHub tools only to open the PR.
+    if (agent.repo) {
+      const gitName = agent.display_name || agent.handle;
+      const gitEmail = `${agent.handle}@agents.jungle.dev`;
+      input +=
+        `\n\n— Working on ${agent.repo} —\n` +
+        `The repo is mounted. Make and COMMIT your changes with git (not the GitHub file-write ` +
+        `tools) so the commits are authored as you. Before committing, run once:\n` +
+        `  git config user.name ${JSON.stringify(gitName)}\n` +
+        `  git config user.email ${JSON.stringify(gitEmail)}\n` +
+        `Then push your branch and use the GitHub tools only to open the pull request. ` +
+        `(The PR is opened by the Jungle app; your commits will show "${gitName}" as the author.)`;
+    }
     await ma.runAgentTurn(agent.ma_session_id, input, (toolInput) =>
       deliverAgentMessage(agent, toolInput, replyBudget),
     );

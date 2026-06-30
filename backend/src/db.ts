@@ -256,6 +256,7 @@ export async function getRecentContext(channelId: string, limit = 20): Promise<s
 export interface AgentRow {
   id: string;
   handle: string;
+  display_name: string;
   ma_session_id: string;
   repo: string | null;
   vault_id: string | null;
@@ -268,7 +269,7 @@ export interface AgentRow {
 export async function agentsByIds(ids: string[]): Promise<AgentRow[]> {
   if (!ids.length) return [];
   const { rows } = await pool.query<AgentRow>(
-    `select id, handle, ma_session_id, repo, vault_id, repo_resource_id, mcp_credential_id
+    `select id, handle, display_name, ma_session_id, repo, vault_id, repo_resource_id, mcp_credential_id
      from participants
      where kind = 'agent' and ma_session_id is not null and id = any($1)`,
     [ids],
