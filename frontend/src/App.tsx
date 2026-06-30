@@ -33,6 +33,7 @@ import {
 } from "@/components/ui/tooltip";
 import { avatarClass, initials } from "@/lib/people";
 import { cn } from "@/lib/utils";
+import { RepoCombobox } from "./RepoCombobox";
 import {
   Bot,
   GitBranch,
@@ -697,16 +698,11 @@ export function App({
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="agent-repo">
-                <GitBranch className="size-3.5" /> Repository
+              <Label>
+                <GitBranch className="size-3.5" /> Repository{" "}
+                <span className="font-normal text-muted-foreground">(optional)</span>
               </Label>
-              <Input
-                id="agent-repo"
-                data-testid="agent-repo"
-                value={agRepo}
-                onChange={(e) => setAgRepo(e.target.value)}
-                placeholder="optional · owner/name"
-              />
+              <RepoCombobox value={agRepo} onChange={setAgRepo} />
               {agRepo.trim() && (
                 <p className="text-xs text-muted-foreground">
                   With a repo this takes ~30s (clones it).

@@ -150,6 +150,39 @@ export async function exchangeCodeAndStore(
   return { login: user.login };
 }
 
+export interface RepoOption {
+  full_name: string; // "owner/name"
+  private: boolean;
+  pushed_at: string | null;
+}
+
+// List the repositories this participant can use for an agent — i.e. repos the user can access
+// *through the GitHub App's installations*. These are exactly the repos provisioning can mint an
+// installation token for, so the picker never offers a repo the agent couldn't actually work on.
+export async function listUserRepos(participantId: string): Promise<RepoOption[]> {
+  const token = await getValidToken(participantId); // throws if GitHub isn't connected
+  const insts = await ghJson<{ installations: { id: number }[] }>("/user/installations", token);
+  const repos = new Map<string, RepoOption>();
+  for (const inst of insts.installations ?? []) {
+    for (let page = 1; page <= 5; page++) {
+      const r = await ghJson<{ repositories: { full_name: string; private: boolean; pushed_at: string | null }[] }>(
+        `/user/installations/${inst.id}/repositories?per_page=100&page=${page}`,
+        token,
+      );
+      for (const repo of r.repositories ?? []) {
+        repos.set(repo.full_name, {
+          full_name: repo.full_name,
+          private: repo.private,
+          pushed_at: repo.pushed_at ?? null,
+        });
+      }
+      if (!r.repositories || r.repositories.length < 100) break; // last page
+    }
+  }
+  // Most-recently-pushed first — what people are most likely looking for.
+  return [...repos.values()].sort((a, b) => (b.pushed_at ?? "").localeCompare(a.pushed_at ?? ""));
+}
+
 // Return a valid access token for the participant, refreshing if it's expired/near-expiry.
 export async function getValidToken(participantId: string): Promise<string> {
   const id = await db.getGithubIdentity(participantId);

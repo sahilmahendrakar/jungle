@@ -155,3 +155,20 @@ export function githubConnectUrl(): Promise<{ url: string }> {
     headers: authHeaders(),
   }).then((r) => json<{ url: string }>(r, "failed to start GitHub connect"));
 }
+
+export interface Repo {
+  full_name: string;
+  private: boolean;
+  pushed_at: string | null;
+}
+
+// List the user's GitHub repos for the picker. A 409 (GitHub not connected) is returned as
+// { connected: false } rather than thrown, so the UI can fall back to manual entry.
+export function listGithubRepos(): Promise<{ connected: boolean; repos?: Repo[]; error?: string }> {
+  return fetch(`${BASE}/api/github/repos`, { headers: authHeaders() }).then(async (r) => {
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 409) return { connected: false, error: (j as { error?: string }).error };
+    if (!r.ok) throw new Error((j as { error?: string }).error ?? "failed to list repos");
+    return j as { connected: boolean; repos: Repo[] };
+  });
+}
