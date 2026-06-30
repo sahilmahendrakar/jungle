@@ -29,6 +29,14 @@ app.get("/health", (_req, res) => {
 
 // --- REST: setup + history (used by the test now, the frontend later) ---
 
+app.get("/api/participants", async (_req, res) => {
+  try {
+    res.json(await db.listParticipants());
+  } catch (e) {
+    res.status(500).json({ error: String((e as Error).message ?? e) });
+  }
+});
+
 app.post("/api/participants", async (req, res) => {
   try {
     const { kind, handle, displayName, maSessionId } = req.body ?? {};

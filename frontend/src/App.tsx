@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { listChannels, getMessages, WS_BASE, type Channel, type Message } from "./api";
+import { SignIn } from "./SignIn";
 
 function mergeById(a: Message[], b: Message[]): Message[] {
   const map = new Map<string, Message>();
@@ -74,14 +75,7 @@ export function App() {
     setDraft("");
   }
 
-  if (!participantId) {
-    return (
-      <main style={{ fontFamily: "system-ui, sans-serif", padding: "2rem" }}>
-        <h1>🌴 Jungle</h1>
-        <p>Add <code>?as=&lt;participantId&gt;</code> to the URL to sign in.</p>
-      </main>
-    );
-  }
+  if (!participantId) return <SignIn />;
 
   const sel = channels.find((c) => c.id === selected);
 

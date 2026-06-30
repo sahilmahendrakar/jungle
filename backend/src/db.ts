@@ -108,6 +108,14 @@ export async function resolveMentions(body: string): Promise<{ id: string; handl
   return rows;
 }
 
+// All participants, for the dev sign-in screen (newest last).
+export async function listParticipants(): Promise<Participant[]> {
+  const { rows } = await pool.query<Participant>(
+    `select * from participants order by created_at`,
+  );
+  return rows;
+}
+
 export async function getParticipant(id: string): Promise<Participant | null> {
   const { rows } = await pool.query<Participant>(`select * from participants where id = $1`, [id]);
   return rows[0] ?? null;
