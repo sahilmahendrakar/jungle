@@ -23,9 +23,13 @@
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
     "firebase": "^12.15.0",
+    "highlight.js": "^11.11.1",
     "lucide-react": "^1.22.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
+    "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
+    "remark-gfm": "^4.0.1",
     "tailwind-merge": "^3.6.0"
   },
   "devDependencies": {

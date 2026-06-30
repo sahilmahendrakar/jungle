@@ -34,6 +34,7 @@ import {
 import { avatarClass, initials } from "@/lib/people";
 import { cn } from "@/lib/utils";
 import { RepoCombobox } from "./RepoCombobox";
+import { Markdown } from "./Markdown";
 import {
   Bot,
   GitBranch,
@@ -501,19 +502,12 @@ export function App({
                         {fmtTime(lead.created_at)}
                       </span>
                     </div>
-                    <div
-                      data-testid="message"
-                      className="whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground/90"
-                    >
-                      {lead.body}
+                    <div data-testid="message" className="break-words">
+                      <Markdown>{lead.body}</Markdown>
                     </div>
                     {rest.map((m) => (
-                      <div
-                        key={m.id}
-                        data-testid="message"
-                        className="group whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground/90"
-                      >
-                        {m.body}
+                      <div key={m.id} data-testid="message" className="mt-1 break-words">
+                        <Markdown>{m.body}</Markdown>
                       </div>
                     ))}
                   </div>
