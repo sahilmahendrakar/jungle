@@ -90,6 +90,16 @@ export async function channelMemberIds(channelId: string): Promise<string[]> {
   return rows.map((r) => r.participant_id);
 }
 
+// Add a participant to a channel (idempotent). Used to auto-add an @mentioned agent so it
+// can reply in the channel it was summoned into.
+export async function addChannelMember(channelId: string, participantId: string): Promise<void> {
+  await pool.query(
+    `insert into channel_members (channel_id, participant_id) values ($1, $2)
+     on conflict do nothing`,
+    [channelId, participantId],
+  );
+}
+
 export async function isMember(channelId: string, participantId: string): Promise<boolean> {
   const { rows } = await pool.query(
     `select 1 from channel_members where channel_id = $1 and participant_id = $2`,
@@ -99,7 +109,8 @@ export async function isMember(channelId: string, participantId: string): Promis
 }
 
 export async function resolveMentions(body: string): Promise<{ id: string; handle: string }[]> {
-  const handles = [...new Set([...body.matchAll(/@([a-zA-Z0-9_]+)/g)].map((m) => m[1]))];
+  // Handles may contain hyphens (e.g. "sahils-agent"), so include "-" in the mention charset.
+  const handles = [...new Set([...body.matchAll(/@([a-zA-Z0-9_-]+)/g)].map((m) => m[1]))];
   if (!handles.length) return [];
   const { rows } = await pool.query<{ id: string; handle: string }>(
     `select id, handle from participants where handle = any($1)`,
@@ -244,17 +255,26 @@ export async function agentsByIds(ids: string[]): Promise<AgentRow[]> {
 
 export async function listChannels(
   participantId?: string,
-): Promise<{ id: string; name: string; kind: string }[]> {
+): Promise<{ id: string; name: string; kind: string; dm_with: string | null }[]> {
   if (participantId) {
+    // For DMs, also surface the other member's handle so the UI can label it "@them".
     const { rows } = await pool.query(
-      `select c.id, c.name, c.kind from channels c
+      `select c.id, c.name, c.kind,
+              case when c.kind = 'dm' then (
+                select p.handle from channel_members m
+                join participants p on p.id = m.participant_id
+                where m.channel_id = c.id and m.participant_id <> $1 limit 1
+              ) end as dm_with
+       from channels c
        join channel_members cm on cm.channel_id = c.id
        where cm.participant_id = $1 order by c.created_at`,
       [participantId],
     );
     return rows;
   }
-  const { rows } = await pool.query(`select id, name, kind from channels order by created_at`);
+  const { rows } = await pool.query(
+    `select id, name, kind, null as dm_with from channels order by created_at`,
+  );
   return rows;
 }
 

@@ -237,7 +237,12 @@ async function triggerMentionedAgents(channelId: string, message: db.PersistedMe
     }
     candidateIds = candidateIds.filter((id) => id !== message.sender_id); // never self-trigger
     const agents = await db.agentsByIds(candidateIds);
-    for (const agent of agents) void runAgentReply(channelId, channel.name, agent, budget - 1);
+    for (const agent of agents) {
+      // Summon the @mentioned agent into the channel so its reply (to:"#channel") succeeds
+      // — otherwise mentioning an agent that isn't a member triggers it but it can't respond.
+      await db.addChannelMember(channelId, agent.id);
+      void runAgentReply(channelId, channel.name, agent, budget - 1);
+    }
   } catch (e) {
     console.error("triggerMentionedAgents:", e);
   }
