@@ -2,6 +2,8 @@
 
 Slack-style app for chatting with cloud agents that do real work.
 
+> 🌴 Welcome to the jungle! This line was added in a test PR.
+
 ## Prerequisites
 
 - Node.js 18+
