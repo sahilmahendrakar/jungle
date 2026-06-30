@@ -7,3 +7,5 @@ build/
 *.log
 .DS_Store
 /tmp-shots/
+*.pem
+*.key

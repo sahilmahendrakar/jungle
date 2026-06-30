@@ -26,7 +26,14 @@ export function isConfigured(): boolean {
 
 let cachedPem: string | null = null;
 function appPrivateKey(): string {
-  if (cachedPem == null) cachedPem = readFileSync(APP_PEM_PATH, "utf8");
+  if (cachedPem == null) {
+    // Prefer the inline PEM from .env (GITHUB_APP_PRIVATE_KEY); fall back to a file path.
+    const inline = process.env.GITHUB_APP_PRIVATE_KEY;
+    cachedPem =
+      inline && inline.includes("PRIVATE KEY")
+        ? inline.replace(/\\n/g, "\n")
+        : readFileSync(APP_PEM_PATH, "utf8");
+  }
   return cachedPem;
 }
 
