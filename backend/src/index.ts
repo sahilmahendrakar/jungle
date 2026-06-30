@@ -2,8 +2,10 @@ import "./env";
 import express from "express";
 import { createServer } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
+import { randomBytes } from "node:crypto";
 import * as db from "./db";
 import * as ma from "./ma";
+import * as gh from "./github";
 
 const app = express();
 app.use(express.json());
@@ -49,12 +51,33 @@ app.post("/api/channels", async (req, res) => {
   }
 });
 
-// Create an agent = one MA session + a participant of kind 'agent'.
+// Create an agent = one MA session + a participant of kind 'agent'. If `repo` ("owner/name")
+// is given, provision a GitHub-capable agent: mint a repo-scoped installation token, build a
+// vault with the GitHub MCP credential, and create the session with the repo mounted.
 app.post("/api/agents", async (req, res) => {
   try {
-    const { handle, displayName } = req.body ?? {};
+    const { handle, displayName, repo } = req.body ?? {};
     if (!handle || !displayName) {
       return res.status(400).json({ error: "handle, displayName required" });
+    }
+    if (repo) {
+      if (!gh.appAuthConfigured()) {
+        return res.status(500).json({ error: "GitHub App private key not configured" });
+      }
+      const token = await gh.installationTokenForRepo(repo);
+      const { vaultId, credentialId } = await ma.createMcpVault(
+        `jungle @${handle}`, gh.GITHUB_MCP_URL, token,
+      );
+      const { sessionId, repoResourceId } = await ma.createRepoAgentSession(
+        `jungle agent @${handle}`,
+        { repoUrl: `https://github.com/${repo}`, repoToken: token, vaultId },
+      );
+      return res.status(201).json(
+        await db.createParticipant({
+          kind: "agent", handle, displayName, maSessionId: sessionId,
+          repo, vaultId, repoResourceId, mcpCredentialId: credentialId,
+        }),
+      );
     }
     const maSessionId = await ma.createAgentSession(`jungle agent @${handle}`);
     res.status(201).json(await db.createParticipant({ kind: "agent", handle, displayName, maSessionId }));
@@ -76,6 +99,82 @@ app.get("/api/channels/:id/messages", async (req, res) => {
   try {
     const afterSeq = Number(req.query.afterSeq ?? 0);
     res.json(await db.getMessages(req.params.id, afterSeq));
+  } catch (e) {
+    res.status(500).json({ error: String((e as Error).message ?? e) });
+  }
+});
+
+// --- GitHub: connect a participant's account (user-OAuth) + open PRs (Step 7) ---
+
+// Pending OAuth round-trips: state -> participantId. In-memory is fine for a single backend.
+const pendingOAuth = new Map<string, { participantId: string; createdAt: number }>();
+
+// Step 1 of connect: a human hits this (e.g. a "Connect GitHub" button) and is redirected
+// to GitHub to authorize. ?participantId identifies who is connecting.
+app.get("/auth/github", (req, res) => {
+  if (!gh.isConfigured()) return res.status(500).send("GitHub App not configured");
+  const participantId = (req.query.participantId as string | undefined) || "";
+  if (!participantId) return res.status(400).send("participantId required");
+  const state = randomBytes(16).toString("hex");
+  pendingOAuth.set(state, { participantId, createdAt: Date.now() });
+  res.redirect(gh.authorizeUrl(state));
+});
+
+// Step 2: GitHub redirects back here with ?code & ?state. Exchange + store the identity.
+app.get("/auth/github/callback", async (req, res) => {
+  try {
+    const code = (req.query.code as string | undefined) || "";
+    const state = (req.query.state as string | undefined) || "";
+    const pending = pendingOAuth.get(state);
+    if (!code || !pending) return res.status(400).send("invalid or expired OAuth state");
+    pendingOAuth.delete(state);
+    const { login } = await gh.exchangeCodeAndStore(pending.participantId, code);
+    res.send(`<h2>✅ GitHub connected as @${login}</h2><p>You can close this tab.</p>`);
+  } catch (e) {
+    res.status(500).send(`GitHub connect failed: ${String((e as Error).message ?? e)}`);
+  }
+});
+
+// Connection status for a participant (used by the UI to show connected/not).
+app.get("/api/participants/:id/github", async (req, res) => {
+  try {
+    const id = await db.getGithubIdentity(req.params.id);
+    res.json(id ? { connected: true, login: id.github_login } : { connected: false });
+  } catch (e) {
+    res.status(500).json({ error: String((e as Error).message ?? e) });
+  }
+});
+
+// Open a PR using a participant's connected token. Used by tests now and reused by the
+// agent's open_pr tool (§7c).
+app.post("/api/github/open-pr", async (req, res) => {
+  try {
+    const { participantId, repo, title, body, files, headBranch, baseBranch } = req.body ?? {};
+    if (!participantId || !repo || !title || !files) {
+      return res.status(400).json({ error: "participantId, repo, title, files required" });
+    }
+    res.status(201).json(
+      await gh.openPullRequest({ participantId, repo, title, body, files, headBranch, baseBranch }),
+    );
+  } catch (e) {
+    res.status(500).json({ error: String((e as Error).message ?? e) });
+  }
+});
+
+// Open a PR as the GitHub App bot (installation token). Verifies the bot-identity path
+// independent of the agent loop. The agent path (vault + GitHub MCP) builds on this.
+app.post("/api/github/bot-open-pr", async (req, res) => {
+  try {
+    if (!gh.appAuthConfigured()) {
+      return res.status(500).json({ error: "GitHub App private key not configured" });
+    }
+    const { repo, title, body, files, headBranch, baseBranch } = req.body ?? {};
+    if (!repo || !title || !files) {
+      return res.status(400).json({ error: "repo, title, files required" });
+    }
+    res.status(201).json(
+      await gh.openPrAsBot({ repo, title, body, files, headBranch, baseBranch }),
+    );
   } catch (e) {
     res.status(500).json({ error: String((e as Error).message ?? e) });
   }
@@ -139,10 +238,26 @@ async function triggerMentionedAgents(channelId: string, message: db.PersistedMe
 async function runAgentReply(
   triggerChannelId: string,
   triggerChannelName: string,
-  agent: { id: string; handle: string; ma_session_id: string },
+  agent: db.AgentRow,
   replyBudget: number,
 ) {
   try {
+    // GitHub-capable agent: refresh its (≤1h) installation token before the turn so git +
+    // the GitHub MCP server stay authenticated. Best-effort — a still-valid token survives.
+    if (agent.repo && agent.vault_id && agent.mcp_credential_id) {
+      try {
+        const token = await gh.installationTokenForRepo(agent.repo);
+        await ma.rotateRepoAuth({
+          sessionId: agent.ma_session_id,
+          repoResourceId: agent.repo_resource_id ?? "",
+          vaultId: agent.vault_id,
+          credentialId: agent.mcp_credential_id,
+          token,
+        });
+      } catch (e) {
+        console.error("rotateRepoAuth:", e);
+      }
+    }
     const context = await db.getRecentContext(triggerChannelId, 20);
     const input =
       `You are @${agent.handle} in Jungle. You were addressed in #${triggerChannelName}.\n\n` +

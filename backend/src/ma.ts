@@ -7,7 +7,9 @@ import { dirname, join } from "node:path";
 // IDs of the shared agent config + cloud environment, created by scripts/smoke.mjs.
 const here = dirname(fileURLToPath(import.meta.url)); // backend/src
 const idsPath = join(here, "../../.jungle-ids.json"); // jungle/.jungle-ids.json
-const ids: { agentId: string; environmentId: string } = JSON.parse(readFileSync(idsPath, "utf8"));
+const ids: { agentId: string; githubAgentId?: string; environmentId: string } = JSON.parse(
+  readFileSync(idsPath, "utf8"),
+);
 
 const client = new Anthropic(); // ANTHROPIC_API_KEY from env (loaded by ./env)
 
@@ -19,6 +21,64 @@ export async function createAgentSession(title: string): Promise<string> {
     title,
   });
   return session.id;
+}
+
+// --- GitHub-capable agents: vault + repo-mounted session + token rotation (Step 7) ---
+
+// Create a vault holding one static_bearer MCP credential. Returns the ids we persist so we
+// can rotate the (short-lived) token later. Generic: caller supplies the MCP url + token.
+export async function createMcpVault(
+  label: string,
+  mcpServerUrl: string,
+  token: string,
+): Promise<{ vaultId: string; credentialId: string }> {
+  const vault = await client.beta.vaults.create({ display_name: label });
+  const cred = await client.beta.vaults.credentials.create(vault.id, {
+    display_name: `mcp ${mcpServerUrl}`,
+    auth: { type: "static_bearer", mcp_server_url: mcpServerUrl, token },
+  });
+  return { vaultId: vault.id, credentialId: cred.id };
+}
+
+// Create a session on the GitHub-capable agent config, with the repo mounted and the vault
+// attached. Returns the session id + the github_repository resource id (for token rotation).
+export async function createRepoAgentSession(
+  title: string,
+  opts: { repoUrl: string; repoToken: string; vaultId: string },
+): Promise<{ sessionId: string; repoResourceId: string }> {
+  if (!ids.githubAgentId) throw new Error("githubAgentId not set — run scripts/setup-github-agent.mjs");
+  const session = await client.beta.sessions.create({
+    agent: ids.githubAgentId,
+    environment_id: ids.environmentId,
+    title,
+    vault_ids: [opts.vaultId],
+    resources: [
+      { type: "github_repository", url: opts.repoUrl, authorization_token: opts.repoToken },
+    ],
+  });
+  const repoRes = (session.resources ?? []).find((r: any) => r.type === "github_repository");
+  return { sessionId: session.id, repoResourceId: (repoRes as any)?.id ?? "" };
+}
+
+// Refresh the credentials a long-lived session uses, before a turn. Installation tokens last
+// ~1h; this swaps in the current one for both git (repo resource) and the MCP vault credential.
+export async function rotateRepoAuth(opts: {
+  sessionId: string;
+  repoResourceId: string;
+  vaultId: string;
+  credentialId: string;
+  token: string;
+}): Promise<void> {
+  if (opts.repoResourceId) {
+    await client.beta.sessions.resources.update(opts.repoResourceId, {
+      session_id: opts.sessionId,
+      authorization_token: opts.token,
+    });
+  }
+  await client.beta.vaults.credentials.update(opts.credentialId, {
+    vault_id: opts.vaultId,
+    auth: { type: "static_bearer", token: opts.token },
+  });
 }
 
 export type SendMessageInput = { to?: string; body?: string };

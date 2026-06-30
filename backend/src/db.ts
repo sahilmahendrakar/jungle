@@ -12,6 +12,10 @@ export interface Participant {
   handle: string;
   display_name: string;
   ma_session_id: string | null;
+  repo: string | null;
+  vault_id: string | null;
+  repo_resource_id: string | null;
+  mcp_credential_id: string | null;
 }
 
 export interface PersistedMessage {
@@ -31,11 +35,19 @@ export async function createParticipant(p: {
   handle: string;
   displayName: string;
   maSessionId?: string | null;
+  repo?: string | null;
+  vaultId?: string | null;
+  repoResourceId?: string | null;
+  mcpCredentialId?: string | null;
 }): Promise<Participant> {
   const { rows } = await pool.query<Participant>(
-    `insert into participants (kind, handle, display_name, ma_session_id)
-     values ($1, $2, $3, $4) returning *`,
-    [p.kind, p.handle, p.displayName, p.maSessionId ?? null],
+    `insert into participants
+       (kind, handle, display_name, ma_session_id, repo, vault_id, repo_resource_id, mcp_credential_id)
+     values ($1, $2, $3, $4, $5, $6, $7, $8) returning *`,
+    [
+      p.kind, p.handle, p.displayName, p.maSessionId ?? null,
+      p.repo ?? null, p.vaultId ?? null, p.repoResourceId ?? null, p.mcpCredentialId ?? null,
+    ],
   );
   return rows[0];
 }
@@ -199,13 +211,23 @@ export async function getRecentContext(channelId: string, limit = 20): Promise<s
     .join("\n");
 }
 
-// Of the given participant ids, the ones that are agents (with their MA session id).
-export async function agentsByIds(
-  ids: string[],
-): Promise<{ id: string; handle: string; ma_session_id: string }[]> {
+export interface AgentRow {
+  id: string;
+  handle: string;
+  ma_session_id: string;
+  repo: string | null;
+  vault_id: string | null;
+  repo_resource_id: string | null;
+  mcp_credential_id: string | null;
+}
+
+// Of the given participant ids, the ones that are agents (with their MA session id +
+// GitHub provisioning, if any).
+export async function agentsByIds(ids: string[]): Promise<AgentRow[]> {
   if (!ids.length) return [];
-  const { rows } = await pool.query<{ id: string; handle: string; ma_session_id: string }>(
-    `select id, handle, ma_session_id from participants
+  const { rows } = await pool.query<AgentRow>(
+    `select id, handle, ma_session_id, repo, vault_id, repo_resource_id, mcp_credential_id
+     from participants
      where kind = 'agent' and ma_session_id is not null and id = any($1)`,
     [ids],
   );
@@ -244,6 +266,82 @@ export async function getChannelByNameForMember(
 export async function getParticipantByHandle(handle: string): Promise<Participant | null> {
   const { rows } = await pool.query<Participant>(`select * from participants where handle = $1`, [handle]);
   return rows[0] ?? null;
+}
+
+// --- GitHub identities (Step 7) ---
+
+export interface GithubIdentity {
+  participant_id: string;
+  github_login: string;
+  github_user_id: string; // bigint serialized as string
+  access_token: string;
+  refresh_token: string | null;
+  access_expires_at: string | null;
+  refresh_expires_at: string | null;
+  scopes: string | null;
+}
+
+// Store (or replace) the GitHub account connected to a participant.
+export async function upsertGithubIdentity(i: {
+  participantId: string;
+  githubLogin: string;
+  githubUserId: number;
+  accessToken: string;
+  refreshToken: string | null;
+  accessExpiresAt: Date | null;
+  refreshExpiresAt: Date | null;
+  scopes: string | null;
+}): Promise<void> {
+  await pool.query(
+    `insert into github_identities
+       (participant_id, github_login, github_user_id, access_token, refresh_token,
+        access_expires_at, refresh_expires_at, scopes, updated_at)
+     values ($1,$2,$3,$4,$5,$6,$7,$8, now())
+     on conflict (participant_id) do update set
+       github_login = excluded.github_login,
+       github_user_id = excluded.github_user_id,
+       access_token = excluded.access_token,
+       refresh_token = excluded.refresh_token,
+       access_expires_at = excluded.access_expires_at,
+       refresh_expires_at = excluded.refresh_expires_at,
+       scopes = excluded.scopes,
+       updated_at = now()`,
+    [
+      i.participantId, i.githubLogin, i.githubUserId, i.accessToken, i.refreshToken,
+      i.accessExpiresAt, i.refreshExpiresAt, i.scopes,
+    ],
+  );
+}
+
+export async function getGithubIdentity(participantId: string): Promise<GithubIdentity | null> {
+  const { rows } = await pool.query<GithubIdentity>(
+    `select participant_id, github_login, github_user_id::text as github_user_id,
+            access_token, refresh_token, access_expires_at, refresh_expires_at, scopes
+     from github_identities where participant_id = $1`,
+    [participantId],
+  );
+  return rows[0] ?? null;
+}
+
+// Persist refreshed tokens (after a refresh_token grant).
+export async function updateGithubTokens(i: {
+  participantId: string;
+  accessToken: string;
+  refreshToken: string | null;
+  accessExpiresAt: Date | null;
+  refreshExpiresAt: Date | null;
+}): Promise<void> {
+  await pool.query(
+    `update github_identities set
+       access_token = $2, refresh_token = $3,
+       access_expires_at = $4, refresh_expires_at = $5, updated_at = now()
+     where participant_id = $1`,
+    [i.participantId, i.accessToken, i.refreshToken, i.accessExpiresAt, i.refreshExpiresAt],
+  );
+}
+
+export async function deleteGithubIdentity(participantId: string): Promise<void> {
+  await pool.query(`delete from github_identities where participant_id = $1`, [participantId]);
 }
 
 // Find the 1:1 DM channel between two participants, creating it if needed.

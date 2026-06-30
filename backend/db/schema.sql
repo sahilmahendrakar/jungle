@@ -12,6 +12,14 @@ create table if not exists participants (
   created_at    timestamptz not null default now()
 );
 
+-- GitHub-capable agents are provisioned at creation with a mounted repo + a vault holding
+-- the GitHub MCP credential. These columns let us rotate the (1h) installation token before
+-- each turn. Null for humans and non-GitHub agents.
+alter table participants add column if not exists repo               text;
+alter table participants add column if not exists vault_id           text;
+alter table participants add column if not exists repo_resource_id   text;
+alter table participants add column if not exists mcp_credential_id  text;
+
 create table if not exists channels (
   id          uuid primary key default gen_random_uuid(),
   name        text not null,
@@ -44,4 +52,21 @@ create table if not exists mentions (
   message_id     uuid not null references messages(id) on delete cascade,
   participant_id uuid not null references participants(id) on delete cascade,
   primary key (message_id, participant_id)
+);
+
+-- A participant's connected GitHub account (via our GitHub App user-OAuth flow).
+-- One identity per participant. Tokens expire (8h access, ~6mo refresh) — we store the
+-- refresh token and renew on demand. MVP: stored in plaintext on the box; encrypt at rest
+-- before any real multi-tenant deployment.
+create table if not exists github_identities (
+  participant_id      uuid primary key references participants(id) on delete cascade,
+  github_login        text not null,
+  github_user_id      bigint not null,
+  access_token        text not null,
+  refresh_token       text,
+  access_expires_at   timestamptz,                      -- when access_token expires
+  refresh_expires_at  timestamptz,                      -- when refresh_token expires
+  scopes              text,                             -- space-delimited (informational)
+  created_at          timestamptz not null default now(),
+  updated_at          timestamptz not null default now()
 );
