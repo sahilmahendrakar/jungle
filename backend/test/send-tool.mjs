@@ -3,7 +3,7 @@
 // (3) DM a participant (auto-creating the DM channel) — all in one turn. Exit 0 = PASS.
 // Self-cleaning. Requires the agent config to have the send_message tool (scripts/update-agent.mjs).
 //
-// Run: set -a; . ~/.config/jungle/.env; set +a; node backend/test/send-tool.mjs
+// Run: set -a; . .env; set +a; node backend/test/send-tool.mjs
 import { WebSocket } from "ws";
 import pg from "pg";
 import Anthropic from "@anthropic-ai/sdk";

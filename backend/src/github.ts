@@ -3,7 +3,7 @@ import { createSign } from "node:crypto";
 import { readFileSync } from "node:fs";
 import * as db from "./db";
 
-// Our GitHub App's user-OAuth credentials (from ~/.config/jungle/github-app.env).
+// GitHub App user-OAuth credentials (GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET in .env).
 const CLIENT_ID = process.env.GITHUB_CLIENT_ID ?? "";
 const CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET ?? "";
 // Must exactly match the Callback URL registered on the GitHub App.

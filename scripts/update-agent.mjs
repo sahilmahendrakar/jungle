@@ -1,7 +1,7 @@
 // Update the shared Jungle agent config: tool-only communication via send_message.
 // New sessions (created by /api/agents) pick up the new version automatically.
 //
-// Run: set -a; . ~/.config/jungle/.env; set +a; node scripts/update-agent.mjs
+// Run: set -a; . .env; set +a; node scripts/update-agent.mjs
 import Anthropic from "@anthropic-ai/sdk";
 import { readFileSync } from "node:fs";
 

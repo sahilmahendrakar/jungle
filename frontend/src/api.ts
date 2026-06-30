@@ -27,7 +27,11 @@ export interface Participant {
 }
 
 export function listParticipants(): Promise<Participant[]> {
-  return fetch(`${BASE}/api/participants`).then((r) => r.json());
+  return fetch(`${BASE}/api/participants`).then(async (r) => {
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error ?? "failed to load participants");
+    return j;
+  });
 }
 
 // Create a human participant, or (kind "agent", optional repo) a cloud agent.

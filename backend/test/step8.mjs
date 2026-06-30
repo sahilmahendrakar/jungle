@@ -4,7 +4,7 @@
 //      agent's reply still persists and is retrievable from history (laptop -> phone later).
 // Exit 0 = PASS. Self-cleaning.
 //
-// Run: set -a; . ~/.config/jungle/.env; set +a; node backend/test/step8.mjs
+// Run: set -a; . .env; set +a; node backend/test/step8.mjs
 import { WebSocket } from "ws";
 import pg from "pg";
 import Anthropic from "@anthropic-ai/sdk";

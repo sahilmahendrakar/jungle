@@ -2,7 +2,7 @@
 // (repo mounted + vault + GitHub MCP), @mention it in a channel over WebSocket asking for a
 // PR, and confirm (1) the agent's reply fans back to the human, and (2) a real PR was opened.
 // Prints PR_NUMBER=<n> for the wrapper to clean up on GitHub. Cleans up MA session+vault + DB.
-// Run (backend must be up): set -a; . ~/.config/jungle/.env; set +a; node backend/test/step7-agent-e2e.mjs
+// Run (backend must be up): set -a; . .env; set +a; node backend/test/step7-agent-e2e.mjs
 import { WebSocket } from "ws";
 import pg from "pg";
 import Anthropic from "@anthropic-ai/sdk";

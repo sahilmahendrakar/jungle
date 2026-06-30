@@ -2,7 +2,7 @@
 // and its reply is posted back into the channel (fanned out + persisted). Exit 0 = PASS.
 // Self-cleaning: deletes its DB rows and the MA session.
 //
-// Run:  set -a; . ~/.config/jungle/.env; set +a; node backend/test/step4.mjs
+// Run:  set -a; . .env; set +a; node backend/test/step4.mjs
 import { WebSocket } from "ws";
 import pg from "pg";
 import Anthropic from "@anthropic-ai/sdk";

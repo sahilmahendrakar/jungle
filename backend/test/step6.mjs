@@ -3,7 +3,7 @@
 // agent's reply re-entered the routing rule. Budgets must decrement 3 (human) -> 2
 // (Alpha) -> 1 (Bravo), and the cascade must not run away. Exit 0 = PASS. Self-cleaning.
 //
-// Run: set -a; . ~/.config/jungle/.env; set +a; node backend/test/step6.mjs
+// Run: set -a; . .env; set +a; node backend/test/step6.mjs
 import { WebSocket } from "ws";
 import pg from "pg";
 import Anthropic from "@anthropic-ai/sdk";

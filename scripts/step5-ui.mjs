@@ -4,7 +4,7 @@
 // and saves a screenshot. Self-cleaning. Exit 0 = PASS.
 //
 // Needs backend (:3001) + frontend dev (:5173) running.
-// Run: set -a; . ~/.config/jungle/.env; set +a; node scripts/step5-ui.mjs
+// Run: set -a; . .env; set +a; node scripts/step5-ui.mjs
 import { chromium } from "playwright";
 import pg from "pg";
 import Anthropic from "@anthropic-ai/sdk";

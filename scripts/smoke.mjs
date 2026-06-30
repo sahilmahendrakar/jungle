@@ -2,7 +2,7 @@
 // Creates (once, cached) a cloud environment + a shared agent config, then opens a
 // session, sends one message, and streams the reply. PASS = non-empty streamed reply.
 //
-// Run:  set -a; . ~/.config/jungle/.env; set +a; node scripts/smoke.mjs
+// Run:  set -a; . .env; set +a; node scripts/smoke.mjs
 import Anthropic from "@anthropic-ai/sdk";
 import { readFileSync, writeFileSync } from "node:fs";
 

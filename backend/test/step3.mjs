@@ -2,7 +2,7 @@
 // Two clients in one channel; A posts; assert B receives it live AND it persisted
 // in Postgres with a seq. Self-cleaning (deletes its test rows). Exit 0 = PASS.
 //
-// Run:  set -a; . ~/.config/jungle/.env; set +a; node backend/test/step3.mjs
+// Run:  set -a; . .env; set +a; node backend/test/step3.mjs
 import { WebSocket } from "ws";
 import pg from "pg";
 

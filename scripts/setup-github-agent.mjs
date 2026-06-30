@@ -2,7 +2,7 @@
 // GitHub MCP server (PRs/commits/issues). Sessions using it mount a github_repository and
 // attach a vault with the GitHub credential. ID stored as githubAgentId in .jungle-ids.json.
 //
-// Run: set -a; . ~/.config/jungle/.env; set +a; node scripts/setup-github-agent.mjs
+// Run: set -a; . .env; set +a; node scripts/setup-github-agent.mjs
 import Anthropic from "@anthropic-ai/sdk";
 import { readFileSync, writeFileSync } from "node:fs";
 

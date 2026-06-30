@@ -15,7 +15,13 @@ export function SignIn() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  const refresh = () => listParticipants().then(setPeople).catch(() => {});
+  const refresh = () =>
+    listParticipants()
+      .then((rows) => {
+        setPeople(rows);
+        setError("");
+      })
+      .catch((e) => setError(String((e as Error).message ?? e)));
   useEffect(() => { refresh(); }, []);
 
   async function create() {
@@ -57,6 +63,8 @@ export function SignIn() {
       <div style={card}>
         <h1 style={{ marginTop: 0 }}>🌴 Jungle</h1>
         <p style={{ color: "#666", marginTop: -8 }}>Dev sign-in — pick who you are.</p>
+
+        {error && <div data-testid="signin-error" style={{ color: "#c00", marginBottom: 12 }}>{error}</div>}
 
         <div style={{ marginBottom: 16 }}>
           {people.length === 0 && <div style={{ color: "#999" }}>No participants yet — create one below.</div>}
