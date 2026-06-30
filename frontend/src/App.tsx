@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  listChannels, getMessages, listParticipants, createChannel, WS_BASE,
+  listChannels, getMessages, listParticipants, createChannel, createDm, createParticipant, WS_BASE,
   type Channel, type Message, type Participant,
 } from "./api";
 import { SignIn } from "./SignIn";
@@ -29,6 +29,12 @@ export function App() {
   const [newName, setNewName] = useState("");
   const [newMembers, setNewMembers] = useState<string[]>([]);
   const [creating, setCreating] = useState(false);
+  // Add-agent form
+  const [showAddAgent, setShowAddAgent] = useState(false);
+  const [agHandle, setAgHandle] = useState("");
+  const [agName, setAgName] = useState("");
+  const [agRepo, setAgRepo] = useState("");
+  const [addingAgent, setAddingAgent] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const selectedRef = useRef<string | null>(null);
   selectedRef.current = selected;
@@ -132,10 +138,46 @@ export function App() {
     }
   }
 
+  function signOut() {
+    window.location.search = ""; // drop ?as= -> back to the sign-in screen
+  }
+
+  async function openDm(otherId: string) {
+    if (!participantId) return;
+    try {
+      const { id } = await createDm(participantId, otherId);
+      reloadChannels(id);
+    } catch (e) {
+      setNotice(String((e as Error).message ?? e));
+    }
+  }
+
+  async function submitAddAgent() {
+    if (!agHandle.trim() || !agName.trim()) { setNotice("Agent handle and name are required."); return; }
+    setAddingAgent(true);
+    try {
+      await createParticipant({
+        kind: "agent", handle: agHandle.trim(), displayName: agName.trim(),
+        repo: agRepo.trim() || undefined,
+      });
+      setShowAddAgent(false);
+      setAgHandle(""); setAgName(""); setAgRepo("");
+      listParticipants().then(setPeople).catch(() => {});
+    } catch (e) {
+      setNotice(String((e as Error).message ?? e));
+    } finally {
+      setAddingAgent(false);
+    }
+  }
+
   if (!participantId) return <SignIn />;
 
   const sel = channels.find((c) => c.id === selected);
   const others = people.filter((p) => p.id !== participantId);
+  const rooms = channels.filter((c) => c.kind !== "dm");
+  const dms = channels.filter((c) => c.kind === "dm");
+  const label = (c: Channel) => (c.kind === "dm" ? `@${c.dm_with ?? "dm"}` : `# ${c.name}`);
+  const dmChannelWith = (handle: string) => dms.find((c) => c.dm_with === handle);
 
   return (
     <div style={{ display: "flex", height: "100vh", fontFamily: "system-ui, sans-serif" }}>
@@ -143,15 +185,24 @@ export function App() {
       <aside style={{ width: 240, background: "#1f2430", color: "#cdd3df", padding: "12px 8px", overflowY: "auto" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 8px 12px" }}>
           <span style={{ fontWeight: 700, fontSize: 18 }}>🌴 Jungle</span>
-          {me && <span style={{ fontSize: 12, color: "#8b93a7" }}>@{me.handle}</span>}
+          {me && (
+            <span style={{ fontSize: 12, color: "#8b93a7" }}>
+              @{me.handle}{" "}
+              <button
+                data-testid="switch-user"
+                onClick={signOut}
+                title="Switch user"
+                style={{ marginLeft: 4, cursor: "pointer", background: "transparent", border: "none", color: "#6ea8fe", font: "inherit", padding: 0 }}
+              >
+                switch
+              </button>
+            </span>
+          )}
         </div>
 
-        {channels.length === 0 && (
-          <div style={{ color: "#8b93a7", fontSize: 13, padding: "4px 8px 10px" }}>
-            No channels yet — create one below.
-          </div>
-        )}
-        {channels.map((c) => (
+        {/* Channels */}
+        <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5, color: "#6b7280", padding: "8px 8px 4px" }}>Channels</div>
+        {rooms.map((c) => (
           <button
             key={c.id}
             data-testid="channel-item"
@@ -159,25 +210,103 @@ export function App() {
             style={{
               display: "block", width: "100%", textAlign: "left", border: "none", cursor: "pointer",
               padding: "6px 8px", borderRadius: 6, marginBottom: 2,
-              background: c.id === selected ? "#3a4150" : "transparent",
-              color: "inherit", font: "inherit",
+              background: c.id === selected ? "#3a4150" : "transparent", color: "inherit", font: "inherit",
             }}
           >
-            {c.kind === "dm" ? "@ " : "# "}{c.name}
+            {label(c)}
           </button>
         ))}
-
         <button
           data-testid="new-channel-toggle"
           onClick={() => setShowNew((v) => !v)}
           style={{
-            display: "block", width: "100%", textAlign: "left", cursor: "pointer", marginTop: 8,
+            display: "block", width: "100%", textAlign: "left", cursor: "pointer", marginTop: 4,
             padding: "6px 8px", borderRadius: 6, border: "1px dashed #3a4150", background: "transparent",
             color: "#9aa3b5", font: "inherit",
           }}
         >
           ＋ New channel
         </button>
+
+        {/* Direct messages */}
+        {dms.length > 0 && (
+          <>
+            <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5, color: "#6b7280", padding: "12px 8px 4px" }}>Direct messages</div>
+            {dms.map((c) => (
+              <button
+                key={c.id}
+                data-testid="channel-item"
+                onClick={() => setSelected(c.id)}
+                style={{
+                  display: "block", width: "100%", textAlign: "left", border: "none", cursor: "pointer",
+                  padding: "6px 8px", borderRadius: 6, marginBottom: 2,
+                  background: c.id === selected ? "#3a4150" : "transparent", color: "inherit", font: "inherit",
+                }}
+              >
+                {label(c)}
+              </button>
+            ))}
+          </>
+        )}
+
+        {/* People — click to DM */}
+        <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5, color: "#6b7280", padding: "12px 8px 4px" }}>People</div>
+        {others.map((p) => (
+          <button
+            key={p.id}
+            data-testid="people-item"
+            onClick={() => {
+              const existing = dmChannelWith(p.handle);
+              if (existing) setSelected(existing.id);
+              else openDm(p.id);
+            }}
+            style={{
+              display: "block", width: "100%", textAlign: "left", border: "none", cursor: "pointer",
+              padding: "6px 8px", borderRadius: 6, marginBottom: 2, background: "transparent", color: "inherit", font: "inherit",
+            }}
+          >
+            {p.kind === "agent" ? "🤖" : "🙂"} @{p.handle}
+          </button>
+        ))}
+        {others.length === 0 && <div style={{ color: "#6b7280", fontSize: 12, padding: "2px 8px" }}>No one else yet.</div>}
+        <button
+          data-testid="add-agent-toggle"
+          onClick={() => setShowAddAgent((v) => !v)}
+          style={{
+            display: "block", width: "100%", textAlign: "left", cursor: "pointer", marginTop: 4,
+            padding: "6px 8px", borderRadius: 6, border: "1px dashed #3a4150", background: "transparent",
+            color: "#9aa3b5", font: "inherit",
+          }}
+        >
+          ＋ Add agent
+        </button>
+
+        {showAddAgent && (
+          <div style={{ marginTop: 8, padding: 8, background: "#272d3a", borderRadius: 8 }}>
+            <input
+              data-testid="agent-handle" value={agHandle} onChange={(e) => setAgHandle(e.target.value)}
+              placeholder="handle (e.g. deploy-bot)"
+              style={{ width: "100%", padding: "6px 8px", borderRadius: 6, border: "1px solid #3a4150", background: "#1f2430", color: "#cdd3df", font: "inherit", boxSizing: "border-box", marginBottom: 8 }}
+            />
+            <input
+              data-testid="agent-name" value={agName} onChange={(e) => setAgName(e.target.value)}
+              placeholder="display name"
+              style={{ width: "100%", padding: "6px 8px", borderRadius: 6, border: "1px solid #3a4150", background: "#1f2430", color: "#cdd3df", font: "inherit", boxSizing: "border-box", marginBottom: 8 }}
+            />
+            <input
+              data-testid="agent-repo" value={agRepo} onChange={(e) => setAgRepo(e.target.value)}
+              placeholder="repo (optional, owner/name)"
+              style={{ width: "100%", padding: "6px 8px", borderRadius: 6, border: "1px solid #3a4150", background: "#1f2430", color: "#cdd3df", font: "inherit", boxSizing: "border-box", marginBottom: 8 }}
+            />
+            <button
+              data-testid="add-agent-button" onClick={submitAddAgent} disabled={addingAgent}
+              style={{ padding: "6px 12px", borderRadius: 6, border: "none", background: "#2f6feb", color: "#fff", cursor: addingAgent ? "default" : "pointer", opacity: addingAgent ? 0.6 : 1, font: "inherit" }}
+            >
+              {addingAgent ? "Adding…" : "Add agent"}
+            </button>
+            {agRepo.trim() && <div style={{ fontSize: 11, color: "#8b93a7", marginTop: 6 }}>With a repo this takes ~30s (clones it).</div>}
+          </div>
+        )}
 
         {showNew && (
           <div style={{ marginTop: 8, padding: 8, background: "#272d3a", borderRadius: 8 }}>
@@ -226,7 +355,7 @@ export function App() {
       {/* Main */}
       <main style={{ flex: 1, display: "flex", flexDirection: "column", background: "#fff" }}>
         <header style={{ padding: "12px 16px", borderBottom: "1px solid #e6e6e6", fontWeight: 600 }}>
-          {sel ? (sel.kind === "dm" ? "@" : "#") + sel.name : "Select or create a channel"}
+          {sel ? label(sel) : "Select or create a channel"}
         </header>
 
         <div data-testid="message-list" style={{ flex: 1, overflowY: "auto", padding: "12px 16px" }}>
@@ -259,7 +388,7 @@ export function App() {
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") send(); }}
-            placeholder={sel ? `Message ${sel.kind === "dm" ? "@" : "#"}${sel.name}` : "Select or create a channel"}
+            placeholder={sel ? `Message ${label(sel)}` : "Select or create a channel"}
             style={{ flex: 1, padding: "8px 10px", borderRadius: 6, border: "1px solid #ccc", font: "inherit" }}
           />
           <button data-testid="send-button" onClick={send} style={{ padding: "8px 16px", borderRadius: 6, border: "none", background: "#2f6feb", color: "#fff", cursor: "pointer" }}>

@@ -9,6 +9,7 @@ export interface Channel {
   id: string;
   name: string;
   kind: string;
+  dm_with?: string | null; // for dm channels: the other member's handle
 }
 
 export interface Message {
@@ -83,4 +84,17 @@ export function createChannel(c: {
 
 export function getMessages(channelId: string): Promise<Message[]> {
   return fetch(`${BASE}/api/channels/${channelId}/messages`).then((r) => r.json());
+}
+
+// Find-or-create a 1:1 DM with another participant.
+export function createDm(participantId: string, otherId: string): Promise<{ id: string; kind: string }> {
+  return fetch(`${BASE}/api/dms`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ participantId, otherId }),
+  }).then(async (r) => {
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error ?? "failed to open DM");
+    return j;
+  });
 }

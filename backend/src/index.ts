@@ -94,6 +94,20 @@ app.post("/api/agents", async (req, res) => {
   }
 });
 
+// Find-or-create the 1:1 DM channel between two participants (dedupes, unlike POST /channels).
+app.post("/api/dms", async (req, res) => {
+  try {
+    const { participantId, otherId } = req.body ?? {};
+    if (!participantId || !otherId) {
+      return res.status(400).json({ error: "participantId, otherId required" });
+    }
+    const id = await db.findOrCreateDm(participantId, otherId);
+    res.status(201).json({ id, kind: "dm" });
+  } catch (e) {
+    res.status(500).json({ error: String((e as Error).message ?? e) });
+  }
+});
+
 app.get("/api/channels", async (req, res) => {
   try {
     const participantId = (req.query.participantId as string | undefined) || undefined;
