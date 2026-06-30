@@ -241,6 +241,22 @@ app.get("/auth/github/callback", async (req, res) => {
   }
 });
 
+// List the authed user's GitHub repos (via their connected token) for the repo picker.
+// 409 (not 500) when GitHub isn't connected, so the UI can fall back to manual entry.
+app.get("/api/github/repos", auth.requireAuth, async (req, res) => {
+  try {
+    const u = auth.authedUser(req)!;
+    const p = await db.getParticipantByFirebaseUid(u.uid);
+    if (!p) return res.status(409).json({ connected: false, error: "finish onboarding first" });
+    if (!(await db.getGithubIdentity(p.id))) {
+      return res.status(409).json({ connected: false, error: "github not connected" });
+    }
+    res.json({ connected: true, repos: await gh.listUserRepos(p.id) });
+  } catch (e) {
+    res.status(500).json({ error: String((e as Error).message ?? e) });
+  }
+});
+
 // Connection status for a participant (used by the UI to show connected/not).
 app.get("/api/participants/:id/github", async (req, res) => {
   try {
