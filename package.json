@@ -11,7 +11,8 @@
   "scripts": {
     "smoke": "node scripts/smoke.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "dev:backend": "npm run dev -w @jungle/backend",
+    "dev:setup": "node scripts/dev-setup.mjs",
+    "dev:backend": "node scripts/dev-setup.mjs && npm run dev -w @jungle/backend",
     "dev:frontend": "npm run dev -w @jungle/frontend"
   },
   "dependencies": {

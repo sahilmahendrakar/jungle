@@ -6,6 +6,15 @@ import * as db from "./db";
 import * as dev from "./dev";
 import * as ma from "./ma";
 
+function formatError(e: unknown): string {
+  if (e instanceof Error && e.message) return e.message;
+  if (typeof e === "object" && e && "message" in e) {
+    const msg = String((e as { message: unknown }).message);
+    if (msg) return msg;
+  }
+  return String(e) || "unknown error";
+}
+
 const app = express();
 app.use(express.json());
 
@@ -32,7 +41,7 @@ app.get("/api/dev/bootstrap", async (_req, res) => {
   try {
     res.json(await dev.ensureDevBootstrap());
   } catch (e) {
-    res.status(500).json({ error: String((e as Error).message ?? e) });
+    res.status(500).json({ error: formatError(e) });
   }
 });
 
@@ -241,13 +250,14 @@ wss.on("connection", (ws, req) => {
 });
 
 const PORT = Number(process.env.PORT ?? 3001);
+
 server.listen(PORT, () => {
   console.log(`jungle-backend on http://localhost:${PORT}`);
   if (dev.isDevMode()) {
     void dev.ensureDevBootstrap().then((b) => {
       console.log(`dev bootstrap: @${b.handle} -> http://localhost:5173/?as=${b.participantId}`);
     }).catch((e) => {
-      console.warn("dev bootstrap skipped:", (e as Error).message ?? e);
+      console.warn("dev bootstrap skipped:", formatError(e));
     });
   }
 });

@@ -1,6 +1,7 @@
-// MVP: backend is hardcoded to localhost. Swap to an env-configured URL when deployed.
-const BASE = "http://localhost:3001";
-export const WS_BASE = "ws://localhost:3001";
+// In dev, use same-origin requests proxied by Vite. In prod, point at the backend host.
+const BASE = import.meta.env.DEV ? "" : "http://localhost:3001";
+const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
+export const WS_BASE = import.meta.env.DEV ? `${wsProto}//${location.host}/ws` : "ws://localhost:3001";
 
 export interface Channel {
   id: string;
@@ -33,8 +34,11 @@ export interface DevBootstrap {
 }
 
 export function fetchDevBootstrap(): Promise<DevBootstrap> {
-  return fetch(`${BASE}/api/dev/bootstrap`).then((r) => {
-    if (!r.ok) throw new Error(`bootstrap failed (${r.status})`);
+  return fetch(`${BASE}/api/dev/bootstrap`).then(async (r) => {
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      throw new Error(body.error || `bootstrap failed (${r.status})`);
+    }
     return r.json();
   });
 }

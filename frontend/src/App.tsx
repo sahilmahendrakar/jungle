@@ -110,7 +110,7 @@ export function App() {
           <p>Signing in…</p>
         ) : bootstrapError ? (
           <>
-            <p>Could not sign in automatically. Is the backend running on port 3001?</p>
+            <p>Could not sign in automatically. Run <code>npm run dev:setup</code>, then restart the backend.</p>
             <p style={{ color: "#888", fontSize: 14 }}>{bootstrapError}</p>
             <p>
               Or add <code>?as=&lt;participantId&gt;</code> to the URL manually.
