@@ -254,6 +254,12 @@ async function runAgentReply(
   agent: db.AgentRow,
   replyBudget: number,
 ) {
+  // Let the channel show "@agent is working…" for the duration of the turn.
+  const status = (state: "working" | "idle") =>
+    fanOut(triggerChannelId, {
+      type: "agent_status", channelId: triggerChannelId, agentId: agent.id, handle: agent.handle, state,
+    });
+  await status("working");
   try {
     // GitHub-capable agent: refresh its (≤1h) installation token before the turn so git +
     // the GitHub MCP server stay authenticated. Best-effort — a still-valid token survives.
@@ -282,6 +288,8 @@ async function runAgentReply(
     );
   } catch (e) {
     console.error("runAgentReply:", e);
+  } finally {
+    await status("idle");
   }
 }
 

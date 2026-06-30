@@ -23,6 +23,7 @@ export function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
   const [notice, setNotice] = useState("");
+  const [working, setWorking] = useState<Record<string, string[]>>({}); // channelId -> agent handles
   // New-channel form
   const [showNew, setShowNew] = useState(false);
   const [newName, setNewName] = useState("");
@@ -72,6 +73,15 @@ export function App() {
       };
       ws.onmessage = (e) => {
         const evt = JSON.parse(e.data);
+        if (evt.type === "agent_status") {
+          setWorking((w) => {
+            const set = new Set(w[evt.channelId] ?? []);
+            if (evt.state === "working") set.add(evt.handle);
+            else set.delete(evt.handle);
+            return { ...w, [evt.channelId]: [...set] };
+          });
+          return;
+        }
         if (evt.type !== "message") return;
         const m: Message = evt.message;
         if (m.channel_id !== selectedRef.current) return;
@@ -230,6 +240,12 @@ export function App() {
             </div>
           ))}
         </div>
+
+        {selected && (working[selected]?.length ?? 0) > 0 && (
+          <div data-testid="working-indicator" style={{ padding: "6px 16px", color: "#2f6feb", fontSize: 13, fontStyle: "italic" }}>
+            {working[selected].map((h) => `@${h}`).join(", ")} {working[selected].length > 1 ? "are" : "is"} working…
+          </div>
+        )}
 
         {notice && (
           <div data-testid="send-notice" style={{ padding: "6px 16px", color: "#b23", fontSize: 13, background: "#fff4f4" }}>
