@@ -228,6 +228,16 @@ export function githubConnectUrl(): Promise<{ url: string }> {
   }).then((r) => json<{ url: string }>(r, "failed to start GitHub connect"));
 }
 
+// URL to install the GitHub App / choose which repositories agents can use. Sends the user to
+// GitHub to grant the App access to specific repos (including private ones); those repos then
+// show up in the agent repo picker. (githubConnectUrl only authorizes identity, not repo access.)
+export function githubInstallUrl(): Promise<{ url: string }> {
+  return fetch(`${BASE}/api/github/install-url`, {
+    method: "POST",
+    headers: authHeaders(),
+  }).then((r) => json<{ url: string }>(r, "failed to start GitHub install"));
+}
+
 export interface Repo {
   full_name: string;
   private: boolean;
