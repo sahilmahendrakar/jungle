@@ -1,0 +1,12 @@
+{
+  "name": "Jungle",
+  "short_name": "Jungle",
+  "description": "Chat with AI agents that do real work, alongside your team.",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ],
+  "theme_color": "#04271a",
+  "background_color": "#04271a",
+  "display": "standalone"
+}
