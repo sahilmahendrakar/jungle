@@ -98,31 +98,6 @@ export function authorizeUrl(state: string): string {
   return u.toString();
 }
 
-// The App's public page (e.g. https://github.com/apps/jungle), read once via the App JWT and
-// cached. We need its slug to build the installation URL and don't want to hardcode it.
-let cachedAppHtmlUrl: string | null = null;
-async function appHtmlUrl(): Promise<string> {
-  if (cachedAppHtmlUrl == null) {
-    const app = await ghJson<{ html_url: string }>("/app", appJwt());
-    cachedAppHtmlUrl = app.html_url; // https://github.com/apps/<slug>
-  }
-  return cachedAppHtmlUrl;
-}
-
-// Where we send a human to *install* the App on their own account (or add repos to an existing
-// install) and choose which repositories — including private ones — agents may use.
-//
-// This is the step plain OAuth doesn't cover: authorizing (authorizeUrl) only proves identity,
-// but listUserRepos is installation-scoped — a user access token can only see repos the App is
-// installed on. So someone who connected but never installed the App sees none of their own
-// repos (only ones a teammate already installed the App on). `state` round-trips back to our
-// callback so we can finish the OAuth exchange if the App requests user auth during install.
-export async function installUrl(state?: string): Promise<string> {
-  const u = new URL(`${await appHtmlUrl()}/installations/new`);
-  if (state) u.searchParams.set("state", state);
-  return u.toString();
-}
-
 interface TokenResponse {
   access_token: string;
   expires_in?: number; // seconds (8h for GitHub App user tokens)

@@ -393,42 +393,14 @@ app.post("/api/github/connect-url", auth.requireAuth, async (req, res) => {
   }
 });
 
-// Return the GitHub App installation ("configure repositories") URL for the authed user. This
-// is what lets someone install the App on their own account and grant it access to specific
-// repos (including private ones) — the missing step that makes those repos show up in the agent
-// repo picker (listUserRepos is installation-scoped). Requires App (JWT) auth to read the slug.
-app.post("/api/github/install-url", auth.requireAuth, async (req, res) => {
-  try {
-    if (!gh.appAuthConfigured()) return res.status(500).json({ error: "GitHub App not configured" });
-    const u = auth.authedUser(req)!;
-    const p = await db.getParticipantByFirebaseUid(u.uid);
-    if (!p) return res.status(409).json({ error: "finish onboarding first" });
-    const state = randomBytes(16).toString("hex");
-    pendingOAuth.set(state, { participantId: p.id, createdAt: Date.now() });
-    res.json({ url: await gh.installUrl(state) });
-  } catch (e) {
-    res.status(500).json({ error: String((e as Error).message ?? e) });
-  }
-});
-
-// Step 2: GitHub redirects back here with ?state, plus either ?code (OAuth) or
-// ?installation_id&setup_action (after an install). Exchange the code when present; otherwise
-// it's an install-only round-trip (App not set to request user auth during install) — the
-// identity was already stored when the user connected, so just bounce back refreshed.
+// Step 2: GitHub redirects back here with ?code & ?state. Exchange + store the identity.
 app.get("/auth/github/callback", async (req, res) => {
   try {
     const code = (req.query.code as string | undefined) || "";
     const state = (req.query.state as string | undefined) || "";
-    const setupAction = (req.query.setup_action as string | undefined) || "";
     const pending = pendingOAuth.get(state);
-    if (!pending) return res.status(400).send("invalid or expired OAuth state");
+    if (!code || !pending) return res.status(400).send("invalid or expired OAuth state");
     pendingOAuth.delete(state);
-    if (!code) {
-      // No code to exchange — this is a pure install/configure return. Nothing to store; the
-      // newly granted repos will now appear in the picker.
-      if (!setupAction) return res.status(400).send("invalid or expired OAuth state");
-      return res.redirect(`${FRONTEND_URL}/?github=configured`);
-    }
     const { login } = await gh.exchangeCodeAndStore(pending.participantId, code);
     // Back to the SPA, which reads ?github=connected to advance/refresh the onboarding step.
     res.redirect(`${FRONTEND_URL}/?github=connected&login=${encodeURIComponent(login)}`);
