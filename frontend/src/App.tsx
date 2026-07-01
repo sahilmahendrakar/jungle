@@ -47,6 +47,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { RepoCombobox } from "./RepoCombobox";
 import { Markdown } from "./Markdown";
+import { ProfileDialog } from "./ProfileDialog";
 import {
   Bot,
   Check,
@@ -139,11 +140,17 @@ export function App({
   authParticipantId,
   getWsToken,
   me: meProp,
+  email,
+  picture,
+  github,
   onSignOut,
 }: {
   authParticipantId?: string; // from Firebase onboarding; overrides the ?as= dev path
   getWsToken?: () => Promise<string | null>; // fresh ID token for the WS handshake
   me?: Participant; // current user (Firebase mode)
+  email?: string | null; // current user's email (Firebase profile)
+  picture?: string | null; // current user's avatar URL (Firebase profile)
+  github?: { connected: boolean; login?: string }; // GitHub connection state
   onSignOut?: () => void; // Firebase sign-out (else clears ?as=)
 } = {}) {
   const participantId = authParticipantId ?? new URLSearchParams(location.search).get("as");
@@ -180,6 +187,8 @@ export function App({
   const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
+  // Profile / settings dialog
+  const [showProfile, setShowProfile] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const selectedRef = useRef<string | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -647,20 +656,27 @@ export function App({
 
         {/* User footer */}
         {me && (
-          <div className="flex shrink-0 items-center gap-2.5 border-t border-sidebar-border px-3 py-2.5">
-            <PersonAvatar name={me.display_name} handle={me.handle} />
-            <div className="min-w-0 flex-1" title={`@${me.handle}`}>
-              <div className="truncate text-sm font-semibold">
-                {me.display_name}
+          <div className="flex shrink-0 items-center gap-1 border-t border-sidebar-border px-2 py-2.5">
+            <button
+              data-testid="open-profile"
+              onClick={() => setShowProfile(true)}
+              title="Profile & settings"
+              className="flex min-w-0 flex-1 items-center gap-2.5 rounded-md px-1 py-1 text-left transition-colors hover:bg-sidebar-accent"
+            >
+              <PersonAvatar name={me.display_name} handle={me.handle} />
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm font-semibold">
+                  {me.display_name}
+                </div>
               </div>
-            </div>
+            </button>
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
                   data-testid="switch-user"
                   onClick={signOut}
                   title="Switch user"
-                  className="flex size-8 items-center justify-center rounded-md text-sidebar-foreground/70 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
+                  className="flex size-8 shrink-0 items-center justify-center rounded-md text-sidebar-foreground/70 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
                 >
                   <LogOut className="size-4" />
                 </button>
@@ -1208,6 +1224,19 @@ export function App({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Profile / settings */}
+      {me && (
+        <ProfileDialog
+          open={showProfile}
+          onOpenChange={setShowProfile}
+          me={me}
+          email={email}
+          picture={picture}
+          github={github}
+          onSignOut={signOut}
+        />
+      )}
     </div>
   );
 }
