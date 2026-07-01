@@ -68,6 +68,21 @@ function mergeById(a: Message[], b: Message[]): Message[] {
   return [...map.values()].sort((x, y) => Number(x.seq) - Number(y.seq));
 }
 
+// If the caret sits inside an "@…" token (an @ at the start or after whitespace, with no
+// whitespace up to the caret), return where it starts and the text typed so far. Used to
+// drive the @-mention autocomplete. Returns null when there's no active mention token.
+function detectMention(text: string, caret: number): { start: number; query: string } | null {
+  for (let i = caret - 1; i >= 0; i--) {
+    const ch = text[i];
+    if (ch === "@") {
+      const before = i === 0 ? " " : text[i - 1];
+      return /\s/.test(before) ? { start: i, query: text.slice(i + 1, caret) } : null;
+    }
+    if (/\s/.test(ch)) return null; // whitespace before any '@' — not in a mention
+  }
+  return null;
+}
+
 // Works in non-secure contexts (e.g. http://<ip>) where crypto.randomUUID is undefined.
 const newId = () =>
   globalThis.crypto?.randomUUID?.() ??
@@ -128,6 +143,10 @@ export function App({
   const [memberBusy, setMemberBusy] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  // @-mention autocomplete
+  const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const taRef = useRef<HTMLTextAreaElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const selectedRef = useRef<string | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -309,7 +328,61 @@ export function App({
       JSON.stringify({ type: "post", channelId: selected, body, clientMsgId: newId() }),
     );
     setDraft("");
+    setMention(null);
     setNotice("");
+  }
+
+  // Candidates for the @-mention popup: everyone but me, matching the typed query, with
+  // current channel members surfaced first, then handle-prefix matches.
+  const mentionCandidates = useMemo(() => {
+    if (!mention) return [];
+    const q = mention.query.toLowerCase();
+    const memberIds = new Set(members.map((m) => m.id));
+    return people
+      .filter((p) => p.id !== participantId)
+      .filter(
+        (p) =>
+          !q ||
+          p.handle.toLowerCase().includes(q) ||
+          p.display_name.toLowerCase().includes(q),
+      )
+      .sort((a, b) => {
+        const am = memberIds.has(a.id) ? 0 : 1;
+        const bm = memberIds.has(b.id) ? 0 : 1;
+        if (am !== bm) return am - bm;
+        const asw = a.handle.toLowerCase().startsWith(q) ? 0 : 1;
+        const bsw = b.handle.toLowerCase().startsWith(q) ? 0 : 1;
+        if (asw !== bsw) return asw - bsw;
+        return a.display_name.localeCompare(b.display_name);
+      })
+      .slice(0, 8);
+  }, [mention, people, members, participantId]);
+
+  // Recompute the active mention token from the textarea's current value + caret.
+  function syncMention(value: string, caret: number) {
+    setMention(detectMention(value, caret));
+    setMentionIndex(0);
+  }
+
+  // Replace the in-progress "@query" token with "@handle " and drop the popup.
+  function acceptMention(p: Participant) {
+    const m = mention;
+    const ta = taRef.current;
+    if (!m) return;
+    const caret = ta?.selectionStart ?? m.start + 1 + m.query.length;
+    const before = draft.slice(0, m.start);
+    const after = draft.slice(caret);
+    const insert = `@${p.handle} `;
+    const next = before + insert + after;
+    setDraft(next);
+    setMention(null);
+    const pos = (before + insert).length;
+    requestAnimationFrame(() => {
+      if (ta) {
+        ta.focus();
+        ta.setSelectionRange(pos, pos);
+      }
+    });
   }
 
   async function submitNewChannel() {
@@ -457,7 +530,8 @@ export function App({
                           size="sm"
                         />
                       }
-                      label={`@${c.dm_with ?? "dm"}`}
+                      label={p?.display_name ?? c.dm_with ?? "dm"}
+                      title={c.dm_with ? `@${c.dm_with}` : undefined}
                       working={(working[c.id]?.length ?? 0) > 0}
                     />
                   );
@@ -490,7 +564,8 @@ export function App({
                     size="sm"
                   />
                 }
-                label={`@${p.handle}`}
+                label={p.display_name}
+                title={`@${p.handle}`}
                 trailing={
                   p.kind === "agent" ? (
                     <Bot className="size-3.5 text-sidebar-foreground/50" />
@@ -506,12 +581,9 @@ export function App({
         {me && (
           <div className="flex shrink-0 items-center gap-2.5 border-t border-sidebar-border px-3 py-2.5">
             <PersonAvatar name={me.display_name} handle={me.handle} />
-            <div className="min-w-0 flex-1">
+            <div className="min-w-0 flex-1" title={`@${me.handle}`}>
               <div className="truncate text-sm font-semibold">
                 {me.display_name}
-              </div>
-              <div className="truncate text-xs text-sidebar-foreground/55">
-                @{me.handle}
               </div>
             </div>
             <Tooltip>
@@ -633,7 +705,7 @@ export function App({
                         data-testid="message-sender"
                         className="font-semibold"
                       >
-                        @{lead.sender_handle}
+                        {sender?.display_name ?? lead.sender_handle}
                       </span>
                       {isAgent && (
                         <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
@@ -687,12 +759,76 @@ export function App({
 
         {/* Composer */}
         <div className="px-5 pb-5 pt-1">
-          <div className="flex items-end gap-2 rounded-xl border bg-card p-2 shadow-sm focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/20">
+          <div className="relative flex items-end gap-2 rounded-xl border bg-card p-2 shadow-sm focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/20">
+            {/* @-mention autocomplete */}
+            {mention && mentionCandidates.length > 0 && (
+              <div
+                data-testid="mention-popup"
+                className="absolute bottom-full left-0 z-20 mb-2 w-72 overflow-hidden rounded-lg border bg-popover text-popover-foreground shadow-lg"
+              >
+                <div className="max-h-64 overflow-y-auto p-1">
+                  {mentionCandidates.map((p, i) => (
+                    <button
+                      key={p.id}
+                      data-testid="mention-option"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        acceptMention(p);
+                      }}
+                      onMouseEnter={() => setMentionIndex(i)}
+                      className={cn(
+                        "flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm",
+                        i === mentionIndex ? "bg-accent" : "hover:bg-accent/60",
+                      )}
+                    >
+                      <PersonAvatar name={p.display_name} handle={p.handle} size="sm" />
+                      <span className="flex min-w-0 items-center gap-1">
+                        <span className="truncate font-medium">{p.display_name}</span>
+                        <span className="truncate text-muted-foreground">@{p.handle}</span>
+                        {p.kind === "agent" && <Bot className="size-3.5 shrink-0 text-primary" />}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <Textarea
+              ref={taRef}
               data-testid="composer-input"
               value={draft}
-              onChange={(e) => setDraft(e.target.value)}
+              onChange={(e) => {
+                setDraft(e.target.value);
+                syncMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
+              }}
+              onSelect={(e) => {
+                const t = e.target as HTMLTextAreaElement;
+                syncMention(t.value, t.selectionStart ?? 0);
+              }}
               onKeyDown={(e) => {
+                if (mention && mentionCandidates.length > 0) {
+                  if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    setMentionIndex((i) => (i + 1) % mentionCandidates.length);
+                    return;
+                  }
+                  if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setMentionIndex(
+                      (i) => (i - 1 + mentionCandidates.length) % mentionCandidates.length,
+                    );
+                    return;
+                  }
+                  if (e.key === "Enter" || e.key === "Tab") {
+                    e.preventDefault();
+                    acceptMention(mentionCandidates[mentionIndex]);
+                    return;
+                  }
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    setMention(null);
+                    return;
+                  }
+                }
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
                   send();
@@ -716,12 +852,6 @@ export function App({
               <SendHorizonal className="size-4" />
             </Button>
           </div>
-          <p className="mt-1.5 px-1 text-xs text-muted-foreground">
-            <kbd className="rounded bg-muted px-1 font-sans">Enter</kbd> to send,{" "}
-            <kbd className="rounded bg-muted px-1 font-sans">Shift</kbd>+
-            <kbd className="rounded bg-muted px-1 font-sans">Enter</kbd> for a new
-            line.
-          </p>
         </div>
       </main>
 
@@ -1027,6 +1157,7 @@ function NavItem({
   label,
   trailing,
   working,
+  title,
 }: {
   testId: string;
   active: boolean;
@@ -1035,11 +1166,13 @@ function NavItem({
   label: string;
   trailing?: React.ReactNode;
   working?: boolean;
+  title?: string;
 }) {
   return (
     <button
       data-testid={testId}
       onClick={onClick}
+      title={title}
       className={cn(
         "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
         active
