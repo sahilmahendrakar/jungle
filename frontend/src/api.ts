@@ -118,6 +118,37 @@ export function createDm(participantId: string, otherId: string): Promise<{ id: 
   });
 }
 
+// --- Channel members + delete ---
+
+export function listChannelMembers(channelId: string): Promise<Participant[]> {
+  return fetch(`${BASE}/api/channels/${channelId}/members`, { headers: authHeaders() }).then((r) =>
+    json<Participant[]>(r, "failed to load members"),
+  );
+}
+
+// Add a participant (by handle) to a channel. Returns the added participant.
+export function addChannelMember(channelId: string, handle: string): Promise<Participant> {
+  return fetch(`${BASE}/api/channels/${channelId}/members`, {
+    method: "POST",
+    headers: authHeaders({ "content-type": "application/json" }),
+    body: JSON.stringify({ handle }),
+  }).then((r) => json<Participant>(r, "failed to add member"));
+}
+
+export function removeChannelMember(channelId: string, participantId: string): Promise<{ ok: boolean }> {
+  return fetch(`${BASE}/api/channels/${channelId}/members/${participantId}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  }).then((r) => json<{ ok: boolean }>(r, "failed to remove member"));
+}
+
+export function deleteChannel(channelId: string): Promise<{ ok: boolean }> {
+  return fetch(`${BASE}/api/channels/${channelId}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  }).then((r) => json<{ ok: boolean }>(r, "failed to delete channel"));
+}
+
 // --- Identity / onboarding (Firebase auth) ---
 
 export interface GoogleProfile {

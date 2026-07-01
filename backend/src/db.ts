@@ -397,6 +397,32 @@ export async function deleteGithubIdentity(participantId: string): Promise<void>
 }
 
 // Find the 1:1 DM channel between two participants, creating it if needed.
+// Full participant rows for a channel's members (for the members panel).
+export async function channelMembers(channelId: string): Promise<Participant[]> {
+  const { rows } = await pool.query<Participant>(
+    `select p.* from channel_members m
+     join participants p on p.id = m.participant_id
+     where m.channel_id = $1
+     order by p.kind, p.display_name`,
+    [channelId],
+  );
+  return rows;
+}
+
+// Remove a member from a channel. Returns true if a row was actually removed.
+export async function removeChannelMember(channelId: string, participantId: string): Promise<boolean> {
+  const { rowCount } = await pool.query(
+    `delete from channel_members where channel_id = $1 and participant_id = $2`,
+    [channelId, participantId],
+  );
+  return (rowCount ?? 0) > 0;
+}
+
+// Delete a channel entirely. channel_members + messages (+ mentions) cascade via FKs.
+export async function deleteChannel(channelId: string): Promise<void> {
+  await pool.query(`delete from channels where id = $1`, [channelId]);
+}
+
 export async function findOrCreateDm(aId: string, bId: string): Promise<string> {
   const found = await pool.query(
     `select c.id from channels c

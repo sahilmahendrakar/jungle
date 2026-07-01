@@ -6,6 +6,10 @@ import {
   createChannel,
   createDm,
   createParticipant,
+  listChannelMembers,
+  addChannelMember,
+  removeChannelMember,
+  deleteChannel,
   WS_BASE,
   type Channel,
   type Message,
@@ -33,6 +37,13 @@ import {
 } from "@/components/ui/tooltip";
 import { avatarClass, initials } from "@/lib/people";
 import { cn } from "@/lib/utils";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { RepoCombobox } from "./RepoCombobox";
 import { Markdown } from "./Markdown";
 import {
@@ -41,9 +52,14 @@ import {
   Hash,
   LogOut,
   MessagesSquare,
+  MoreVertical,
   Plus,
   SendHorizonal,
   Sparkles,
+  Trash2,
+  UserPlus,
+  Users,
+  X,
 } from "lucide-react";
 
 function mergeById(a: Message[], b: Message[]): Message[] {
@@ -105,6 +121,13 @@ export function App({
   const [agName, setAgName] = useState("");
   const [agRepo, setAgRepo] = useState("");
   const [addingAgent, setAddingAgent] = useState(false);
+  // Channel members panel + delete
+  const [members, setMembers] = useState<Participant[]>([]);
+  const [showMembers, setShowMembers] = useState(false);
+  const [addQuery, setAddQuery] = useState("");
+  const [memberBusy, setMemberBusy] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const selectedRef = useRef<string | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -116,8 +139,65 @@ export function App({
     if (!participantId) return;
     listChannels(participantId).then((cs) => {
       setChannels(cs);
-      setSelected((s) => selectId ?? s ?? cs[0]?.id ?? null);
+      // Keep the current selection only if it still exists; otherwise fall back to the first.
+      setSelected((s) => selectId ?? (cs.some((c) => c.id === s) ? s : cs[0]?.id ?? null));
     });
+  }
+
+  function refreshMembers() {
+    if (!selected) return;
+    listChannelMembers(selected).then(setMembers).catch(() => {});
+  }
+
+  async function addMember(handle: string) {
+    if (!selected || memberBusy) return;
+    setMemberBusy(true);
+    try {
+      await addChannelMember(selected, handle);
+      setAddQuery("");
+      refreshMembers();
+      reloadChannels(selected);
+    } catch (e) {
+      setNotice(String((e as Error).message ?? e));
+    } finally {
+      setMemberBusy(false);
+    }
+  }
+
+  async function removeMember(p: Participant) {
+    if (!selected || memberBusy) return;
+    setMemberBusy(true);
+    try {
+      await removeChannelMember(selected, p.id);
+      if (p.id === participantId) {
+        // Removed myself — leave the channel view and refresh my channel list.
+        setShowMembers(false);
+        setSelected(null);
+        reloadChannels();
+      } else {
+        refreshMembers();
+      }
+    } catch (e) {
+      setNotice(String((e as Error).message ?? e));
+    } finally {
+      setMemberBusy(false);
+    }
+  }
+
+  async function confirmDeleteChannel() {
+    if (!selected || deleting) return;
+    setDeleting(true);
+    try {
+      await deleteChannel(selected);
+      setShowDeleteConfirm(false);
+      setShowMembers(false);
+      setSelected(null);
+      reloadChannels();
+    } catch (e) {
+      setNotice(String((e as Error).message ?? e));
+    } finally {
+      setDeleting(false);
+    }
   }
 
   // Channels this participant belongs to + everyone (for the member picker).
@@ -131,6 +211,16 @@ export function App({
   useEffect(() => {
     if (!selected) return;
     getMessages(selected).then(setMessages);
+  }, [selected]);
+
+  // Load the member roster for the selected channel (powers the header count + members panel).
+  useEffect(() => {
+    setAddQuery("");
+    if (!selected) {
+      setMembers([]);
+      return;
+    }
+    listChannelMembers(selected).then(setMembers).catch(() => setMembers([]));
   }, [selected]);
 
   // Keep the message list pinned to the newest message.
@@ -171,6 +261,16 @@ export function App({
             else set.delete(evt.handle);
             return { ...w, [evt.channelId]: [...set] };
           });
+          return;
+        }
+        if (evt.type === "members_changed") {
+          if (evt.channelId === selectedRef.current)
+            listChannelMembers(evt.channelId).then(setMembers).catch(() => {});
+          return;
+        }
+        if (evt.type === "channel_deleted") {
+          setChannels((cs) => cs.filter((c) => c.id !== evt.channelId));
+          if (evt.channelId === selectedRef.current) setSelected(null);
           return;
         }
         if (evt.type !== "message") return;
@@ -310,9 +410,6 @@ export function App({
           <img src="/icon-192.png" alt="Jungle" className="size-8 rounded-lg shadow-sm" />
           <div className="min-w-0">
             <div className="truncate font-bold leading-tight">Jungle</div>
-            <div className="truncate text-xs text-sidebar-foreground/55">
-              {others.length + 1} members
-            </div>
           </div>
         </div>
 
@@ -450,6 +547,53 @@ export function App({
                 <Hash className="size-5 text-muted-foreground" />
               )}
               <h2 className="truncate font-semibold">{headerTitle}</h2>
+
+              {sel.kind !== "dm" && (
+                <div className="ml-auto flex items-center gap-1">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    data-testid="members-button"
+                    onClick={() => setShowMembers(true)}
+                    className="h-8 gap-1.5 rounded-full px-2.5 text-muted-foreground"
+                    title="Members"
+                  >
+                    <Users className="size-4" />
+                    <span className="text-xs font-medium tabular-nums">{members.length}</span>
+                  </Button>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="size-8 text-muted-foreground"
+                        data-testid="channel-menu"
+                        title="Channel settings"
+                      >
+                        <MoreVertical className="size-4" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="w-44">
+                      <DropdownMenuItem
+                        data-testid="menu-members"
+                        onClick={() => setShowMembers(true)}
+                      >
+                        <UserPlus className="size-4" />
+                        Members
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        data-testid="menu-delete-channel"
+                        onClick={() => setShowDeleteConfirm(true)}
+                        className="text-destructive focus:text-destructive"
+                      >
+                        <Trash2 className="size-4" />
+                        Delete channel
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+              )}
             </>
           ) : (
             <h2 className="font-semibold text-muted-foreground">
@@ -651,6 +795,128 @@ export function App({
               disabled={creating}
             >
               {creating ? "Creating…" : "Create channel"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ---------- Channel members dialog ---------- */}
+      <Dialog open={showMembers} onOpenChange={setShowMembers}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-1.5">
+              <Hash className="size-4 text-muted-foreground" />
+              {sel?.name} · members
+            </DialogTitle>
+            <DialogDescription>Add or remove who has access to this channel.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            {/* Add people */}
+            <div className="space-y-1.5">
+              <div className="relative">
+                <UserPlus className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  data-testid="member-add-input"
+                  value={addQuery}
+                  onChange={(e) => setAddQuery(e.target.value)}
+                  placeholder="Add people or agents by name…"
+                  className="pl-8"
+                  disabled={memberBusy}
+                />
+              </div>
+              {addQuery.trim() && (
+                <div className="max-h-40 space-y-0.5 overflow-y-auto rounded-lg border p-1">
+                  {(() => {
+                    const q = addQuery.trim().toLowerCase();
+                    const addable = others.filter(
+                      (p) =>
+                        !members.some((m) => m.id === p.id) &&
+                        (p.display_name.toLowerCase().includes(q) || p.handle.toLowerCase().includes(q)),
+                    );
+                    if (!addable.length)
+                      return <div className="px-2 py-2 text-sm text-muted-foreground">No matches.</div>;
+                    return addable.map((p) => (
+                      <button
+                        key={p.id}
+                        data-testid="member-add-option"
+                        onClick={() => addMember(p.handle)}
+                        disabled={memberBusy}
+                        className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent disabled:opacity-50"
+                      >
+                        <PersonAvatar name={p.display_name} handle={p.handle} size="sm" />
+                        <span className="flex min-w-0 items-center gap-1">
+                          <span className="truncate">{p.display_name}</span>
+                          <span className="truncate text-muted-foreground">@{p.handle}</span>
+                          {p.kind === "agent" && <Bot className="size-3.5 shrink-0 text-primary" />}
+                        </span>
+                      </button>
+                    ));
+                  })()}
+                </div>
+              )}
+            </div>
+
+            {/* Current members */}
+            <div className="max-h-72 space-y-0.5 overflow-y-auto">
+              {members.map((p) => (
+                <div
+                  key={p.id}
+                  data-testid="member-row"
+                  className="group flex items-center gap-2.5 rounded-md px-2 py-1.5 hover:bg-accent"
+                >
+                  <PersonAvatar name={p.display_name} handle={p.handle} size="sm" />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1 truncate text-sm font-medium">
+                      {p.display_name}
+                      {p.kind === "agent" && <Bot className="size-3.5 shrink-0 text-primary" />}
+                      {p.id === participantId && (
+                        <span className="text-xs font-normal text-muted-foreground">(you)</span>
+                      )}
+                    </div>
+                    <div className="truncate text-xs text-muted-foreground">@{p.handle}</div>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    data-testid="member-remove"
+                    onClick={() => removeMember(p)}
+                    disabled={memberBusy}
+                    title={p.id === participantId ? "Leave channel" : `Remove @${p.handle}`}
+                    className="size-7 text-muted-foreground opacity-0 hover:text-destructive group-hover:opacity-100"
+                  >
+                    <X className="size-4" />
+                  </Button>
+                </div>
+              ))}
+              {members.length === 0 && (
+                <div className="px-2 py-3 text-sm text-muted-foreground">No members yet.</div>
+              )}
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* ---------- Delete channel confirm ---------- */}
+      <Dialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Delete #{sel?.name}?</DialogTitle>
+            <DialogDescription>
+              This permanently deletes the channel and all of its messages for everyone. This can't
+              be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setShowDeleteConfirm(false)} disabled={deleting}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              data-testid="confirm-delete-channel"
+              onClick={confirmDeleteChannel}
+              disabled={deleting}
+            >
+              {deleting ? "Deleting…" : "Delete channel"}
             </Button>
           </DialogFooter>
         </DialogContent>

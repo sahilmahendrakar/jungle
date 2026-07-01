@@ -30,15 +30,15 @@
   --input: oklch(0.92 0.004 285);
   --ring: oklch(0.52 0.23 277);
 
-  /* Sidebar — always-dark aubergine, Slack-style, regardless of theme */
-  --sidebar: oklch(0.23 0.045 318);
-  --sidebar-foreground: oklch(0.92 0.01 320);
+  /* Sidebar — always-dark forest green, matching the Jungle icon background (#04271a) */
+  --sidebar: oklch(0.24 0.05 164);
+  --sidebar-foreground: oklch(0.92 0.012 160);
   --sidebar-primary: oklch(0.52 0.23 277);
   --sidebar-primary-foreground: oklch(0.99 0.01 285);
-  --sidebar-accent: oklch(0.33 0.06 320);
-  --sidebar-accent-foreground: oklch(0.98 0.01 320);
-  --sidebar-border: oklch(0.32 0.05 320);
-  --sidebar-ring: oklch(0.6 0.18 300);
+  --sidebar-accent: oklch(0.34 0.055 164);
+  --sidebar-accent-foreground: oklch(0.98 0.012 160);
+  --sidebar-border: oklch(0.33 0.05 164);
+  --sidebar-ring: oklch(0.6 0.14 165);
 }
 
 @theme inline {

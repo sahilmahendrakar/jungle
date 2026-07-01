@@ -193,6 +193,97 @@ app.get("/api/channels/:id/messages", async (req, res) => {
   }
 });
 
+// --- Channel membership: view / add / remove, and delete a channel ---
+
+// Resolve the requester's participant: from a verified Firebase token, or (only under dev
+// bypass) a ?participantId=. Returns null when we can't identify a real participant.
+async function requester(req: express.Request): Promise<db.Participant | null> {
+  const u = auth.authedUser(req);
+  if (u) return db.getParticipantByFirebaseUid(u.uid);
+  if (auth.DEV_BYPASS) {
+    const pid = (req.query.participantId as string) || (req.body?.participantId as string);
+    if (pid) return db.getParticipant(pid);
+  }
+  return null;
+}
+
+// Guard: load the channel and confirm the requester is a member. Sends the error response
+// itself and returns null on failure; returns { me, channel } on success.
+async function requireChannelMember(
+  req: express.Request,
+  res: express.Response,
+): Promise<{ me: db.Participant; channel: { id: string; name: string; kind: string } } | null> {
+  const me = await requester(req);
+  if (!me) {
+    res.status(401).json({ error: "auth required" });
+    return null;
+  }
+  const channel = await db.getChannel(String(req.params.id));
+  if (!channel) {
+    res.status(404).json({ error: "channel not found" });
+    return null;
+  }
+  if (!(await db.isMember(channel.id, me.id))) {
+    res.status(403).json({ error: "not a member of this channel" });
+    return null;
+  }
+  return { me, channel };
+}
+
+app.get("/api/channels/:id/members", async (req, res) => {
+  try {
+    const ctx = await requireChannelMember(req, res);
+    if (!ctx) return;
+    res.json(await db.channelMembers(ctx.channel.id));
+  } catch (e) {
+    res.status(500).json({ error: String((e as Error).message ?? e) });
+  }
+});
+
+app.post("/api/channels/:id/members", async (req, res) => {
+  try {
+    const ctx = await requireChannelMember(req, res);
+    if (!ctx) return;
+    if (ctx.channel.kind === "dm") return res.status(400).json({ error: "cannot change members of a DM" });
+    const handle = String(req.body?.handle ?? "").trim().replace(/^@/, "");
+    const target = await db.getParticipantByHandle(handle);
+    if (!target) return res.status(404).json({ error: `no participant @${handle}` });
+    await db.addChannelMember(ctx.channel.id, target.id);
+    await fanOut(ctx.channel.id, { type: "members_changed", channelId: ctx.channel.id });
+    res.status(201).json(target);
+  } catch (e) {
+    res.status(500).json({ error: String((e as Error).message ?? e) });
+  }
+});
+
+app.delete("/api/channels/:id/members/:participantId", async (req, res) => {
+  try {
+    const ctx = await requireChannelMember(req, res);
+    if (!ctx) return;
+    if (ctx.channel.kind === "dm") return res.status(400).json({ error: "cannot change members of a DM" });
+    // Notify (incl. the person being removed) before the row is gone, then remove.
+    await fanOut(ctx.channel.id, { type: "members_changed", channelId: ctx.channel.id });
+    await db.removeChannelMember(ctx.channel.id, String(req.params.participantId));
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: String((e as Error).message ?? e) });
+  }
+});
+
+app.delete("/api/channels/:id", async (req, res) => {
+  try {
+    const ctx = await requireChannelMember(req, res);
+    if (!ctx) return;
+    if (ctx.channel.kind === "dm") return res.status(400).json({ error: "DMs cannot be deleted" });
+    // Fan out to members before deleting (afterwards there are no members to resolve).
+    await fanOut(ctx.channel.id, { type: "channel_deleted", channelId: ctx.channel.id });
+    await db.deleteChannel(ctx.channel.id);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: String((e as Error).message ?? e) });
+  }
+});
+
 // --- GitHub: connect a participant's account (user-OAuth) + open PRs (Step 7) ---
 
 // Pending OAuth round-trips: state -> participantId. In-memory is fine for a single backend.
