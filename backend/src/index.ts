@@ -156,6 +156,7 @@ app.post("/api/agents", async (req, res) => {
         `jungle agent @${handle}`,
         { repoUrl: `https://github.com/${repo}`, repoToken: token, vaultId },
         model,
+        mode as ma.AgentMode,
       );
       return res.status(201).json(
         await db.createParticipant({
@@ -164,7 +165,7 @@ app.post("/api/agents", async (req, res) => {
         }),
       );
     }
-    const maSessionId = await ma.createAgentSession(`jungle agent @${handle}`, model);
+    const maSessionId = await ma.createAgentSession(`jungle agent @${handle}`, model, mode as ma.AgentMode);
     res.status(201).json(
       await db.createParticipant({ kind: "agent", handle, displayName, maSessionId, model, mode }),
     );

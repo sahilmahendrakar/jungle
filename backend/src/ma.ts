@@ -13,14 +13,69 @@ const ids: { agentId: string; githubAgentId?: string; environmentId: string } = 
 
 const client = new Anthropic(); // ANTHROPIC_API_KEY from env (loaded by ./env)
 
-// One MA session per agent participant — clean memory per agent. Optional per-agent model
-// override (falls back to the shared agent-config default when omitted).
-export async function createAgentSession(title: string, model?: string | null): Promise<string> {
+export type AgentMode = "always_ask" | "always_allow";
+
+// The custom send_message tool — the agent's ONLY channel to talk to Jungle. Must be listed
+// in any per-session `tools` override (overrides replace the config's tools in full).
+const SEND_TOOL = {
+  type: "custom",
+  name: "send_message",
+  description:
+    "Send a chat message in Jungle. This is the ONLY way you can communicate — your turn's plain text is never shown to anyone. Call once per message; call multiple times to post in several places.",
+  input_schema: {
+    type: "object",
+    properties: {
+      to: { type: "string", description: 'Destination: "#channel-name" or "@handle".' },
+      body: { type: "string", description: "Message text. You may @mention participants." },
+    },
+    required: ["to", "body"],
+    additionalProperties: false,
+  },
+};
+
+// Build the per-session `tools` override. permission_policy is what makes an agent
+// always_ask (tool calls pause on requires_action) vs always_allow (run autonomously).
+// send_message is a custom tool we always execute ourselves.
+function toolsOverride(github: boolean, mode: AgentMode) {
+  const permission_policy = { type: mode === "always_ask" ? "always_ask" : "always_allow" };
+  const tools: unknown[] = [
+    { type: "agent_toolset_20260401", default_config: { enabled: true, permission_policy } },
+  ];
+  if (github) {
+    tools.push({
+      type: "mcp_toolset",
+      mcp_server_name: "github",
+      default_config: { enabled: true, permission_policy },
+    });
+  }
+  tools.push(SEND_TOOL);
+  return tools;
+}
+
+// `agent_with_overrides`: reference the shared config by id but override model + tools for
+// THIS session only (no new agent version). Lets each agent pick its own model + permission
+// mode while all sessions share one config. mcp_servers/system are inherited (omitted).
+// Cast: the installed SDK types don't yet include the overrides form.
+function agentOverride(configId: string, github: boolean, model: string | null | undefined, mode: AgentMode) {
+  return {
+    type: "agent_with_overrides",
+    id: configId,
+    ...(model ? { model: { id: model } } : {}),
+    tools: toolsOverride(github, mode),
+  } as unknown as string;
+}
+
+// One MA session per agent participant — clean memory per agent. Per-agent model + permission
+// mode are applied as per-session overrides on the shared config.
+export async function createAgentSession(
+  title: string,
+  model?: string | null,
+  mode: AgentMode = "always_allow",
+): Promise<string> {
   const session = await client.beta.sessions.create({
-    agent: ids.agentId,
+    agent: agentOverride(ids.agentId, false, model, mode),
     environment_id: ids.environmentId,
     title,
-    ...(model ? { model } : {}),
   });
   return session.id;
 }
@@ -48,13 +103,13 @@ export async function createRepoAgentSession(
   title: string,
   opts: { repoUrl: string; repoToken: string; vaultId: string },
   model?: string | null,
+  mode: AgentMode = "always_allow",
 ): Promise<{ sessionId: string; repoResourceId: string }> {
   if (!ids.githubAgentId) throw new Error("githubAgentId not set — run scripts/setup-github-agent.mjs");
   const session = await client.beta.sessions.create({
-    agent: ids.githubAgentId,
+    agent: agentOverride(ids.githubAgentId, true, model, mode),
     environment_id: ids.environmentId,
     title,
-    ...(model ? { model } : {}),
     vault_ids: [opts.vaultId],
     resources: [
       { type: "github_repository", url: opts.repoUrl, authorization_token: opts.repoToken },
