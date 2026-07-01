@@ -21,7 +21,7 @@
     "dev:frontend": "npm run dev -w @jungle/frontend"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.106.0"
+    "@anthropic-ai/sdk": "^0.109.0"
   },
   "devDependencies": {
     "dotenv": "^17.4.2",

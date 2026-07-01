@@ -14,10 +14,12 @@ const ids: { agentId: string; githubAgentId?: string; environmentId: string } = 
 const client = new Anthropic(); // ANTHROPIC_API_KEY from env (loaded by ./env)
 
 export type AgentMode = "always_ask" | "always_allow";
+type AgentOverrides = Anthropic.Beta.Sessions.BetaManagedAgentsAgentWithOverridesParams;
+type ToolParam = NonNullable<AgentOverrides["tools"]>[number];
 
 // The custom send_message tool — the agent's ONLY channel to talk to Jungle. Must be listed
 // in any per-session `tools` override (overrides replace the config's tools in full).
-const SEND_TOOL = {
+const SEND_TOOL: ToolParam = {
   type: "custom",
   name: "send_message",
   description:
@@ -36,9 +38,9 @@ const SEND_TOOL = {
 // Build the per-session `tools` override. permission_policy is what makes an agent
 // always_ask (tool calls pause on requires_action) vs always_allow (run autonomously).
 // send_message is a custom tool we always execute ourselves.
-function toolsOverride(github: boolean, mode: AgentMode) {
-  const permission_policy = { type: mode === "always_ask" ? "always_ask" : "always_allow" };
-  const tools: unknown[] = [
+function toolsOverride(github: boolean, mode: AgentMode): ToolParam[] {
+  const permission_policy = { type: mode } as const;
+  const tools: ToolParam[] = [
     { type: "agent_toolset_20260401", default_config: { enabled: true, permission_policy } },
   ];
   if (github) {
@@ -55,14 +57,18 @@ function toolsOverride(github: boolean, mode: AgentMode) {
 // `agent_with_overrides`: reference the shared config by id but override model + tools for
 // THIS session only (no new agent version). Lets each agent pick its own model + permission
 // mode while all sessions share one config. mcp_servers/system are inherited (omitted).
-// Cast: the installed SDK types don't yet include the overrides form.
-function agentOverride(configId: string, github: boolean, model: string | null | undefined, mode: AgentMode) {
+function agentOverride(
+  configId: string,
+  github: boolean,
+  model: string | null | undefined,
+  mode: AgentMode,
+): AgentOverrides {
   return {
     type: "agent_with_overrides",
     id: configId,
     ...(model ? { model: { id: model } } : {}),
     tools: toolsOverride(github, mode),
-  } as unknown as string;
+  };
 }
 
 // One MA session per agent participant — clean memory per agent. Per-agent model + permission
