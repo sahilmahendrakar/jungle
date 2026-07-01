@@ -1,9 +1,19 @@
-// Backend runs on :3001 on the same host the frontend is served from. Deriving from
-// location (rather than hardcoding localhost) means access via an IP/hostname works too.
+// Backend base URL resolution, in priority order:
+//   1. VITE_API_URL — explicit backend origin (e.g. https://54-85-220-156.sslip.io).
+//      Set this in prod (Vercel) where the frontend and backend live on different hosts.
+//      VITE_WS_URL overrides the WS origin; otherwise it's derived from VITE_API_URL
+//      (http->ws, https->wss).
+//   2. Fallback (local dev): same host the page was served from, port 3001.
+const env = import.meta.env as Record<string, string | undefined>;
+const apiUrl = env.VITE_API_URL?.replace(/\/+$/, "");
+
 const host = typeof location !== "undefined" && location.hostname ? location.hostname : "localhost";
 const secure = typeof location !== "undefined" && location.protocol === "https:";
-const BASE = `${secure ? "https" : "http"}://${host}:3001`;
-export const WS_BASE = `${secure ? "wss" : "ws"}://${host}:3001`;
+
+const BASE = apiUrl ?? `${secure ? "https" : "http"}://${host}:3001`;
+export const WS_BASE =
+  env.VITE_WS_URL?.replace(/\/+$/, "") ??
+  (apiUrl ? apiUrl.replace(/^http/, "ws") : `${secure ? "wss" : "ws"}://${host}:3001`);
 
 // Current Firebase ID token, set by the auth provider; attached to authed requests.
 let authToken: string | null = null;
