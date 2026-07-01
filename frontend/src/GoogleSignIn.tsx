@@ -60,9 +60,7 @@ export function GoogleSignIn() {
           <div className="absolute bottom-0 right-0 size-[28rem] rounded-full bg-fuchsia-500/20 blur-3xl" />
         </div>
         <div className="relative flex items-center gap-2.5">
-          <div className="flex size-9 items-center justify-center rounded-xl bg-sidebar-primary text-xl">
-            🌴
-          </div>
+          <img src="/icon-192.png" alt="Jungle" className="size-9 rounded-xl" />
           <span className="text-lg font-bold">Jungle</span>
         </div>
         <div className="relative space-y-8">
@@ -92,9 +90,7 @@ export function GoogleSignIn() {
       <div className="flex items-center justify-center bg-background px-6 py-12">
         <div className="w-full max-w-sm">
           <div className="mb-8 flex items-center gap-2.5 lg:hidden">
-            <div className="flex size-9 items-center justify-center rounded-xl bg-primary text-xl">
-              🌴
-            </div>
+            <img src="/icon-192.png" alt="Jungle" className="size-9 rounded-xl" />
             <span className="text-lg font-bold">Jungle</span>
           </div>
 

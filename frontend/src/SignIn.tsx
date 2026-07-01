@@ -75,9 +75,7 @@ export function SignIn() {
 
       <div className="w-full max-w-md rounded-2xl border bg-card/80 p-7 shadow-2xl backdrop-blur-xl">
         <div className="mb-6 flex items-center gap-3">
-          <div className="flex size-11 items-center justify-center rounded-xl bg-primary text-2xl shadow-sm">
-            🌴
-          </div>
+          <img src="/icon-192.png" alt="Jungle" className="size-11 rounded-xl shadow-sm" />
           <div>
             <h1 className="text-xl font-bold tracking-tight">Jungle</h1>
             <p className="text-sm text-muted-foreground">

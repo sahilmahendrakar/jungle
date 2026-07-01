@@ -58,9 +58,7 @@ function Shell({ children }: { children: React.ReactNode }) {
       <div className="w-full max-w-md rounded-2xl border bg-card p-7 shadow-2xl">
         <div className="mb-6 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="flex size-9 items-center justify-center rounded-xl bg-primary text-xl">
-              🌴
-            </div>
+            <img src="/icon-192.png" alt="Jungle" className="size-9 rounded-xl" />
             <span className="font-bold">Jungle</span>
           </div>
           {profile && (

@@ -307,9 +307,7 @@ export function App({
       <aside className="flex w-72 shrink-0 flex-col bg-sidebar text-sidebar-foreground">
         {/* Workspace header */}
         <div className="flex shrink-0 items-center gap-2.5 border-b border-sidebar-border px-4 py-3.5">
-          <div className="flex size-8 items-center justify-center rounded-lg bg-sidebar-primary text-lg shadow-sm">
-            🌴
-          </div>
+          <img src="/icon-192.png" alt="Jungle" className="size-8 rounded-lg shadow-sm" />
           <div className="min-w-0">
             <div className="truncate font-bold leading-tight">Jungle</div>
             <div className="truncate text-xs text-sidebar-foreground/55">
