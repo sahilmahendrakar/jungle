@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { githubConnectUrl, type Participant } from "./api";
+import { githubConnectUrl, githubInstallUrl, type Participant } from "./api";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -49,6 +49,20 @@ export function ProfileDialog({
     try {
       const { url } = await githubConnectUrl();
       window.location.href = url; // full-page redirect to GitHub; callback returns to the app
+    } catch (e) {
+      setError(String((e as Error).message ?? e));
+      setBusy(false);
+    }
+  }
+
+  // Install the App / pick which repos agents can use (incl. private). Connecting only proves
+  // identity; this is what makes a user's repos appear in the agent repo picker.
+  async function configureRepos() {
+    setError("");
+    setBusy(true);
+    try {
+      const { url } = await githubInstallUrl();
+      window.location.href = url;
     } catch (e) {
       setError(String((e as Error).message ?? e));
       setBusy(false);
@@ -114,6 +128,20 @@ export function ProfileDialog({
               {busy ? "Redirecting…" : connected ? "Reconnect" : "Connect"}
             </Button>
           </div>
+          {connected && (
+            <div className="mt-2 border-t pt-2 text-xs text-muted-foreground">
+              Don't see your repositories when creating an agent?{" "}
+              <button
+                type="button"
+                onClick={configureRepos}
+                disabled={busy}
+                className="font-medium text-foreground underline underline-offset-2 hover:no-underline disabled:opacity-50"
+              >
+                Choose repositories
+              </button>{" "}
+              to grant access to specific repos (including private ones).
+            </div>
+          )}
           {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
         </div>
 

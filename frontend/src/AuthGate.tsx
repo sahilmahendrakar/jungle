@@ -31,13 +31,17 @@ export function AuthGate() {
     setGhDismissed(true);
   };
 
-  // Handle the GitHub OAuth round-trip return (?github=connected|error), then clean the URL.
+  // Handle the GitHub round-trip return (?github=connected|configured|error), then clean the URL.
   useEffect(() => {
     const params = new URLSearchParams(location.search);
     const g = params.get("github");
     if (!g) return;
     if (g === "connected") {
       if (user) localStorage.setItem(`jungle.gh.${user.uid}`, "1");
+      refreshMe();
+    } else if (g === "configured") {
+      // Returned from installing the App / choosing repos — identity is unchanged, but refresh
+      // so any connection state stays current.
       refreshMe();
     }
     for (const k of ["github", "login", "reason"]) params.delete(k);
