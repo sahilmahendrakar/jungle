@@ -174,6 +174,38 @@ app.post("/api/agents", async (req, res) => {
   }
 });
 
+// Update an agent's config from its profile page. Auth-gated (any signed-in user).
+// `mode` is applied live to the MA session; `model` is read-only (fixed at creation).
+app.patch("/api/agents/:id", async (req, res) => {
+  try {
+    const me = await requester(req);
+    if (!me) return res.status(401).json({ error: "auth required" });
+    const agent = await db.getParticipant(req.params.id);
+    if (!agent || agent.kind !== "agent") return res.status(404).json({ error: "agent not found" });
+
+    const patch: { displayName?: string; mode?: string } = {};
+    if (req.body?.displayName !== undefined) {
+      const dn = String(req.body.displayName).trim();
+      if (!dn) return res.status(400).json({ error: "display name cannot be empty" });
+      patch.displayName = dn;
+    }
+    if (req.body?.mode !== undefined) {
+      const mode = String(req.body.mode);
+      if (!ALLOWED_MODES.has(mode)) return res.status(400).json({ error: `unsupported mode: ${mode}` });
+      // Apply the permission-policy change to the live session before persisting.
+      if (mode !== agent.mode && agent.ma_session_id) {
+        await ma.updateSessionMode(agent.ma_session_id, !!agent.repo, mode as ma.AgentMode);
+      }
+      patch.mode = mode;
+    }
+    const updated = await db.updateAgentConfig(agent.id, patch);
+    broadcastAll({ type: "participant_updated", participant: updated });
+    res.json(updated);
+  } catch (e) {
+    res.status(500).json({ error: String((e as Error).message ?? e) });
+  }
+});
+
 // Approve/deny a pending tool confirmation (from an always_ask agent's card).
 app.post("/api/agents/confirm", async (req, res) => {
   try {
@@ -465,6 +497,15 @@ async function fanOut(channelId: string, payload: unknown) {
   for (const pid of await db.channelMemberIds(channelId)) {
     const set = sockets.get(pid);
     if (set) for (const ws of set) if (ws.readyState === WebSocket.OPEN) ws.send(data);
+  }
+}
+
+// Broadcast to every connected socket (workspace-wide events, e.g. a participant's profile
+// changed — everyone's People list / open profile should reflect it).
+function broadcastAll(payload: unknown) {
+  const data = JSON.stringify(payload);
+  for (const set of sockets.values()) {
+    for (const ws of set) if (ws.readyState === WebSocket.OPEN) ws.send(data);
   }
 }
 
