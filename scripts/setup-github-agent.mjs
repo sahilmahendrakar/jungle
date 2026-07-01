@@ -39,17 +39,18 @@ const config = {
   model: "claude-opus-4-8",
   system: SYSTEM,
   mcp_servers: [{ type: "url", name: "github", url: GITHUB_MCP_URL }],
-  // always_allow → the agent runs tools autonomously (no per-call human approval), bounded
-  // by the repo-scoped installation token + the sandbox. send_message we still handle ourselves.
+  // always_ask → every built-in/MCP tool call pauses on requires_action so the Jungle
+  // backend decides per agent MODE: always_allow agents are auto-approved; always_ask agents
+  // get a confirmation card in chat. send_message is a custom tool we execute ourselves.
   tools: [
     {
       type: "agent_toolset_20260401",
-      default_config: { enabled: true, permission_policy: { type: "always_allow" } },
+      default_config: { enabled: true, permission_policy: { type: "always_ask" } },
     },
     {
       type: "mcp_toolset",
       mcp_server_name: "github",
-      default_config: { enabled: true, permission_policy: { type: "always_allow" } },
+      default_config: { enabled: true, permission_policy: { type: "always_ask" } },
     },
     SEND_TOOL,
   ],

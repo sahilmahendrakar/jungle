@@ -57,17 +57,25 @@ export function listParticipants(): Promise<Participant[]> {
   });
 }
 
-// Create a human participant, or (kind "agent", optional repo) a cloud agent.
+// Create a human participant, or (kind "agent", optional repo/model/mode) a cloud agent.
 export function createParticipant(p: {
   kind: "human" | "agent";
   handle: string;
   displayName: string;
   repo?: string;
+  model?: string;
+  mode?: string;
 }): Promise<Participant> {
   const path = p.kind === "agent" ? "/api/agents" : "/api/participants";
   const body =
     p.kind === "agent"
-      ? { handle: p.handle, displayName: p.displayName, ...(p.repo ? { repo: p.repo } : {}) }
+      ? {
+          handle: p.handle,
+          displayName: p.displayName,
+          ...(p.repo ? { repo: p.repo } : {}),
+          ...(p.model ? { model: p.model } : {}),
+          ...(p.mode ? { mode: p.mode } : {}),
+        }
       : { kind: "human", handle: p.handle, displayName: p.displayName };
   return fetch(`${BASE}${path}`, {
     method: "POST",
@@ -116,6 +124,15 @@ export function createDm(participantId: string, otherId: string): Promise<{ id: 
     if (!r.ok) throw new Error(j.error ?? "failed to open DM");
     return j;
   });
+}
+
+// Approve or deny a pending tool confirmation from an always_ask agent.
+export function confirmToolCall(confirmId: string, decision: "allow" | "deny"): Promise<{ ok: boolean }> {
+  return fetch(`${BASE}/api/agents/confirm`, {
+    method: "POST",
+    headers: authHeaders({ "content-type": "application/json" }),
+    body: JSON.stringify({ confirmId, decision }),
+  }).then((r) => json<{ ok: boolean }>(r, "failed to submit decision"));
 }
 
 // --- Channel members + delete ---

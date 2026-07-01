@@ -19,6 +19,8 @@ export interface Participant {
   firebase_uid: string | null;
   email: string | null;
   avatar_url: string | null;
+  model: string | null; // agent model override (null = agent-config default)
+  mode: string; // 'always_ask' | 'always_allow'
 }
 
 export interface PersistedMessage {
@@ -45,16 +47,20 @@ export async function createParticipant(p: {
   firebaseUid?: string | null;
   email?: string | null;
   avatarUrl?: string | null;
+  model?: string | null;
+  mode?: string | null;
 }): Promise<Participant> {
   const { rows } = await pool.query<Participant>(
     `insert into participants
        (kind, handle, display_name, ma_session_id, repo, vault_id, repo_resource_id,
-        mcp_credential_id, firebase_uid, email, avatar_url)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) returning *`,
+        mcp_credential_id, firebase_uid, email, avatar_url, model, mode)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, coalesce($13, 'always_allow'))
+     returning *`,
     [
       p.kind, p.handle, p.displayName, p.maSessionId ?? null,
       p.repo ?? null, p.vaultId ?? null, p.repoResourceId ?? null, p.mcpCredentialId ?? null,
       p.firebaseUid ?? null, p.email ?? null, p.avatarUrl ?? null,
+      p.model ?? null, p.mode ?? null,
     ],
   );
   return rows[0];
@@ -262,6 +268,8 @@ export interface AgentRow {
   vault_id: string | null;
   repo_resource_id: string | null;
   mcp_credential_id: string | null;
+  model: string | null;
+  mode: string; // 'always_ask' | 'always_allow'
 }
 
 // Of the given participant ids, the ones that are agents (with their MA session id +
@@ -269,7 +277,8 @@ export interface AgentRow {
 export async function agentsByIds(ids: string[]): Promise<AgentRow[]> {
   if (!ids.length) return [];
   const { rows } = await pool.query<AgentRow>(
-    `select id, handle, display_name, ma_session_id, repo, vault_id, repo_resource_id, mcp_credential_id
+    `select id, handle, display_name, ma_session_id, repo, vault_id, repo_resource_id,
+            mcp_credential_id, model, mode
      from participants
      where kind = 'agent' and ma_session_id is not null and id = any($1)`,
     [ids],

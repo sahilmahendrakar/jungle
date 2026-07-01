@@ -25,6 +25,9 @@ alter table participants add column if not exists mcp_credential_id  text;
 alter table participants add column if not exists firebase_uid       text unique;
 alter table participants add column if not exists email              text;
 alter table participants add column if not exists avatar_url         text;
+-- Agent config: model override (null = agent-config default) + tool permission mode.
+alter table participants add column if not exists model              text;
+alter table participants add column if not exists mode               text not null default 'always_allow';
 
 create table if not exists channels (
   id          uuid primary key default gen_random_uuid(),

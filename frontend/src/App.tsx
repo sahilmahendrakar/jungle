@@ -10,6 +10,7 @@ import {
   addChannelMember,
   removeChannelMember,
   deleteChannel,
+  confirmToolCall,
   WS_BASE,
   type Channel,
   type Message,
@@ -48,6 +49,8 @@ import { RepoCombobox } from "./RepoCombobox";
 import { Markdown } from "./Markdown";
 import {
   Bot,
+  Check,
+  ChevronDown,
   GitBranch,
   Hash,
   LogOut,
@@ -55,12 +58,38 @@ import {
   MoreVertical,
   Plus,
   SendHorizonal,
+  ShieldQuestion,
   Sparkles,
   Trash2,
   UserPlus,
   Users,
   X,
 } from "lucide-react";
+
+// Agent model + permission-mode choices for the create-agent dialog. Model ids must match
+// the backend's ALLOWED_MODELS; the first entry is the default.
+const MODEL_OPTIONS = [
+  { id: "claude-opus-4-8", label: "Opus 4.8", hint: "Most capable" },
+  { id: "claude-sonnet-5", label: "Sonnet 5", hint: "Balanced" },
+  { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5", hint: "Fastest" },
+];
+const MODE_OPTIONS = [
+  { id: "always_allow", label: "Always allow", hint: "Runs tools without asking" },
+  { id: "always_ask", label: "Always ask", hint: "Confirm each tool call in chat" },
+];
+
+// A pending tool-call confirmation surfaced by an always_ask agent.
+interface ToolConfirm {
+  confirmId: string;
+  channelId: string;
+  agentName: string;
+  agentHandle: string;
+  tool: string;
+  input: unknown;
+  status?: "resolved";
+  result?: "allow" | "deny";
+  by?: string;
+}
 
 function mergeById(a: Message[], b: Message[]): Message[] {
   const map = new Map<string, Message>();
@@ -135,7 +164,11 @@ export function App({
   const [agHandle, setAgHandle] = useState("");
   const [agName, setAgName] = useState("");
   const [agRepo, setAgRepo] = useState("");
+  const [agModel, setAgModel] = useState(MODEL_OPTIONS[0].id);
+  const [agMode, setAgMode] = useState(MODE_OPTIONS[0].id);
   const [addingAgent, setAddingAgent] = useState(false);
+  // Pending tool-confirmation cards (always_ask agents), keyed by confirmId.
+  const [confirms, setConfirms] = useState<ToolConfirm[]>([]);
   // Channel members panel + delete
   const [members, setMembers] = useState<Participant[]>([]);
   const [showMembers, setShowMembers] = useState(false);
@@ -292,6 +325,28 @@ export function App({
           if (evt.channelId === selectedRef.current) setSelected(null);
           return;
         }
+        if (evt.type === "tool_confirmation_request") {
+          setConfirms((cs) =>
+            cs.some((c) => c.confirmId === evt.confirmId)
+              ? cs
+              : [
+                  ...cs,
+                  {
+                    confirmId: evt.confirmId,
+                    channelId: evt.channelId,
+                    agentName: evt.agentName,
+                    agentHandle: evt.agentHandle,
+                    tool: evt.tool,
+                    input: evt.input,
+                  },
+                ],
+          );
+          return;
+        }
+        if (evt.type === "tool_confirmation_resolved") {
+          setConfirms((cs) => cs.filter((c) => c.confirmId !== evt.confirmId));
+          return;
+        }
         if (evt.type !== "message") return;
         const m: Message = evt.message;
         if (m.channel_id !== selectedRef.current) return;
@@ -433,16 +488,29 @@ export function App({
         handle: agHandle.trim(),
         displayName: agName.trim(),
         repo: agRepo.trim() || undefined,
+        model: agModel,
+        mode: agMode,
       });
       setShowAddAgent(false);
       setAgHandle("");
       setAgName("");
       setAgRepo("");
+      setAgModel(MODEL_OPTIONS[0].id);
+      setAgMode(MODE_OPTIONS[0].id);
       listParticipants().then(setPeople).catch(() => {});
     } catch (e) {
       setNotice(String((e as Error).message ?? e));
     } finally {
       setAddingAgent(false);
+    }
+  }
+
+  async function decideConfirm(c: ToolConfirm, decision: "allow" | "deny") {
+    setConfirms((cs) => cs.filter((x) => x.confirmId !== c.confirmId)); // optimistic
+    try {
+      await confirmToolCall(c.confirmId, decision);
+    } catch (e) {
+      setNotice(String((e as Error).message ?? e));
     }
   }
 
@@ -744,6 +812,17 @@ export function App({
               </span>{" "}
               {workingHere.length > 1 ? "are" : "is"} working…
             </span>
+          </div>
+        )}
+
+        {/* Pending tool confirmations for this channel (always_ask agents) */}
+        {selected && confirms.filter((c) => c.channelId === selected).length > 0 && (
+          <div className="mx-5 mb-1 space-y-2">
+            {confirms
+              .filter((c) => c.channelId === selected)
+              .map((c) => (
+                <ConfirmCard key={c.confirmId} c={c} onDecide={decideConfirm} />
+              ))}
           </div>
         )}
 
@@ -1097,6 +1176,26 @@ export function App({
                 </p>
               )}
             </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label>Model</Label>
+                <SelectMenu
+                  value={agModel}
+                  onChange={setAgModel}
+                  options={MODEL_OPTIONS}
+                  testId="agent-model"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Tool permissions</Label>
+                <SelectMenu
+                  value={agMode}
+                  onChange={setAgMode}
+                  options={MODE_OPTIONS}
+                  testId="agent-mode"
+                />
+              </div>
+            </div>
           </div>
           <DialogFooter>
             <Button
@@ -1114,6 +1213,104 @@ export function App({
 }
 
 /* ----------------------------- small pieces ----------------------------- */
+
+// A shadcn-styled single-select built on the DropdownMenu primitive (portal=false so it
+// works inside dialogs). Shows the current option's label; lists options with an optional hint.
+function SelectMenu({
+  value,
+  onChange,
+  options,
+  testId,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: { id: string; label: string; hint?: string }[];
+  testId?: string;
+}) {
+  const current = options.find((o) => o.id === value) ?? options[0];
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="outline" data-testid={testId} className="w-full justify-between font-normal">
+          <span className="truncate">{current?.label}</span>
+          <ChevronDown className="size-4 shrink-0 opacity-50" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        portal={false}
+        align="start"
+        className="w-[var(--radix-dropdown-menu-trigger-width)]"
+      >
+        {options.map((o) => (
+          <DropdownMenuItem
+            key={o.id}
+            data-testid={testId ? `${testId}-option` : undefined}
+            onClick={() => onChange(o.id)}
+            className="flex items-center justify-between gap-3"
+          >
+            <span className="flex flex-col">
+              <span>{o.label}</span>
+              {o.hint && <span className="text-xs text-muted-foreground">{o.hint}</span>}
+            </span>
+            {o.id === value && <Check className="size-4 shrink-0" />}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+// A pending tool-call confirmation card (always_ask agents). Approve/deny buttons resolve it.
+function ConfirmCard({
+  c,
+  onDecide,
+}: {
+  c: ToolConfirm;
+  onDecide: (c: ToolConfirm, d: "allow" | "deny") => void;
+}) {
+  const summary =
+    typeof c.input === "string" ? c.input : JSON.stringify(c.input, null, 2);
+  return (
+    <div
+      data-testid="tool-confirm-card"
+      className="rounded-xl border border-amber-300/60 bg-amber-50/60 p-3 shadow-sm dark:border-amber-500/30 dark:bg-amber-500/5"
+    >
+      <div className="flex items-start gap-2.5">
+        <ShieldQuestion className="mt-0.5 size-5 shrink-0 text-amber-600" />
+        <div className="min-w-0 flex-1">
+          <div className="text-sm">
+            <span className="font-semibold">{c.agentName}</span> wants to run{" "}
+            <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">{c.tool}</code>
+          </div>
+          {summary && summary !== "{}" && (
+            <pre className="mt-1.5 max-h-40 overflow-auto rounded-lg border bg-background/70 p-2 text-[11px] leading-relaxed">
+              {summary}
+            </pre>
+          )}
+          <div className="mt-2.5 flex gap-2">
+            <Button
+              size="sm"
+              data-testid="tool-confirm-allow"
+              onClick={() => onDecide(c, "allow")}
+              className="h-8"
+            >
+              <Check className="size-4" /> Approve
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              data-testid="tool-confirm-deny"
+              onClick={() => onDecide(c, "deny")}
+              className="h-8"
+            >
+              <X className="size-4" /> Deny
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function SectionHeader({
   label,

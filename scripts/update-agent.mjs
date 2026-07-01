@@ -42,7 +42,15 @@ const agent = await client.beta.agents.retrieve(ids.agentId);
 const updated = await client.beta.agents.update(ids.agentId, {
   version: agent.version,
   system: SYSTEM,
-  tools: [{ type: "agent_toolset_20260401" }, SEND_TOOL],
+  // always_ask → tool calls pause on requires_action; the Jungle backend approves them
+  // automatically for always_allow agents and surfaces a card for always_ask agents.
+  tools: [
+    {
+      type: "agent_toolset_20260401",
+      default_config: { enabled: true, permission_policy: { type: "always_ask" } },
+    },
+    SEND_TOOL,
+  ],
 });
 console.log("updated agent", ids.agentId, "-> version", updated.version);
 console.log("tools:", updated.tools.map((t) => t.type === "custom" ? `custom:${t.name}` : t.type));

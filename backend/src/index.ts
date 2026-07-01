@@ -129,12 +129,21 @@ app.post("/api/channels", async (req, res) => {
 // Create an agent = one MA session + a participant of kind 'agent'. If `repo` ("owner/name")
 // is given, provision a GitHub-capable agent: mint a repo-scoped installation token, build a
 // vault with the GitHub MCP credential, and create the session with the repo mounted.
+// Models an agent may run (id must be a real model; keep in sync with the UI dropdown).
+const ALLOWED_MODELS = new Set(["claude-haiku-4-5-20251001", "claude-sonnet-5", "claude-opus-4-8"]);
+const ALLOWED_MODES = new Set(["always_ask", "always_allow"]);
+
 app.post("/api/agents", async (req, res) => {
   try {
     const { handle, displayName, repo } = req.body ?? {};
     if (!handle || !displayName) {
       return res.status(400).json({ error: "handle, displayName required" });
     }
+    const model = req.body?.model ? String(req.body.model) : null;
+    if (model && !ALLOWED_MODELS.has(model)) return res.status(400).json({ error: `unsupported model: ${model}` });
+    const mode = req.body?.mode ? String(req.body.mode) : "always_allow";
+    if (!ALLOWED_MODES.has(mode)) return res.status(400).json({ error: `unsupported mode: ${mode}` });
+
     if (repo) {
       if (!gh.appAuthConfigured()) {
         return res.status(500).json({ error: "GitHub App private key not configured" });
@@ -146,16 +155,51 @@ app.post("/api/agents", async (req, res) => {
       const { sessionId, repoResourceId } = await ma.createRepoAgentSession(
         `jungle agent @${handle}`,
         { repoUrl: `https://github.com/${repo}`, repoToken: token, vaultId },
+        model,
       );
       return res.status(201).json(
         await db.createParticipant({
           kind: "agent", handle, displayName, maSessionId: sessionId,
-          repo, vaultId, repoResourceId, mcpCredentialId: credentialId,
+          repo, vaultId, repoResourceId, mcpCredentialId: credentialId, model, mode,
         }),
       );
     }
-    const maSessionId = await ma.createAgentSession(`jungle agent @${handle}`);
-    res.status(201).json(await db.createParticipant({ kind: "agent", handle, displayName, maSessionId }));
+    const maSessionId = await ma.createAgentSession(`jungle agent @${handle}`, model);
+    res.status(201).json(
+      await db.createParticipant({ kind: "agent", handle, displayName, maSessionId, model, mode }),
+    );
+  } catch (e) {
+    res.status(500).json({ error: String((e as Error).message ?? e) });
+  }
+});
+
+// Approve/deny a pending tool confirmation (from an always_ask agent's card).
+app.post("/api/agents/confirm", async (req, res) => {
+  try {
+    const me = await requester(req);
+    if (!me) return res.status(401).json({ error: "auth required" });
+    const confirmId = String(req.body?.confirmId ?? "");
+    const decision = req.body?.decision === "allow" ? "allow" : "deny";
+    const pending = pendingConfirms.get(confirmId);
+    if (!pending) return res.status(404).json({ error: "confirmation not found or already resolved" });
+    if (!(await db.isMember(pending.channelId, me.id))) {
+      return res.status(403).json({ error: "not a member of this channel" });
+    }
+    clearTimeout(pending.timer);
+    pendingConfirms.delete(confirmId);
+    pending.resolve(
+      decision === "allow"
+        ? { result: "allow" }
+        : { result: "deny", denyMessage: `Denied by @${me.handle}.` },
+    );
+    await fanOut(pending.channelId, {
+      type: "tool_confirmation_resolved",
+      confirmId,
+      channelId: pending.channelId,
+      result: decision,
+      by: me.handle,
+    });
+    res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: String((e as Error).message ?? e) });
   }
@@ -423,6 +467,46 @@ async function fanOut(channelId: string, payload: unknown) {
   }
 }
 
+// --- Tool confirmations (always_ask agents) ---
+// A tool call awaiting a human's allow/deny. Kept in memory (single backend); the WS card
+// the human clicks resolves the promise the agent turn is awaiting.
+interface PendingConfirm {
+  channelId: string;
+  agentId: string;
+  resolve: (d: ma.ConfirmDecision) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+const pendingConfirms = new Map<string, PendingConfirm>();
+const CONFIRM_TIMEOUT_MS = 10 * 60 * 1000; // auto-deny if nobody answers, so the turn can't wedge
+
+// Build the onConfirm callback for one agent turn: always_allow auto-approves; always_ask
+// surfaces a confirmation card into the channel and waits for a human decision.
+function makeOnConfirm(agent: db.AgentRow, channelId: string) {
+  return (req: ma.ToolConfirmRequest): Promise<ma.ConfirmDecision> => {
+    if (agent.mode !== "always_ask") return Promise.resolve({ result: "allow" });
+    const confirmId = randomBytes(9).toString("hex");
+    return new Promise<ma.ConfirmDecision>((resolve) => {
+      const timer = setTimeout(() => {
+        if (!pendingConfirms.has(confirmId)) return;
+        pendingConfirms.delete(confirmId);
+        void fanOut(channelId, { type: "tool_confirmation_resolved", confirmId, channelId, result: "deny" });
+        resolve({ result: "deny", denyMessage: "No human responded in time; the action was skipped." });
+      }, CONFIRM_TIMEOUT_MS);
+      pendingConfirms.set(confirmId, { channelId, agentId: agent.id, resolve, timer });
+      void fanOut(channelId, {
+        type: "tool_confirmation_request",
+        confirmId,
+        channelId,
+        agentId: agent.id,
+        agentHandle: agent.handle,
+        agentName: agent.display_name,
+        tool: req.name,
+        input: req.input,
+      });
+    });
+  };
+}
+
 // A human message starts a cascade with this budget; each agent->agent hop decrements
 // it. At 0, agents stop auto-replying until a human speaks again. Bounds loops + cost.
 const DEFAULT_CASCADE_BUDGET = 3;
@@ -504,9 +588,10 @@ async function runAgentReply(
         `Then push your branch and use the GitHub tools only to open the pull request. ` +
         `(The PR is opened by the Jungle app; your commits will show "${gitName}" as the author.)`;
     }
-    await ma.runAgentTurn(agent.ma_session_id, input, (toolInput) =>
-      deliverAgentMessage(agent, toolInput, replyBudget),
-    );
+    await ma.runAgentTurn(agent.ma_session_id, input, {
+      onSend: (toolInput) => deliverAgentMessage(agent, toolInput, replyBudget),
+      onConfirm: makeOnConfirm(agent, triggerChannelId),
+    });
   } catch (e) {
     console.error("runAgentReply:", e);
   } finally {
