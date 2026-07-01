@@ -4,11 +4,15 @@ import { readFileSync } from "node:fs";
 import * as db from "./db";
 
 // GitHub App user-OAuth credentials (GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET in .env).
-const CLIENT_ID = process.env.GITHUB_CLIENT_ID ?? "";
-const CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET ?? "";
+// Trim these: a stray space or newline in a deployment secret gets URL-encoded into the
+// authorize URL (e.g. client_id=%20Iv23...), which GitHub answers with a 404 "not found"
+// page instead of the consent screen.
+const CLIENT_ID = (process.env.GITHUB_CLIENT_ID ?? "").trim();
+const CLIENT_SECRET = (process.env.GITHUB_CLIENT_SECRET ?? "").trim();
 // Must exactly match the Callback URL registered on the GitHub App.
-export const REDIRECT_URI =
-  process.env.GITHUB_REDIRECT_URI ?? "http://localhost:3001/auth/github/callback";
+export const REDIRECT_URI = (
+  process.env.GITHUB_REDIRECT_URI ?? "http://localhost:3001/auth/github/callback"
+).trim();
 // PEM private key for App (installation) auth — the bot-identity path.
 const APP_PEM_PATH =
   process.env.GITHUB_APP_PEM ?? "/home/ec2-user/.config/jungle/github-app.pem";
