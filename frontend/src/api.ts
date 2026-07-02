@@ -289,6 +289,20 @@ export function disconnectGithub(): Promise<{ ok: boolean }> {
   }).then((r) => json<{ ok: boolean }>(r, "failed to disconnect GitHub"));
 }
 
+export interface GithubStatus {
+  connected: boolean;
+  login?: string;
+  installUrl: string | null;
+  installationCount: number;
+  repoCount: number;
+}
+
+export function getGithubStatus(): Promise<GithubStatus> {
+  return fetch(`${BASE}/api/github/status`, { headers: authHeaders() }).then((r) =>
+    json<GithubStatus>(r, "failed to load GitHub status"),
+  );
+}
+
 export interface Repo {
   full_name: string;
   private: boolean;

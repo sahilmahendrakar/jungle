@@ -4,6 +4,8 @@ import { useAuth } from "./auth";
 import { GoogleSignIn } from "./GoogleSignIn";
 import { Onboarding } from "./Onboarding";
 import { App } from "./App";
+import { Settings } from "./Settings";
+import { usePath } from "./route";
 
 function FullScreenSpinner() {
   return (
@@ -21,6 +23,7 @@ function FullScreenSpinner() {
 export function AuthGate() {
   const { ready, user, me, getToken, signOut, refreshMe } = useAuth();
   const [ghDismissed, setGhDismissed] = useState(false);
+  const path = usePath();
 
   // Remember a per-user "skip GitHub" choice so returning users aren't nagged each login.
   useEffect(() => {
@@ -49,15 +52,13 @@ export function AuthGate() {
   if (!user) return <GoogleSignIn />;
   if (!me) return <FullScreenSpinner />; // profile loading right after sign-in
   if (!me.onboarded) return <Onboarding onSkipGithub={dismissGithub} />;
+  if (path === "/settings") return <Settings />;
   if (!me.github?.connected && !ghDismissed) return <Onboarding onSkipGithub={dismissGithub} />;
 
   return (
     <App
       authParticipantId={me.participant!.id}
       me={me.participant}
-      email={me.profile?.email}
-      picture={me.profile?.picture}
-      github={me.github}
       getWsToken={getToken}
       onSignOut={signOut}
     />

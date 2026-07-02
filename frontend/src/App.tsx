@@ -50,8 +50,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { RepoCombobox } from "./RepoCombobox";
 import { Markdown } from "./Markdown";
-import { ProfileDialog } from "./ProfileDialog";
 import { AgentActivity } from "./AgentActivity";
+import { navigate } from "./route";
 import {
   Activity,
   Bot,
@@ -161,17 +161,11 @@ export function App({
   authParticipantId,
   getWsToken,
   me: meProp,
-  email,
-  picture,
-  github,
   onSignOut,
 }: {
   authParticipantId?: string; // from Firebase onboarding; overrides the ?as= dev path
   getWsToken?: () => Promise<string | null>; // fresh ID token for the WS handshake
   me?: Participant; // current user (Firebase mode)
-  email?: string | null; // current user's email (Firebase profile)
-  picture?: string | null; // current user's avatar URL (Firebase profile)
-  github?: { connected: boolean; login?: string }; // GitHub connection state
   onSignOut?: () => void; // Firebase sign-out (else clears ?as=)
 } = {}) {
   const participantId = authParticipantId ?? new URLSearchParams(location.search).get("as");
@@ -222,8 +216,6 @@ export function App({
   const activityIdRef = useRef<string | null>(null);
   activityIdRef.current = activityId;
   const taRef = useRef<HTMLTextAreaElement | null>(null);
-  // Profile / settings dialog
-  const [showProfile, setShowProfile] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const selectedRef = useRef<string | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -783,7 +775,7 @@ export function App({
           <div className="flex shrink-0 items-center gap-1 border-t border-sidebar-border px-2 py-2.5">
             <button
               data-testid="open-profile"
-              onClick={() => setShowProfile(true)}
+              onClick={() => navigate("/settings")}
               title="Profile & settings"
               className="flex min-w-0 flex-1 items-center gap-2.5 rounded-md px-1 py-1 text-left transition-colors hover:bg-sidebar-accent"
             >
@@ -1387,19 +1379,6 @@ export function App({
         </DialogContent>
       </Dialog>
 
-      {/* Your own profile / settings (avatar, email, GitHub connect, sign out) */}
-      {me && (
-        <ProfileDialog
-          open={showProfile}
-          onOpenChange={setShowProfile}
-          me={me}
-          email={email}
-          picture={picture}
-          github={github}
-          onSignOut={signOut}
-        />
-      )}
-
       {/* Viewing another participant: human = read-only alias; agent = editable config */}
       {profilePerson && (
         <ParticipantProfileDialog
@@ -1486,8 +1465,7 @@ function SelectMenu({
 // for now). Agents expose an editable config: display name + tool-permission mode (applied live).
 // sdk agents also expose an editable model (applied at the next turn) and an Activity view;
 // ma (legacy Managed Agents) agents keep the read-only model + legacy two-mode dropdown.
-// (Distinct from the self ProfileDialog in ./ProfileDialog, which is the current user's own
-// settings: email, GitHub connect, sign out.)
+// (The current user's own settings — email, GitHub, sign out — live at the /settings route.)
 function ParticipantProfileDialog({
   person,
   isSelf,
