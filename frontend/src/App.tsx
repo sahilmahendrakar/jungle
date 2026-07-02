@@ -48,7 +48,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { RepoCombobox } from "./RepoCombobox";
 import { Markdown } from "./Markdown";
-import { ProfileDialog } from "./ProfileDialog";
+import { navigate } from "./route";
 import {
   Bot,
   Check,
@@ -143,17 +143,11 @@ export function App({
   authParticipantId,
   getWsToken,
   me: meProp,
-  email,
-  picture,
-  github,
   onSignOut,
 }: {
   authParticipantId?: string; // from Firebase onboarding; overrides the ?as= dev path
   getWsToken?: () => Promise<string | null>; // fresh ID token for the WS handshake
   me?: Participant; // current user (Firebase mode)
-  email?: string | null; // current user's email (Firebase profile)
-  picture?: string | null; // current user's avatar URL (Firebase profile)
-  github?: { connected: boolean; login?: string }; // GitHub connection state
   onSignOut?: () => void; // Firebase sign-out (else clears ?as=)
 } = {}) {
   const participantId = authParticipantId ?? new URLSearchParams(location.search).get("as");
@@ -195,8 +189,6 @@ export function App({
   );
   const [profileId, setProfileId] = useState<string | null>(null);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
-  // Profile / settings dialog
-  const [showProfile, setShowProfile] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const selectedRef = useRef<string | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -710,7 +702,7 @@ export function App({
           <div className="flex shrink-0 items-center gap-1 border-t border-sidebar-border px-2 py-2.5">
             <button
               data-testid="open-profile"
-              onClick={() => setShowProfile(true)}
+              onClick={() => navigate("/settings")}
               title="Profile & settings"
               className="flex min-w-0 flex-1 items-center gap-2.5 rounded-md px-1 py-1 text-left transition-colors hover:bg-sidebar-accent"
             >
@@ -1314,19 +1306,6 @@ export function App({
         </DialogContent>
       </Dialog>
 
-      {/* Your own profile / settings (avatar, email, GitHub connect, sign out) */}
-      {me && (
-        <ProfileDialog
-          open={showProfile}
-          onOpenChange={setShowProfile}
-          me={me}
-          email={email}
-          picture={picture}
-          github={github}
-          onSignOut={signOut}
-        />
-      )}
-
       {/* Viewing another participant: human = read-only alias; agent = editable config */}
       {profilePerson && (
         <ParticipantProfileDialog
@@ -1394,8 +1373,7 @@ function SelectMenu({
 // Slack-style profile for viewing another participant. Humans are read-only (just their alias
 // for now). Agents expose an editable config: display name + tool-permission mode (applied live
 // to the running session). Model is read-only — it's fixed for an agent's lifetime (its memory
-// lives on the session). (Distinct from the self ProfileDialog in ./ProfileDialog, which is the
-// current user's own settings: email, GitHub connect, sign out.)
+// lives on the session). The current user's own settings live at /settings.
 function ParticipantProfileDialog({
   person,
   isSelf,

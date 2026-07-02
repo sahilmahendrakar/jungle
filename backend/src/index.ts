@@ -403,9 +403,21 @@ app.get("/auth/github/callback", async (req, res) => {
     pendingOAuth.delete(state);
     const { login } = await gh.exchangeCodeAndStore(pending.participantId, code);
     // Back to the SPA, which reads ?github=connected to advance/refresh the onboarding step.
-    res.redirect(`${FRONTEND_URL}/?github=connected&login=${encodeURIComponent(login)}`);
+    res.redirect(`${FRONTEND_URL}/settings?github=connected&login=${encodeURIComponent(login)}`);
   } catch (e) {
-    res.redirect(`${FRONTEND_URL}/?github=error&reason=${encodeURIComponent(String((e as Error).message ?? e))}`);
+    res.redirect(`${FRONTEND_URL}/settings?github=error&reason=${encodeURIComponent(String((e as Error).message ?? e))}`);
+  }
+});
+
+// GitHub connection + App installation status for the settings page.
+app.get("/api/github/status", auth.requireAuth, async (req, res) => {
+  try {
+    const u = auth.authedUser(req)!;
+    const p = await db.getParticipantByFirebaseUid(u.uid);
+    if (!p) return res.status(409).json({ error: "finish onboarding first" });
+    res.json(await gh.githubStatus(p.id));
+  } catch (e) {
+    res.status(500).json({ error: String((e as Error).message ?? e) });
   }
 });
 
