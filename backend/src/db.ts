@@ -402,29 +402,81 @@ export async function listAgentEvents(
   return rows;
 }
 
-export async function listChannels(
-  participantId?: string,
-): Promise<{ id: string; name: string; kind: string; dm_with: string | null }[]> {
+export interface ChannelListItem {
+  id: string;
+  name: string;
+  kind: string;
+  dm_with: string | null;
+  unread_count: number; // messages after the requester's last_read_seq, excluding their own
+  has_mention: boolean; // any unread message @mentions the requester
+}
+
+export async function listChannels(participantId?: string): Promise<ChannelListItem[]> {
   if (participantId) {
     // For DMs, also surface the other member's handle so the UI can label it "@them".
+    // unread_count / has_mention are computed in one aggregate pass (no N+1): for each channel
+    // the participant belongs to, join its messages newer than the participant's last_read_seq
+    // (0 if they've never read it), skip messages they sent themselves, and count them / flag
+    // whether any is a mention of them.
     const { rows } = await pool.query(
       `select c.id, c.name, c.kind,
               case when c.kind = 'dm' then (
                 select p.handle from channel_members m
                 join participants p on p.id = m.participant_id
                 where m.channel_id = c.id and m.participant_id <> $1 limit 1
-              ) end as dm_with
+              ) end as dm_with,
+              count(msg.id)::int as unread_count,
+              coalesce(bool_or(mention.participant_id is not null), false) as has_mention
        from channels c
        join channel_members cm on cm.channel_id = c.id
-       where cm.participant_id = $1 order by c.created_at`,
+       left join channel_reads cr on cr.channel_id = c.id and cr.participant_id = $1
+       left join messages msg
+              on msg.channel_id = c.id
+             and msg.seq > coalesce(cr.last_read_seq, 0)
+             and msg.sender_id <> $1
+       left join mentions mention
+              on mention.message_id = msg.id and mention.participant_id = $1
+       where cm.participant_id = $1
+       group by c.id, c.name, c.kind, c.created_at
+       order by c.created_at`,
       [participantId],
     );
     return rows;
   }
   const { rows } = await pool.query(
-    `select id, name, kind, null as dm_with from channels order by created_at`,
+    `select id, name, kind, null as dm_with, 0 as unread_count, false as has_mention
+     from channels order by created_at`,
   );
   return rows;
+}
+
+// Mark a channel read for a participant: set last_read_seq to `seq` (defaulting to the
+// channel's current max message seq). Never lowers an existing marker (greatest()), so a stale
+// client read can't un-read newer messages. Upsert keyed on (channel, participant).
+export async function markChannelRead(
+  channelId: string,
+  participantId: string,
+  seq?: number | null,
+): Promise<number> {
+  const target =
+    seq != null && Number.isFinite(seq)
+      ? String(seq)
+      : (
+          await pool.query<{ max: string | null }>(
+            `select max(seq)::text as max from messages where channel_id = $1`,
+            [channelId],
+          )
+        ).rows[0]?.max ?? "0";
+  const { rows } = await pool.query<{ last_read_seq: string }>(
+    `insert into channel_reads (channel_id, participant_id, last_read_seq, updated_at)
+     values ($1, $2, $3, now())
+     on conflict (channel_id, participant_id) do update
+       set last_read_seq = greatest(channel_reads.last_read_seq, excluded.last_read_seq),
+           updated_at = now()
+     returning last_read_seq::text`,
+    [channelId, participantId, target],
+  );
+  return Number(rows[0]?.last_read_seq ?? 0);
 }
 
 export async function getChannelByNameForMember(

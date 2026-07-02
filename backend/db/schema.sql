@@ -90,6 +90,18 @@ create table if not exists mentions (
   primary key (message_id, participant_id)
 );
 
+-- Slack-style per-participant read state. One row per (channel, participant) records the
+-- highest message seq that participant has read; the channel-list endpoint uses it to compute
+-- unread_count / has_mention for the requesting human. Agents never "read" channels, so their
+-- rows simply never appear here. See migrations/003_channel_reads.sql.
+create table if not exists channel_reads (
+  channel_id     uuid not null references channels(id) on delete cascade,
+  participant_id uuid not null references participants(id) on delete cascade,
+  last_read_seq  bigint not null default 0,
+  updated_at     timestamptz not null default now(),
+  primary key (channel_id, participant_id)
+);
+
 -- A participant's connected GitHub account (via our GitHub App user-OAuth flow).
 -- One identity per participant. Tokens expire (8h access, ~6mo refresh) — we store the
 -- refresh token and renew on demand. MVP: stored in plaintext on the box; encrypt at rest

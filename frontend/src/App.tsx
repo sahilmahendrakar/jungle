@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   listChannels,
+  markChannelRead,
   getMessages,
   listParticipants,
   createChannel,
@@ -214,6 +215,12 @@ export function App({
   const selectedRef = useRef<string | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   selectedRef.current = selected;
+  // Whether this tab is focused/visible — a message for the open channel only auto-marks-read
+  // when the user is actually looking at it (Slack behaviour). Tracked via a ref so the WS
+  // handler reads a live value without re-subscribing.
+  const focusedRef = useRef<boolean>(
+    typeof document === "undefined" ? true : document.visibilityState === "visible" && document.hasFocus(),
+  );
 
   const me = meProp ?? people.find((p) => p.id === participantId);
 
@@ -224,6 +231,19 @@ export function App({
       // Keep the current selection only if it still exists; otherwise fall back to the first.
       setSelected((s) => selectId ?? (cs.some((c) => c.id === s) ? s : cs[0]?.id ?? null));
     });
+  }
+
+  // Mark a channel read: clear its local unread state immediately (optimistic) and tell the
+  // backend to advance last_read_seq. Only for humans — the current user always is one.
+  function markRead(channelId: string) {
+    setChannels((cs) =>
+      cs.map((c) =>
+        c.id === channelId && ((c.unread_count ?? 0) > 0 || c.has_mention)
+          ? { ...c, unread_count: 0, has_mention: false }
+          : c,
+      ),
+    );
+    markChannelRead(channelId).catch(() => {});
   }
 
   function refreshMembers() {
@@ -289,11 +309,33 @@ export function App({
     listParticipants().then(setPeople).catch(() => {});
   }, [participantId]);
 
-  // Load history when the selected channel changes.
+  // Load history when the selected channel changes, and mark it read (Slack: opening a
+  // channel clears its unread state).
   useEffect(() => {
     if (!selected) return;
     getMessages(selected).then(setMessages);
+    markRead(selected);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected]);
+
+  // Track tab focus/visibility so an incoming message for the open channel only auto-marks-read
+  // when the user is actually looking. On regaining focus while a channel is open, mark it read.
+  useEffect(() => {
+    const update = () => {
+      focusedRef.current =
+        document.visibilityState === "visible" && document.hasFocus();
+      if (focusedRef.current && selectedRef.current) markRead(selectedRef.current);
+    };
+    window.addEventListener("focus", update);
+    window.addEventListener("blur", update);
+    document.addEventListener("visibilitychange", update);
+    return () => {
+      window.removeEventListener("focus", update);
+      window.removeEventListener("blur", update);
+      document.removeEventListener("visibilitychange", update);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Load the member roster for the selected channel (powers the header count + members panel).
   useEffect(() => {
@@ -417,9 +459,33 @@ export function App({
         }
         if (evt.type !== "message") return;
         const m: Message = evt.message;
-        if (m.channel_id !== selectedRef.current) return;
-        setMessages((prev) =>
-          prev.some((x) => x.id === m.id) ? prev : [...prev, m],
+        const isOpen = m.channel_id === selectedRef.current;
+        const isMine = m.sender_id === participantId;
+        if (isOpen && focusedRef.current) {
+          // Looking right at this channel — render it and keep the read marker current so it
+          // never shows as unread.
+          setMessages((prev) => (prev.some((x) => x.id === m.id) ? prev : [...prev, m]));
+          if (!isMine) markRead(m.channel_id);
+          return;
+        }
+        if (isOpen) {
+          // Open but not focused — still render, but leave it marked unread until refocus.
+          setMessages((prev) => (prev.some((x) => x.id === m.id) ? prev : [...prev, m]));
+        }
+        // Bump the unread state of any channel that isn't being actively read. Skip my own
+        // messages (Slack never marks your own message unread). Mentions of me flip has_mention.
+        if (isMine) return;
+        const mentionsMe = (m.mentions ?? []).some((x) => x.id === participantId);
+        setChannels((cs) =>
+          cs.map((c) =>
+            c.id === m.channel_id
+              ? {
+                  ...c,
+                  unread_count: (c.unread_count ?? 0) + 1,
+                  has_mention: c.has_mention || mentionsMe,
+                }
+              : c,
+          ),
         );
       };
       ws.onclose = () => {
@@ -682,17 +748,24 @@ export function App({
               onAction={() => setShowNew(true)}
               actionTestId="new-channel-toggle"
             />
-            {rooms.map((c) => (
-              <NavItem
-                key={c.id}
-                testId="channel-item"
-                active={c.id === selected}
-                onClick={() => setSelected(c.id)}
-                icon={<Hash className="size-4 opacity-70" />}
-                label={c.name}
-                working={(working[c.id]?.length ?? 0) > 0}
-              />
-            ))}
+            {rooms.map((c) => {
+              const unread = (c.unread_count ?? 0) > 0;
+              return (
+                <NavItem
+                  key={c.id}
+                  testId="channel-item"
+                  active={c.id === selected}
+                  onClick={() => setSelected(c.id)}
+                  icon={<Hash className="size-4 opacity-70" />}
+                  label={c.name}
+                  working={(working[c.id]?.length ?? 0) > 0}
+                  unread={unread}
+                  // Slack: regular channel unreads are bold-only; only a mention shows a count badge.
+                  badgeCount={c.has_mention ? c.unread_count ?? 0 : 0}
+                  badgeMention={c.has_mention}
+                />
+              );
+            })}
             {rooms.length === 0 && (
               <EmptyHint>No channels yet.</EmptyHint>
             )}
@@ -704,6 +777,7 @@ export function App({
                 <SectionHeader label="Direct messages" />
                 {dms.map((c) => {
                   const p = personByHandle(c.dm_with);
+                  const unread = (c.unread_count ?? 0) > 0;
                   return (
                     <NavItem
                       key={c.id}
@@ -720,6 +794,10 @@ export function App({
                       label={p?.display_name ?? c.dm_with ?? "dm"}
                       title={c.dm_with ? `@${c.dm_with}` : undefined}
                       working={(working[c.id]?.length ?? 0) > 0}
+                      unread={unread}
+                      // Slack: every DM unread shows a count badge (all DM messages are "to you").
+                      badgeCount={c.unread_count ?? 0}
+                      badgeMention={c.has_mention}
                     />
                   );
                 })}
@@ -1717,6 +1795,9 @@ function NavItem({
   trailing,
   working,
   title,
+  unread,
+  badgeCount,
+  badgeMention,
 }: {
   testId: string;
   active: boolean;
@@ -1726,6 +1807,9 @@ function NavItem({
   trailing?: React.ReactNode;
   working?: boolean;
   title?: string;
+  unread?: boolean; // has unread messages -> bold + brighter (Slack)
+  badgeCount?: number; // when > 0, show a count pill (DMs + mention-containing unreads)
+  badgeMention?: boolean; // the unread includes a mention of me (badge is always shown for these)
 }) {
   return (
     <button
@@ -1736,7 +1820,9 @@ function NavItem({
         "group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
         active
           ? "bg-sidebar-accent font-semibold text-sidebar-accent-foreground"
-          : "text-sidebar-foreground/80 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground",
+          : unread
+            ? "font-semibold text-sidebar-foreground hover:bg-sidebar-accent/60"
+            : "text-sidebar-foreground/80 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground",
       )}
     >
       <span className="flex size-5 shrink-0 items-center justify-center">
@@ -1745,6 +1831,15 @@ function NavItem({
       <span className="min-w-0 flex-1 truncate">{label}</span>
       {working && (
         <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-emerald-400" />
+      )}
+      {(badgeCount ?? 0) > 0 && (
+        <span
+          data-testid="unread-badge"
+          data-mention={badgeMention ? "true" : undefined}
+          className="ml-1 inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-primary px-1.5 text-[11px] font-semibold tabular-nums text-primary-foreground"
+        >
+          {(badgeCount ?? 0) > 99 ? "99+" : badgeCount}
+        </span>
       )}
       {trailing}
     </button>

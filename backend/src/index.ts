@@ -319,6 +319,22 @@ app.get("/api/channels/:id/messages", async (req, res) => {
   }
 });
 
+// Mark a channel read for the requester (Slack-style): advance their last_read_seq to the
+// channel's max message seq, or to a client-supplied `seq`. Requester-gated + membership-gated
+// like the other channel endpoints. Returns the resulting last_read_seq.
+app.post("/api/channels/:id/read", async (req, res) => {
+  try {
+    const ctx = await requireChannelMember(req, res);
+    if (!ctx) return;
+    const rawSeq = req.body?.seq;
+    const seq = rawSeq != null && Number.isFinite(Number(rawSeq)) ? Number(rawSeq) : undefined;
+    const lastReadSeq = await db.markChannelRead(ctx.channel.id, ctx.me.id, seq);
+    res.json({ ok: true, lastReadSeq });
+  } catch (e) {
+    res.status(500).json({ error: String((e as Error).message ?? e) });
+  }
+});
+
 // --- Channel membership: view / add / remove, and delete a channel ---
 
 // Resolve the requester's participant: from a verified Firebase token, or (only under dev
