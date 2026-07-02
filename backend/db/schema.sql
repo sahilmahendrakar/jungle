@@ -8,33 +8,26 @@ create table if not exists participants (
   kind          text not null check (kind in ('human', 'agent')),
   handle        text not null unique,                 -- for @mentions: @sahil, @deploybot
   display_name  text not null,
-  ma_session_id text,                                 -- set for agents; null for humans
   created_at    timestamptz not null default now()
 );
 
--- GitHub-capable agents are provisioned at creation with a mounted repo + a vault holding
--- the GitHub MCP credential. These columns let us rotate the (1h) installation token before
--- each turn. Null for humans and non-GitHub agents.
+-- A GitHub-capable agent stores its repo ("owner/name"); the SDK runner clones it and gets a
+-- fresh installation token in each `configure`. Null for humans and non-GitHub agents.
 alter table participants add column if not exists repo               text;
-alter table participants add column if not exists vault_id           text;
-alter table participants add column if not exists repo_resource_id   text;
-alter table participants add column if not exists mcp_credential_id  text;
 
 -- Identity: a human participant is linked to a Firebase Auth user (Google sign-in). These
 -- are null for agents and for legacy/dev participants created via the ?as= dev path.
 alter table participants add column if not exists firebase_uid       text unique;
 alter table participants add column if not exists email              text;
 alter table participants add column if not exists avatar_url         text;
--- Agent config: model override (null = agent-config default) + tool permission mode.
+-- Agent config: model override (null = agent-config default) + tool permission mode
+-- (SDK permission mode: default|acceptEdits|plan|bypassPermissions|dontAsk).
 alter table participants add column if not exists model              text;
-alter table participants add column if not exists mode               text not null default 'always_allow';
+alter table participants add column if not exists mode               text not null default 'default';
 
--- Second agent runtime (SDK runner container). runtime='ma' (default) = Anthropic Managed
--- Agents (existing agents, ma.ts). runtime='sdk' = a per-agent runner container that dials
--- into /api/runner with runner_token and speaks docs/runner-protocol.md. See migration
--- backend/migrations/001_sdk_runtime.sql for details. For sdk agents `mode` stores an SDK
--- permission mode (default|acceptEdits|plan|bypassPermissions|dontAsk) instead of always_*.
-alter table participants add column if not exists runtime      text not null default 'ma';
+-- Agents run on a per-agent SDK runner container that dials into /api/runner with runner_token
+-- and speaks docs/runner-protocol.md. See migrations 001_sdk_runtime.sql + 002_drop_ma_columns.sql.
+alter table participants add column if not exists runtime      text not null default 'sdk';
 alter table participants add column if not exists runner_token  text;
 create unique index if not exists participants_runner_token_idx
   on participants (runner_token) where runner_token is not null;
