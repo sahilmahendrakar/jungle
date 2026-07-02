@@ -1744,7 +1744,7 @@ function AttachmentList({ attachments }: { attachments: Attachment[] }) {
     <div data-testid="message-attachments" className="flex flex-wrap items-start gap-2">
       {attachments.map((a) =>
         INLINE_IMAGE_MIMES.has(a.mime) ? (
-          <a key={a.id} href={attachmentUrl(a)} target="_blank" rel="noreferrer" className="block">
+          <a key={a.id} href={attachmentUrl(a)} target="_blank" rel="noreferrer" className="mt-1.5 block w-fit">
             <img
               src={attachmentUrl(a)}
               alt={a.filename}
@@ -1752,7 +1752,10 @@ function AttachmentList({ attachments }: { attachments: Attachment[] }) {
               // Intrinsic size hints (when the backend measured them) reduce layout shift.
               width={a.width ?? undefined}
               height={a.height ?? undefined}
-              className="mt-1.5 max-h-80 max-w-full rounded-lg border object-contain"
+              // Slack-style: cap at ~360px wide / 320px tall and let the box shrink to the
+              // image. h-auto/w-auto keep the aspect ratio so the intrinsic width/height attrs
+              // above don't pin the box to a fixed size (which would letterbox inside a border).
+              className="h-auto max-h-80 w-auto max-w-[360px] rounded-lg border object-contain"
             />
           </a>
         ) : (
