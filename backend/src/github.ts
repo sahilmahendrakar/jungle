@@ -156,6 +156,57 @@ export interface RepoOption {
   pushed_at: string | null;
 }
 
+export interface GithubStatus {
+  connected: boolean;
+  login?: string;
+  installUrl: string | null;
+  installationCount: number;
+  repoCount: number;
+}
+
+// URL where a user installs (or adds repos to) the Jungle GitHub App.
+async function appInstallUrl(): Promise<string> {
+  const slug = process.env.GITHUB_APP_SLUG?.trim();
+  if (slug) return `https://github.com/apps/${slug}/installations/new`;
+  const app = await ghJson<{ slug: string }>("/app", appJwt());
+  return `https://github.com/apps/${app.slug}/installations/new`;
+}
+
+// OAuth connection + GitHub App installation state for the settings page.
+export async function githubStatus(participantId: string): Promise<GithubStatus> {
+  let installUrl: string | null = null;
+  if (appAuthConfigured()) {
+    try {
+      installUrl = await appInstallUrl();
+    } catch {
+      installUrl = null;
+    }
+  }
+
+  const id = await db.getGithubIdentity(participantId);
+  if (!id) {
+    return { connected: false, installUrl, installationCount: 0, repoCount: 0 };
+  }
+
+  const token = await getValidToken(participantId);
+  const insts = await ghJson<{ installations: { id: number }[] }>("/user/installations", token);
+  const installationCount = insts.installations?.length ?? 0;
+  let repoCount = 0;
+  try {
+    repoCount = (await listUserRepos(participantId)).length;
+  } catch {
+    repoCount = 0;
+  }
+
+  return {
+    connected: true,
+    login: id.github_login,
+    installUrl,
+    installationCount,
+    repoCount,
+  };
+}
+
 // List the repositories this participant can use for an agent — i.e. repos the user can access
 // *through the GitHub App's installations*. These are exactly the repos provisioning can mint an
 // installation token for, so the picker never offers a repo the agent couldn't actually work on.

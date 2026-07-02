@@ -54,7 +54,7 @@ export function RepoCombobox({
           placeholder="owner/name"
         />
         <p className="text-xs text-muted-foreground">
-          Connect GitHub to pick from your repositories.
+          Connect GitHub and install the Jungle GitHub App in Settings to pick repositories.
         </p>
       </div>
     );
