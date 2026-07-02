@@ -20,8 +20,21 @@ let authToken: string | null = null;
 export function setAuthToken(t: string | null) {
   authToken = t;
 }
+// Dev/test identity (?as=<id>): when Firebase isn't configured there's no token, so
+// requester-gated endpoints authenticate via a participantId the backend trusts under
+// DEV_BYPASS. In production authToken is set and this stays null.
+let devParticipantId: string | null = null;
+export function setDevParticipantId(id: string | null) {
+  devParticipantId = id;
+}
 function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
   return authToken ? { authorization: `Bearer ${authToken}`, ...extra } : extra;
+}
+// Append the dev participantId to a URL's query when running without a token, so GET
+// endpoints gated by requester() resolve an identity under DEV_BYPASS. No-op in prod.
+function withDevAuth(url: string): string {
+  if (authToken || !devParticipantId) return url;
+  return url + (url.includes("?") ? "&" : "?") + `participantId=${encodeURIComponent(devParticipantId)}`;
 }
 
 export interface Channel {
@@ -48,7 +61,9 @@ export interface Participant {
   display_name: string;
   repo?: string | null;
   model?: string | null; // agent model (null = agent-config default)
-  mode?: string; // agent tool-permission mode: 'always_ask' | 'always_allow'
+  mode?: string; // tool-permission mode. ma agents: 'always_ask' | 'always_allow'.
+  // sdk agents: 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions' | 'dontAsk'
+  runtime?: string; // 'ma' (legacy Managed Agents; may be undefined) | 'sdk' (per-agent runner)
 }
 
 export function listParticipants(): Promise<Participant[]> {
@@ -90,16 +105,54 @@ export function createParticipant(p: {
   });
 }
 
-// Update an agent's editable config from its profile page (display name and/or tool mode).
+// Update an agent's editable config from its profile page. `mode` is applied live; for sdk
+// agents `model` is applied at the agent's next turn boundary (read-only for ma agents).
 export function updateAgent(
   id: string,
-  patch: { displayName?: string; mode?: string },
+  patch: { displayName?: string; mode?: string; model?: string },
 ): Promise<Participant> {
   return fetch(`${BASE}/api/agents/${id}`, {
     method: "PATCH",
     headers: authHeaders({ "content-type": "application/json" }),
     body: JSON.stringify(patch),
   }).then((r) => json<Participant>(r, "failed to update agent"));
+}
+
+// A single Claude Agent SDK stream message persisted for an sdk agent. `event` is the raw
+// SDK message JSON (system/assistant/user/result); render defensively (shapes may vary).
+export interface AgentEvent {
+  id: number;
+  turn_id: string;
+  event: unknown;
+  created_at: string;
+}
+
+export interface AgentEventsPage {
+  events: AgentEvent[]; // oldest-first within the page
+  runner: { connected: boolean; state: "idle" | "running" };
+}
+
+// Fetch a page of an sdk agent's activity transcript. Page backwards with
+// `before` = the smallest id you already hold.
+export function fetchAgentEvents(
+  id: string,
+  opts: { before?: number; limit?: number } = {},
+): Promise<AgentEventsPage> {
+  const qs = new URLSearchParams();
+  if (opts.before != null) qs.set("before", String(opts.before));
+  if (opts.limit != null) qs.set("limit", String(opts.limit));
+  const q = qs.toString();
+  return fetch(withDevAuth(`${BASE}/api/agents/${id}/events${q ? `?${q}` : ""}`), {
+    headers: authHeaders(),
+  }).then((r) => json<AgentEventsPage>(r, "failed to load activity"));
+}
+
+// Stop an sdk agent's currently-running turn.
+export function interruptAgent(id: string): Promise<{ ok: boolean; error?: string }> {
+  return fetch(withDevAuth(`${BASE}/api/agents/${id}/interrupt`), {
+    method: "POST",
+    headers: authHeaders(),
+  }).then((r) => json<{ ok: boolean; error?: string }>(r, "failed to stop agent"));
 }
 
 export function listChannels(participantId: string): Promise<Channel[]> {

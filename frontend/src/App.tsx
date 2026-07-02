@@ -12,7 +12,9 @@ import {
   deleteChannel,
   confirmToolCall,
   updateAgent,
+  setDevParticipantId,
   WS_BASE,
+  type AgentEvent,
   type Channel,
   type Message,
   type Participant,
@@ -49,7 +51,9 @@ import {
 import { RepoCombobox } from "./RepoCombobox";
 import { Markdown } from "./Markdown";
 import { ProfileDialog } from "./ProfileDialog";
+import { AgentActivity } from "./AgentActivity";
 import {
+  Activity,
   Bot,
   Check,
   ChevronDown,
@@ -77,9 +81,23 @@ const MODEL_OPTIONS = [
   { id: "claude-sonnet-5", label: "Sonnet 5", hint: "Balanced" },
   { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5", hint: "Fastest" },
 ];
+// Legacy Managed-Agents permission modes (ma agents only).
 const MODE_OPTIONS = [
   { id: "always_allow", label: "Always allow", hint: "Runs tools without asking" },
   { id: "always_ask", label: "Always ask", hint: "Confirm each tool call in chat" },
+];
+// SDK-runner permission modes. `default` is first (create-agent default). Note: the backend
+// falls back to bypassPermissions if mode is omitted, so we always SEND the selected mode.
+const SDK_MODE_OPTIONS = [
+  {
+    id: "default",
+    label: "Ask on sensitive",
+    hint: "Ask before sensitive tools — safe actions run automatically",
+  },
+  { id: "acceptEdits", label: "Accept edits", hint: "Auto-accept file edits" },
+  { id: "plan", label: "Plan only", hint: "Proposes, never changes files" },
+  { id: "bypassPermissions", label: "Full autonomy", hint: "Never asks" },
+  { id: "dontAsk", label: "Deny unapproved", hint: "Deny anything not pre-approved" },
 ];
 
 // A pending tool-call confirmation surfaced by an always_ask agent.
@@ -157,6 +175,8 @@ export function App({
   onSignOut?: () => void; // Firebase sign-out (else clears ?as=)
 } = {}) {
   const participantId = authParticipantId ?? new URLSearchParams(location.search).get("as");
+  // In dev mode (no Firebase token) let api.ts authenticate requester-gated calls with this id.
+  if (!authParticipantId) setDevParticipantId(participantId);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [people, setPeople] = useState<Participant[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -175,7 +195,7 @@ export function App({
   const [agName, setAgName] = useState("");
   const [agRepo, setAgRepo] = useState("");
   const [agModel, setAgModel] = useState(MODEL_OPTIONS[0].id);
-  const [agMode, setAgMode] = useState(MODE_OPTIONS[0].id);
+  const [agMode, setAgMode] = useState(SDK_MODE_OPTIONS[0].id); // new agents are sdk runtime
   const [addingAgent, setAddingAgent] = useState(false);
   // Pending tool-confirmation cards (always_ask agents), keyed by confirmId.
   const [confirms, setConfirms] = useState<ToolConfirm[]>([]);
@@ -194,6 +214,13 @@ export function App({
     () => localStorage.getItem("jungle.sidebar") !== "closed",
   );
   const [profileId, setProfileId] = useState<string | null>(null);
+  // Activity view: the sdk agent whose transcript is open, plus a live event buffer for it.
+  // We only buffer while a view is open (activityIdRef gates the WS handler), so idle agents
+  // don't accumulate unbounded memory.
+  const [activityId, setActivityId] = useState<string | null>(null);
+  const [activityEvents, setActivityEvents] = useState<AgentEvent[]>([]);
+  const activityIdRef = useRef<string | null>(null);
+  activityIdRef.current = activityId;
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   // Profile / settings dialog
   const [showProfile, setShowProfile] = useState(false);
@@ -363,6 +390,23 @@ export function App({
           );
           return;
         }
+        if (evt.type === "agent_event") {
+          // Only buffer live SDK stream messages while that agent's Activity view is open —
+          // otherwise we'd grow memory for every agent forever. When closed, drop the frame;
+          // the transcript backfills from the events API when reopened.
+          if (evt.agentId !== activityIdRef.current) return;
+          const e: AgentEvent = {
+            // WS frames carry the raw event; synthesize an id/turn shape matching AgentEvent.
+            // The events API assigns numeric ids; use event.id when present, else a monotonic
+            // fallback so dedupe/order stay stable within the live buffer.
+            id: typeof evt.id === "number" ? evt.id : Date.now() + Math.random(),
+            turn_id: evt.turnId,
+            event: evt.event,
+            created_at: new Date().toISOString(),
+          };
+          setActivityEvents((prev) => [...prev, e]);
+          return;
+        }
         if (evt.type === "tool_confirmation_request") {
           setConfirms((cs) =>
             cs.some((c) => c.confirmId === evt.confirmId)
@@ -514,6 +558,34 @@ export function App({
     }
   }
 
+  // Open an sdk agent's Activity view. Reset the live buffer so it only holds frames that
+  // arrive while this view is open (history is fetched inside AgentActivity).
+  function openActivity(agentId: string) {
+    setActivityEvents([]);
+    setActivityId(agentId);
+  }
+
+  // "Steer" an agent from the Activity footer: open/find the DM and post a normal message,
+  // which flows through the inbox to the agent's next turn (same path as the composer).
+  async function steerAgent(agent: Participant, body: string) {
+    if (!participantId) return;
+    const { id } = await createDm(participantId, agent.id);
+    // Ensure the DM shows in the sidebar; select it so the reply lands in view.
+    reloadChannels(id);
+    const trySend = (attempt = 0) => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(
+          JSON.stringify({ type: "post", channelId: id, body, clientMsgId: newId() }),
+        );
+      } else if (attempt < 20) {
+        setTimeout(() => trySend(attempt + 1), 150);
+      } else {
+        setNotice("Connecting to the server… try again in a moment.");
+      }
+    };
+    trySend();
+  }
+
   async function submitAddAgent() {
     if (!agHandle.trim() || !agName.trim()) {
       setNotice("Agent handle and name are required.");
@@ -534,7 +606,7 @@ export function App({
       setAgName("");
       setAgRepo("");
       setAgModel(MODEL_OPTIONS[0].id);
-      setAgMode(MODE_OPTIONS[0].id);
+      setAgMode(SDK_MODE_OPTIONS[0].id);
       listParticipants().then(setPeople).catch(() => {});
     } catch (e) {
       setNotice(String((e as Error).message ?? e));
@@ -576,6 +648,7 @@ export function App({
   const profilePerson = profileId
     ? people.find((p) => p.id === profileId) ?? (me?.id === profileId ? me : undefined)
     : undefined;
+  const activityAgent = activityId ? people.find((p) => p.id === activityId) : undefined;
 
   const headerTitle = sel
     ? sel.kind === "dm"
@@ -1296,7 +1369,7 @@ export function App({
                 <SelectMenu
                   value={agMode}
                   onChange={setAgMode}
-                  options={MODE_OPTIONS}
+                  options={SDK_MODE_OPTIONS}
                   testId="agent-mode"
                 />
               </div>
@@ -1337,6 +1410,24 @@ export function App({
           onSaved={(u) =>
             setPeople((ps) => ps.map((p) => (p.id === u.id ? { ...p, ...u } : p)))
           }
+          onOpenActivity={() => {
+            openActivity(profilePerson.id);
+            setProfileId(null);
+          }}
+        />
+      )}
+
+      {/* Live Claude-Code-style transcript for an sdk agent */}
+      {activityAgent && (
+        <AgentActivity
+          key={activityAgent.id}
+          agent={activityAgent}
+          events={activityEvents}
+          onClose={() => {
+            setActivityId(null);
+            setActivityEvents([]);
+          }}
+          onSteer={steerAgent}
         />
       )}
     </div>
@@ -1392,29 +1483,39 @@ function SelectMenu({
 }
 
 // Slack-style profile for viewing another participant. Humans are read-only (just their alias
-// for now). Agents expose an editable config: display name + tool-permission mode (applied live
-// to the running session). Model is read-only — it's fixed for an agent's lifetime (its memory
-// lives on the session). (Distinct from the self ProfileDialog in ./ProfileDialog, which is the
-// current user's own settings: email, GitHub connect, sign out.)
+// for now). Agents expose an editable config: display name + tool-permission mode (applied live).
+// sdk agents also expose an editable model (applied at the next turn) and an Activity view;
+// ma (legacy Managed Agents) agents keep the read-only model + legacy two-mode dropdown.
+// (Distinct from the self ProfileDialog in ./ProfileDialog, which is the current user's own
+// settings: email, GitHub connect, sign out.)
 function ParticipantProfileDialog({
   person,
   isSelf,
   onClose,
   onSaved,
+  onOpenActivity,
 }: {
   person: Participant;
   isSelf: boolean;
   onClose: () => void;
   onSaved: (p: Participant) => void;
+  onOpenActivity: () => void;
 }) {
   const isAgent = person.kind === "agent";
+  const isSdk = person.runtime === "sdk";
+  const modeOptions = isSdk ? SDK_MODE_OPTIONS : MODE_OPTIONS;
+  const defaultMode = isSdk ? "default" : "always_allow";
   const [name, setName] = useState(person.display_name);
-  const [mode, setMode] = useState(person.mode ?? "always_allow");
+  const [mode, setMode] = useState(person.mode ?? defaultMode);
+  const [model, setModel] = useState(person.model ?? MODEL_OPTIONS[0].id);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [err, setErr] = useState("");
 
-  const dirty = name.trim() !== person.display_name || mode !== (person.mode ?? "always_allow");
+  const dirty =
+    name.trim() !== person.display_name ||
+    mode !== (person.mode ?? defaultMode) ||
+    (isSdk && model !== (person.model ?? MODEL_OPTIONS[0].id));
   const modelLabel =
     MODEL_OPTIONS.find((m) => m.id === person.model)?.label ?? "Default (Opus 4.8)";
 
@@ -1423,7 +1524,12 @@ function ParticipantProfileDialog({
     setSaving(true);
     setErr("");
     try {
-      const updated = await updateAgent(person.id, { displayName: name.trim(), mode });
+      const patch: { displayName?: string; mode?: string; model?: string } = {
+        displayName: name.trim(),
+        mode,
+      };
+      if (isSdk) patch.model = model; // model is editable only for sdk agents
+      const updated = await updateAgent(person.id, patch);
       onSaved(updated);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
@@ -1474,31 +1580,76 @@ function ParticipantProfileDialog({
             </div>
             <div className="space-y-1.5">
               <Label>Tool permissions</Label>
-              <SelectMenu value={mode} onChange={setMode} options={MODE_OPTIONS} testId="profile-mode" />
+              <SelectMenu
+                value={mode}
+                onChange={setMode}
+                options={modeOptions}
+                testId="agent-mode-select"
+              />
             </div>
-            <div className="grid grid-cols-2 gap-4 rounded-lg border bg-muted/30 p-3">
-              <div className="space-y-0.5">
-                <div className="text-xs font-medium text-muted-foreground">Model</div>
-                <div className="text-sm">{modelLabel}</div>
-                <p className="text-[11px] leading-tight text-muted-foreground">
-                  Fixed for this agent's lifetime.
-                </p>
-              </div>
-              {person.repo && (
-                <div className="min-w-0 space-y-0.5">
-                  <div className="text-xs font-medium text-muted-foreground">Repository</div>
-                  <a
-                    href={`https://github.com/${person.repo}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="flex items-center gap-1 truncate text-sm text-primary hover:underline"
-                  >
-                    <GitBranch className="size-3.5 shrink-0" />
-                    <span className="truncate">{person.repo}</span>
-                  </a>
+            {isSdk ? (
+              <>
+                <div className="space-y-1.5">
+                  <Label>Model</Label>
+                  <SelectMenu
+                    value={model}
+                    onChange={setModel}
+                    options={MODEL_OPTIONS}
+                    testId="agent-model-select"
+                  />
+                  <p className="text-[11px] leading-tight text-muted-foreground">
+                    Applies at the agent's next turn.
+                  </p>
                 </div>
-              )}
-            </div>
+                {person.repo && (
+                  <div className="min-w-0 space-y-0.5 rounded-lg border bg-muted/30 p-3">
+                    <div className="text-xs font-medium text-muted-foreground">Repository</div>
+                    <a
+                      href={`https://github.com/${person.repo}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="flex items-center gap-1 truncate text-sm text-primary hover:underline"
+                    >
+                      <GitBranch className="size-3.5 shrink-0" />
+                      <span className="truncate">{person.repo}</span>
+                    </a>
+                  </div>
+                )}
+                <Button
+                  variant="outline"
+                  data-testid="activity-open"
+                  onClick={onOpenActivity}
+                  className="w-full justify-start gap-2 text-muted-foreground"
+                >
+                  <Activity className="size-4" />
+                  View activity
+                </Button>
+              </>
+            ) : (
+              <div className="grid grid-cols-2 gap-4 rounded-lg border bg-muted/30 p-3">
+                <div className="space-y-0.5">
+                  <div className="text-xs font-medium text-muted-foreground">Model</div>
+                  <div className="text-sm">{modelLabel}</div>
+                  <p className="text-[11px] leading-tight text-muted-foreground">
+                    Fixed for this agent's lifetime.
+                  </p>
+                </div>
+                {person.repo && (
+                  <div className="min-w-0 space-y-0.5">
+                    <div className="text-xs font-medium text-muted-foreground">Repository</div>
+                    <a
+                      href={`https://github.com/${person.repo}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="flex items-center gap-1 truncate text-sm text-primary hover:underline"
+                    >
+                      <GitBranch className="size-3.5 shrink-0" />
+                      <span className="truncate">{person.repo}</span>
+                    </a>
+                  </div>
+                )}
+              </div>
+            )}
             {err && <p className="text-sm text-destructive">{err}</p>}
           </div>
         ) : (

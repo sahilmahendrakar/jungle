@@ -29,6 +29,40 @@ alter table participants add column if not exists avatar_url         text;
 alter table participants add column if not exists model              text;
 alter table participants add column if not exists mode               text not null default 'always_allow';
 
+-- Second agent runtime (SDK runner container). runtime='ma' (default) = Anthropic Managed
+-- Agents (existing agents, ma.ts). runtime='sdk' = a per-agent runner container that dials
+-- into /api/runner with runner_token and speaks docs/runner-protocol.md. See migration
+-- backend/migrations/001_sdk_runtime.sql for details. For sdk agents `mode` stores an SDK
+-- permission mode (default|acceptEdits|plan|bypassPermissions|dontAsk) instead of always_*.
+alter table participants add column if not exists runtime      text not null default 'ma';
+alter table participants add column if not exists runner_token  text;
+create unique index if not exists participants_runner_token_idx
+  on participants (runner_token) where runner_token is not null;
+
+-- Durable per-agent work queue for sdk runners. A dispatch inserts a row; the runner pulls it
+-- (`enqueue`) and acks it (`consumed`) -> delivered_at set. Undelivered rows survive the runner
+-- being offline and are re-sent on reconnect.
+create table if not exists agent_inbox (
+  id            uuid primary key default gen_random_uuid(),
+  agent_id      uuid not null references participants(id) on delete cascade,
+  text          text not null,
+  created_at    timestamptz not null default now(),
+  delivered_at  timestamptz,
+  turn_id       text
+);
+create index if not exists agent_inbox_pending_idx
+  on agent_inbox (agent_id) where delivered_at is null;
+
+-- Every SDK stream message from a runner, persisted for the Activity feed.
+create table if not exists agent_events (
+  id          bigserial primary key,
+  agent_id    uuid not null references participants(id) on delete cascade,
+  turn_id     text,
+  event       jsonb not null,
+  created_at  timestamptz not null default now()
+);
+create index if not exists agent_events_agent_id_idx on agent_events (agent_id, id desc);
+
 create table if not exists channels (
   id          uuid primary key default gen_random_uuid(),
   name        text not null,

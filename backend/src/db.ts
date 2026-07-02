@@ -20,7 +20,9 @@ export interface Participant {
   email: string | null;
   avatar_url: string | null;
   model: string | null; // agent model override (null = agent-config default)
-  mode: string; // 'always_ask' | 'always_allow'
+  mode: string; // ma: 'always_ask' | 'always_allow'; sdk: an SDK permission mode
+  runtime: string; // 'ma' (default) | 'sdk'
+  runner_token: string | null; // per-agent runner secret (sdk agents only)
 }
 
 export interface PersistedMessage {
@@ -49,18 +51,21 @@ export async function createParticipant(p: {
   avatarUrl?: string | null;
   model?: string | null;
   mode?: string | null;
+  runtime?: string | null;
+  runnerToken?: string | null;
 }): Promise<Participant> {
   const { rows } = await pool.query<Participant>(
     `insert into participants
        (kind, handle, display_name, ma_session_id, repo, vault_id, repo_resource_id,
-        mcp_credential_id, firebase_uid, email, avatar_url, model, mode)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, coalesce($13, 'always_allow'))
+        mcp_credential_id, firebase_uid, email, avatar_url, model, mode, runtime, runner_token)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, coalesce($13, 'always_allow'),
+             coalesce($14, 'ma'), $15)
      returning *`,
     [
       p.kind, p.handle, p.displayName, p.maSessionId ?? null,
       p.repo ?? null, p.vaultId ?? null, p.repoResourceId ?? null, p.mcpCredentialId ?? null,
       p.firebaseUid ?? null, p.email ?? null, p.avatarUrl ?? null,
-      p.model ?? null, p.mode ?? null,
+      p.model ?? null, p.mode ?? null, p.runtime ?? null, p.runnerToken ?? null,
     ],
   );
   return rows[0];
@@ -70,7 +75,7 @@ export async function createParticipant(p: {
 // updated row (null if the id isn't an agent). No-op patches just return the current row.
 export async function updateAgentConfig(
   id: string,
-  patch: { displayName?: string; mode?: string },
+  patch: { displayName?: string; mode?: string; model?: string },
 ): Promise<Participant | null> {
   const sets: string[] = [];
   const vals: unknown[] = [];
@@ -81,6 +86,10 @@ export async function updateAgentConfig(
   if (patch.mode !== undefined) {
     vals.push(patch.mode);
     sets.push(`mode = $${vals.length}`);
+  }
+  if (patch.model !== undefined) {
+    vals.push(patch.model);
+    sets.push(`model = $${vals.length}`);
   }
   if (!sets.length) {
     const p = await getParticipant(id);
@@ -291,25 +300,124 @@ export interface AgentRow {
   id: string;
   handle: string;
   display_name: string;
-  ma_session_id: string;
+  ma_session_id: string | null; // null for sdk-runtime agents (no MA session)
   repo: string | null;
   vault_id: string | null;
   repo_resource_id: string | null;
   mcp_credential_id: string | null;
   model: string | null;
-  mode: string; // 'always_ask' | 'always_allow'
+  mode: string;
+  runtime: string; // 'ma' | 'sdk'
+  runner_token: string | null;
 }
 
 // Of the given participant ids, the ones that are agents (with their MA session id +
-// GitHub provisioning, if any).
+// GitHub provisioning, if any). Includes both runtimes: ma agents have an ma_session_id,
+// sdk agents have runtime='sdk' (no session) — the dispatch seam branches on `runtime`.
 export async function agentsByIds(ids: string[]): Promise<AgentRow[]> {
   if (!ids.length) return [];
   const { rows } = await pool.query<AgentRow>(
     `select id, handle, display_name, ma_session_id, repo, vault_id, repo_resource_id,
-            mcp_credential_id, model, mode
+            mcp_credential_id, model, mode, runtime, runner_token
      from participants
-     where kind = 'agent' and ma_session_id is not null and id = any($1)`,
+     where kind = 'agent'
+       and (ma_session_id is not null or runtime = 'sdk')
+       and id = any($1)`,
     [ids],
+  );
+  return rows;
+}
+
+// The agent bound to a runner_token, iff it is an sdk-runtime agent. Authenticates a runner's
+// inbound WebSocket. Returns the full AgentRow so the caller can build `configure`.
+export async function agentByRunnerToken(token: string): Promise<AgentRow | null> {
+  if (!token) return null;
+  const { rows } = await pool.query<AgentRow>(
+    `select id, handle, display_name, ma_session_id, repo, vault_id, repo_resource_id,
+            mcp_credential_id, model, mode, runtime, runner_token
+     from participants
+     where kind = 'agent' and runtime = 'sdk' and runner_token = $1`,
+    [token],
+  );
+  return rows[0] ?? null;
+}
+
+// Fetch a single agent by id (both runtimes), for the runner registry / lifecycle.
+export async function getAgentRow(id: string): Promise<AgentRow | null> {
+  const { rows } = await pool.query<AgentRow>(
+    `select id, handle, display_name, ma_session_id, repo, vault_id, repo_resource_id,
+            mcp_credential_id, model, mode, runtime, runner_token
+     from participants
+     where kind = 'agent' and id = $1`,
+    [id],
+  );
+  return rows[0] ?? null;
+}
+
+// --- SDK runner: durable inbox + event log ---
+
+export interface InboxItem {
+  id: string;
+  text: string;
+}
+
+// Queue one composed input for an sdk agent. Returns the new row's id.
+export async function enqueueInboxItem(agentId: string, text: string): Promise<string> {
+  const { rows } = await pool.query<{ id: string }>(
+    `insert into agent_inbox (agent_id, text) values ($1, $2) returning id`,
+    [agentId, text],
+  );
+  return rows[0].id;
+}
+
+// Undelivered inbox items for an agent, oldest first — the drain set.
+export async function pendingInbox(agentId: string): Promise<InboxItem[]> {
+  const { rows } = await pool.query<InboxItem>(
+    `select id, text from agent_inbox
+     where agent_id = $1 and delivered_at is null order by created_at`,
+    [agentId],
+  );
+  return rows;
+}
+
+// Mark inbox items delivered (the runner acked them via `consumed`), recording the turn.
+export async function markInboxConsumed(
+  agentId: string,
+  inboxIds: string[],
+  turnId: string | null,
+): Promise<void> {
+  if (!inboxIds.length) return;
+  await pool.query(
+    `update agent_inbox set delivered_at = now(), turn_id = coalesce(turn_id, $3)
+     where agent_id = $1 and id = any($2::uuid[]) and delivered_at is null`,
+    [agentId, inboxIds, turnId],
+  );
+}
+
+// Persist one SDK stream event from a runner (for the Activity feed).
+export async function insertAgentEvent(
+  agentId: string,
+  turnId: string | null,
+  event: unknown,
+): Promise<void> {
+  await pool.query(
+    `insert into agent_events (agent_id, turn_id, event) values ($1, $2, $3)`,
+    [agentId, turnId, JSON.stringify(event)],
+  );
+}
+
+// Page of persisted SDK events for an agent, newest-first (Activity feed history).
+// `before` (an event id) pages backwards; rows come back newest-first, caller reverses.
+export async function listAgentEvents(
+  agentId: string,
+  opts: { before?: number; limit?: number } = {},
+): Promise<{ id: number; turn_id: string | null; event: unknown; created_at: string }[]> {
+  const limit = Math.min(Math.max(opts.limit ?? 200, 1), 500);
+  const { rows } = await pool.query(
+    `select id, turn_id, event, created_at from agent_events
+     where agent_id = $1 and ($2::bigint is null or id < $2)
+     order by id desc limit $3`,
+    [agentId, opts.before ?? null, limit],
   );
   return rows;
 }
