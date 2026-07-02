@@ -159,6 +159,25 @@ async function buildConfigure(agent: db.AgentRow): Promise<Record<string, unknow
   return frame;
 }
 
+// --- Git credential refresh ---
+
+// Re-mint the repo's installation token and push it to the runner as a `git_credentials`
+// frame. GitHub App installation tokens hard-expire at 1h; a runner that stays connected
+// longer than that would otherwise keep using the stale token it was handed once in
+// `configure` (its `git push`/`gh` share that token and 401 together). installationTokenForRepo
+// caches until ~5 min before expiry, so this is ~free until a refresh is actually needed. We
+// call it before each drain so every turn starts with a valid token — no timers, no background
+// state. No-op for agents without a repo or when App auth isn't configured.
+async function refreshGitCredentials(conn: RunnerConn, agent: db.AgentRow): Promise<void> {
+  if (!agent.repo || !gh.appAuthConfigured()) return;
+  try {
+    const token = await gh.installationTokenForRepo(agent.repo);
+    send(conn, { type: "git_credentials", token, login: agent.handle });
+  } catch (e) {
+    console.error(`runner[${agent.id}] could not refresh git token:`, e);
+  }
+}
+
 // --- Drain: push pending inbox items to a connected runner ---
 
 // Send one `enqueue` carrying every not-yet-sent-on-this-socket pending inbox row. Safe to
@@ -188,6 +207,11 @@ export async function drain(agentId: string): Promise<void> {
         : {}),
     }));
   if (!items.length) return;
+  // Push a fresh git token before the work so a long-lived runner never begins a turn with an
+  // expired installation token. Ordered before `enqueue` so the runner applies it before the
+  // turn (and any git ops in it) starts.
+  const agent = await db.getAgentRow(agentId);
+  if (agent) await refreshGitCredentials(conn, agent);
   for (const it of items) conn.sentInbox.add(it.inboxId);
   send(conn, { type: "enqueue", items });
 }
