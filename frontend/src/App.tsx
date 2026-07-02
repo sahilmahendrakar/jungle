@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   listChannels,
   markChannelRead,
@@ -400,6 +400,15 @@ export function App({
   useEffect(() => {
     localStorage.setItem("jungle.sidebar", sidebarOpen ? "open" : "closed");
   }, [sidebarOpen]);
+  // Auto-grow the composer: match the textarea's height to its content up to the CSS
+  // max-height (max-h-40), past which it scrolls. Keyed on draft so it also shrinks back
+  // after sending (draft cleared) or accepting a mention.
+  useLayoutEffect(() => {
+    const ta = taRef.current;
+    if (!ta) return;
+    ta.style.height = "auto";
+    ta.style.height = `${ta.scrollHeight}px`;
+  }, [draft]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "\\") {
@@ -1405,7 +1414,7 @@ export function App({
                   ? `Message ${sel?.kind === "dm" ? headerTitle : "#" + headerTitle}`
                   : "Select or create a channel"
               }
-              className="max-h-40 min-h-9 resize-none border-0 bg-transparent px-2 py-1.5 shadow-none focus-visible:ring-0"
+              className="max-h-40 min-h-9 resize-none overflow-y-auto border-0 bg-transparent px-2 py-1.5 shadow-none focus-visible:ring-0"
             />
             <Button
               data-testid="send-button"
