@@ -3,10 +3,13 @@ import express from "express";
 import { createServer } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
 import { randomBytes } from "node:crypto";
+import { imageSize } from "image-size";
 import * as db from "./db";
 import * as gh from "./github";
 import * as auth from "./auth";
 import * as runners from "./runners";
+import * as att from "./attachments";
+import { storage } from "./storage";
 import { provisioner } from "./provisioner";
 
 // Safety net: this backend is a shared relay for every user, so a stray rejection from one
@@ -313,6 +316,92 @@ app.post("/api/agents/confirm", async (req, res) => {
   }
 });
 
+// --- Attachments ---
+
+// Upload-first (Slack-style): POST raw bytes, get back an attachment id + signed URL; posting
+// a message with attachmentIds links them. Auth: a signed-in human (requester) or an agent's
+// runner (x-runner-token header). Bytes ride raw in the body with filename/mime in the query,
+// so the global JSON body parser never touches an upload.
+app.post(
+  "/api/attachments",
+  express.raw({ type: "*/*", limit: att.MAX_ATTACHMENT_BYTES + 1024 * 1024 }),
+  async (req, res) => {
+    try {
+      let uploaderId = (await requester(req))?.id ?? null;
+      if (!uploaderId) {
+        const rt = String(req.headers["x-runner-token"] ?? "");
+        if (rt) uploaderId = (await db.agentByRunnerToken(rt))?.id ?? null;
+      }
+      if (!uploaderId) return res.status(401).json({ error: "auth required" });
+      const data = req.body as Buffer;
+      if (!Buffer.isBuffer(data) || data.length === 0) {
+        return res.status(400).json({ error: "empty upload" });
+      }
+      if (data.length > att.MAX_ATTACHMENT_BYTES) {
+        return res.status(413).json({ error: `file exceeds the ${Math.floor(att.MAX_ATTACHMENT_BYTES / (1024 * 1024))}MB limit` });
+      }
+      const filename = att.sanitizeFilename(String(req.query.filename ?? "file"));
+      const rawMime = String(req.query.mime ?? "");
+      const mime = /^[\w.+-]+\/[\w.+-]+$/.test(rawMime) ? rawMime.toLowerCase() : "application/octet-stream";
+      // Image dimensions are a layout hint only; failure to parse just leaves them null.
+      let width: number | null = null;
+      let height: number | null = null;
+      if (att.isInlineImage(mime)) {
+        try {
+          const dim = imageSize(data);
+          width = dim.width ?? null;
+          height = dim.height ?? null;
+        } catch {
+          /* not decodable — fine */
+        }
+      }
+      const storageKey = `attachments/${randomBytes(16).toString("hex")}`;
+      await storage.put(storageKey, data);
+      const row = await db.createAttachment({
+        uploaderId, filename, mime, sizeBytes: data.length, storageKey, width, height,
+      });
+      res.status(201).json({
+        id: row.id,
+        filename: row.filename,
+        mime: row.mime,
+        size_bytes: Number(row.size_bytes),
+        width: row.width,
+        height: row.height,
+        url: att.signedPath(row.id),
+      });
+    } catch (e) {
+      res.status(500).json({ error: String((e as Error).message ?? e) });
+    }
+  },
+);
+
+// Serve attachment bytes. Auth = a valid, unexpired signature (capability URL) — the only
+// scheme that works for both <img> tags and runner downloads. Allowlisted images render
+// inline; everything else is forced to download as a generic octet-stream so an uploaded
+// .html/.svg can never execute on our origin (stored-XSS defense).
+app.get("/api/attachments/:id", async (req, res) => {
+  try {
+    const id = String(req.params.id);
+    if (!att.verifySignature(id, String(req.query.e ?? ""), String(req.query.sig ?? ""))) {
+      return res.status(403).json({ error: "invalid or expired link" });
+    }
+    const row = await db.getAttachment(id);
+    if (!row) return res.status(404).json({ error: "attachment not found" });
+    const inline = att.isInlineImage(row.mime);
+    res.setHeader("content-type", inline ? row.mime : "application/octet-stream");
+    res.setHeader("content-length", String(row.size_bytes));
+    res.setHeader(
+      "content-disposition",
+      `${inline ? "inline" : "attachment"}; filename="${row.filename}"`,
+    );
+    res.setHeader("x-content-type-options", "nosniff");
+    res.setHeader("cache-control", "private, max-age=3600");
+    (await storage.stream(row.storage_key)).pipe(res);
+  } catch (e) {
+    res.status(500).json({ error: String((e as Error).message ?? e) });
+  }
+});
+
 // Find-or-create the 1:1 DM channel between two participants (dedupes, unlike POST /channels).
 app.post("/api/dms", async (req, res) => {
   try {
@@ -339,7 +428,7 @@ app.get("/api/channels", async (req, res) => {
 app.get("/api/channels/:id/messages", async (req, res) => {
   try {
     const afterSeq = Number(req.query.afterSeq ?? 0);
-    res.json(await db.getMessages(req.params.id, afterSeq));
+    res.json((await db.getMessages(req.params.id, afterSeq)).map(att.withUrls));
   } catch (e) {
     res.status(500).json({ error: String((e as Error).message ?? e) });
   }
@@ -704,7 +793,7 @@ async function triggerMentionedAgents(channelId: string, message: db.PersistedMe
       // Summon the @mentioned agent into the channel so its reply (to:"#channel") succeeds
       // — otherwise mentioning an agent that isn't a member triggers it but it can't respond.
       await db.addChannelMember(channelId, agent.id);
-      void runAgentReply(channelId, channel.name, agent, budget - 1);
+      void runAgentReply(channelId, channel.name, agent, budget - 1, message.attachments);
     }
   } catch (e) {
     console.error("triggerMentionedAgents:", e);
@@ -716,6 +805,7 @@ async function runAgentReply(
   triggerChannelName: string,
   agent: db.AgentRow,
   replyBudget: number,
+  attachments: db.AttachmentMeta[] = [],
 ) {
   // Let the channel show "@agent is working…" for the duration of the turn.
   const status = (state: "working" | "idle") =>
@@ -737,7 +827,7 @@ async function runAgentReply(
     // the right place), enqueue the composed input, and push it to the runner if one is
     // connected. If not, it waits in the inbox until the runner's next `hello`.
     sdkContext.set(agent.id, { budget: replyBudget, channelId: triggerChannelId });
-    await db.enqueueInboxItem(agent.id, input);
+    await db.enqueueInboxItem(agent.id, input, attachments);
     await runners.drain(agent.id);
     // The turn runs asynchronously on the runner; we don't hold "working" for its duration.
   } catch (e) {
@@ -761,7 +851,12 @@ async function deliverAgentMessage(
 ): Promise<runners.SendMessageResult> {
   const to = String(toolInput.to ?? "").trim();
   const body = String(toolInput.body ?? "").trim();
-  if (!body) return { ok: false, error: "body is required" };
+  // Attachment ids come from the runner's own uploads (POST /api/attachments with its runner
+  // token). persistMessage only links ids this agent uploaded and hasn't sent yet.
+  const attachmentIds = (Array.isArray(toolInput.attachmentIds) ? toolInput.attachmentIds : [])
+    .map(String)
+    .slice(0, att.MAX_ATTACHMENTS_PER_MESSAGE);
+  if (!body && !attachmentIds.length) return { ok: false, error: "body is required" };
 
   let channelId: string;
   if (to.startsWith("#")) {
@@ -776,8 +871,10 @@ async function deliverAgentMessage(
     return { ok: false, error: `"to" must start with "#" (channel) or "@" (handle)` };
   }
 
-  const msg = await db.persistMessage({ channelId, senderId: agent.id, body, cascadeBudget: budget });
-  await fanOut(channelId, { type: "message", message: msg });
+  const msg = await db.persistMessage({
+    channelId, senderId: agent.id, body, cascadeBudget: budget, attachmentIds,
+  });
+  await fanOut(channelId, { type: "message", message: att.withUrls(msg) });
   void triggerMentionedAgents(channelId, msg);
   return { ok: true, messageId: msg.id };
 }
@@ -807,14 +904,24 @@ wss.on("connection", async (ws, req) => {
   ws.send(JSON.stringify({ type: "connected", participantId }));
 
   ws.on("message", async (raw) => {
-    let evt: { type?: string; channelId?: string; body?: string; clientMsgId?: string };
+    let evt: {
+      type?: string;
+      channelId?: string;
+      body?: string;
+      clientMsgId?: string;
+      attachmentIds?: string[];
+    };
     try {
       evt = JSON.parse(raw.toString());
     } catch {
       return;
     }
-    // The one routing rule (human-only for now): persist -> fan out.
-    if (evt.type === "post" && evt.channelId && evt.body) {
+    // The one routing rule (human-only for now): persist -> fan out. A post needs a body
+    // and/or pre-uploaded attachments (POST /api/attachments).
+    const attachmentIds = (Array.isArray(evt.attachmentIds) ? evt.attachmentIds : [])
+      .map(String)
+      .slice(0, att.MAX_ATTACHMENTS_PER_MESSAGE);
+    if (evt.type === "post" && evt.channelId && (evt.body || attachmentIds.length)) {
       try {
         if (!(await db.isMember(evt.channelId, participantId))) {
           ws.send(JSON.stringify({ type: "error", error: "not a member of channel" }));
@@ -823,11 +930,12 @@ wss.on("connection", async (ws, req) => {
         const message = await db.persistMessage({
           channelId: evt.channelId,
           senderId: participantId,
-          body: evt.body,
+          body: evt.body ?? "",
           clientMsgId: evt.clientMsgId ?? null,
           cascadeBudget: DEFAULT_CASCADE_BUDGET, // human messages start a fresh cascade
+          attachmentIds,
         });
-        await fanOut(evt.channelId, { type: "message", message });
+        await fanOut(evt.channelId, { type: "message", message: att.withUrls(message) });
         void triggerMentionedAgents(evt.channelId, message);
       } catch (e) {
         ws.send(JSON.stringify({ type: "error", error: String((e as Error).message ?? e) }));
@@ -878,10 +986,14 @@ runners.init(server, {
         body: `⚠️ My turn crashed before I could finish (\`${error}\`). Any uncommitted work is still in my workspace — message me to pick it back up.`,
         cascadeBudget: 0,
       });
-      await fanOut(channelId, { type: "message", message: msg });
+      await fanOut(channelId, { type: "message", message: att.withUrls(msg) });
     })().catch((e) => console.error("onTurnFailed:", e));
   },
 });
+
+// Hourly attachment GC: abandoned composer uploads (never linked to a message) and blobs
+// whose rows were removed by FK cascades (deleted messages/channels/agents).
+setInterval(() => void att.gcOrphans().catch((e) => console.error("attachment gc:", e)), 60 * 60 * 1000).unref();
 
 const PORT = Number(process.env.PORT ?? 3001);
 server.listen(PORT, () => console.log(`jungle-backend on http://localhost:${PORT}`));

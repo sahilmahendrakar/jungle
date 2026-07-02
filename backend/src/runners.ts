@@ -4,6 +4,7 @@ import type internal from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
 import * as db from "./db";
 import * as gh from "./github";
+import { signedPath } from "./attachments";
 
 // The SDK-runner side of Jungle. A runner is a per-agent container that dials INTO the backend
 // at GET /api/runner?token=<runner_token> (WS upgrade) and speaks docs/runner-protocol.md.
@@ -20,6 +21,9 @@ import * as gh from "./github";
 export interface SendMessageInput {
   to?: string;
   body?: string;
+  // Ids the runner got back from POST /api/attachments (it uploads the agent's workspace
+  // files itself, then references them here).
+  attachmentIds?: string[];
 }
 export interface SendMessageResult {
   ok: boolean;
@@ -105,7 +109,13 @@ export function systemPromptAppend(agent: db.AgentRow): string {
     `Your ONLY way to say anything to people is the send_message tool ` +
     `(mcp__jungle__send_message): to reply in a channel use to:"#channel-name", to DM someone ` +
     `use to:"@handle". Plain assistant text is NEVER shown to anyone. ` +
-    `Each queued message tells you which channel it came from — reply there unless asked otherwise.`;
+    `Each queued message tells you which channel it came from — reply there unless asked otherwise.\n\n` +
+    `— Files & images —\n` +
+    `Files people attach to messages are saved into your workspace under ` +
+    `/workspace/attachments/ (each queued message lists the exact paths). To send files or ` +
+    `images to people, pass workspace file paths in send_message's \`files\` parameter, e.g. ` +
+    `files:["/workspace/repo/screenshot.png"] — images render inline in the chat, other file ` +
+    `types become downloads. Max 10 files, 25MB each.`;
   if (agent.repo) {
     const gitName = agent.display_name || agent.handle;
     const gitEmail = `${agent.handle}@agents.jungle.dev`;
@@ -160,7 +170,23 @@ export async function drain(agentId: string): Promise<void> {
   const pending = await db.pendingInbox(agentId);
   const items = pending
     .filter((p) => !conn.sentInbox.has(p.id))
-    .map((p) => ({ inboxId: p.id, text: p.text }));
+    .map((p) => ({
+      inboxId: p.id,
+      text: p.text,
+      // Sign download URLs now (not at enqueue) so items that waited in the inbox while the
+      // runner was offline still carry live links. Paths are origin-relative; the runner
+      // prefixes the backend origin it already dials for its WebSocket.
+      ...(p.attachments?.length
+        ? {
+            attachments: p.attachments.map((a) => ({
+              url: signedPath(a.id),
+              filename: a.filename,
+              mime: a.mime,
+              sizeBytes: Number(a.size_bytes),
+            })),
+          }
+        : {}),
+    }));
   if (!items.length) return;
   for (const it of items) conn.sentInbox.add(it.inboxId);
   send(conn, { type: "enqueue", items });

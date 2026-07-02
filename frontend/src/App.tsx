@@ -15,8 +15,11 @@ import {
   updateAgent,
   deleteAgent,
   setDevParticipantId,
+  uploadAttachment,
+  attachmentUrl,
   WS_BASE,
   type AgentEvent,
+  type Attachment,
   type Channel,
   type Message,
   type Participant,
@@ -59,13 +62,16 @@ import {
   Bot,
   Check,
   ChevronDown,
+  FileText,
   GitBranch,
   Hash,
+  Loader2,
   LogOut,
   MessagesSquare,
   MoreVertical,
   PanelLeft,
   PanelLeftClose,
+  Paperclip,
   Plus,
   SendHorizonal,
   ShieldQuestion,
@@ -107,6 +113,38 @@ interface ToolConfirm {
   status?: "resolved";
   result?: "allow" | "deny";
   by?: string;
+}
+
+// A file staged in the composer (upload-first): uploads immediately on add, then its
+// Attachment id rides along on the WS post frame when the message is sent.
+interface PendingAttachment {
+  key: string; // local chip identity (not the attachment id — that only exists once uploaded)
+  name: string;
+  size: number;
+  mime: string;
+  status: "uploading" | "ready" | "error";
+  att?: Attachment; // set once the upload succeeds
+  error?: string;
+  previewUrl?: string; // object URL for image thumbnails; revoked on removal/send
+}
+
+// Backend limits (mirrored client-side for immediate feedback).
+const MAX_ATTACHMENTS_PER_MESSAGE = 10;
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+// Mimes the backend serves inline (rendered as <img>); everything else is a download chip.
+const INLINE_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB"];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v >= 10 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
 }
 
 function mergeById(a: Message[], b: Message[]): Message[] {
@@ -172,6 +210,7 @@ export function App({
   const [selected, setSelected] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
+  const [pending, setPending] = useState<PendingAttachment[]>([]); // composer attachments
   const [notice, setNotice] = useState("");
   const [working, setWorking] = useState<Record<string, string[]>>({}); // channelId -> agent handles
   // New-channel form
@@ -214,6 +253,7 @@ export function App({
   const activityIdRef = useRef<string | null>(null);
   activityIdRef.current = activityId;
   const taRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const selectedRef = useRef<string | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -521,11 +561,67 @@ export function App({
     };
   }, [participantId]);
 
+  // Stage files in the composer and start uploading each immediately (upload-first).
+  // Shared by the paperclip picker and paste-into-textarea.
+  function addFiles(files: FileList | File[]) {
+    let slots = MAX_ATTACHMENTS_PER_MESSAGE - pending.length;
+    const chips: PendingAttachment[] = [];
+    for (const file of Array.from(files)) {
+      if (slots <= 0) {
+        setNotice(`Up to ${MAX_ATTACHMENTS_PER_MESSAGE} attachments per message.`);
+        break;
+      }
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        setNotice(`"${file.name}" is too large (max 25MB per file).`);
+        continue;
+      }
+      slots--;
+      const key = newId();
+      chips.push({
+        key,
+        name: file.name,
+        size: file.size,
+        mime: file.type || "application/octet-stream",
+        status: "uploading",
+        previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined,
+      });
+      uploadAttachment(file)
+        .then((att) =>
+          setPending((ps) =>
+            ps.map((p) => (p.key === key ? { ...p, status: "ready" as const, att } : p)),
+          ),
+        )
+        .catch((e) =>
+          setPending((ps) =>
+            ps.map((p) =>
+              p.key === key
+                ? { ...p, status: "error" as const, error: String((e as Error).message ?? e) }
+                : p,
+            ),
+          ),
+        );
+    }
+    if (chips.length) setPending((ps) => [...ps, ...chips]);
+  }
+
+  function removePending(key: string) {
+    const gone = pending.find((p) => p.key === key);
+    if (gone?.previewUrl) URL.revokeObjectURL(gone.previewUrl);
+    setPending((ps) => ps.filter((p) => p.key !== key));
+  }
+
   function send() {
     const body = draft.trim();
-    if (!body) return;
+    const readyIds = pending
+      .filter((p) => p.status === "ready" && p.att)
+      .map((p) => p.att!.id);
+    if (!body && readyIds.length === 0) return;
     if (!selected) {
       setNotice("Pick or create a channel first.");
+      return;
+    }
+    if (pending.some((p) => p.status === "uploading")) {
+      setNotice("Wait for uploads to finish.");
       return;
     }
     if (wsRef.current?.readyState !== WebSocket.OPEN) {
@@ -535,9 +631,17 @@ export function App({
     // No optimistic echo — the message appears when it round-trips back over WS,
     // which proves the full send -> persist -> fan-out -> render loop.
     wsRef.current.send(
-      JSON.stringify({ type: "post", channelId: selected, body, clientMsgId: newId() }),
+      JSON.stringify({
+        type: "post",
+        channelId: selected,
+        body,
+        clientMsgId: newId(),
+        ...(readyIds.length ? { attachmentIds: readyIds } : {}),
+      }),
     );
     setDraft("");
+    for (const p of pending) if (p.previewUrl) URL.revokeObjectURL(p.previewUrl);
+    setPending([]);
     setMention(null);
     setNotice("");
   }
@@ -1087,11 +1191,17 @@ export function App({
                       </span>
                     </div>
                     <div data-testid="message" className="break-words">
-                      <Markdown>{lead.body}</Markdown>
+                      {lead.body && <Markdown>{lead.body}</Markdown>}
+                      {(lead.attachments?.length ?? 0) > 0 && (
+                        <AttachmentList attachments={lead.attachments!} />
+                      )}
                     </div>
                     {rest.map((m) => (
                       <div key={m.id} data-testid="message" className="mt-1 break-words">
-                        <Markdown>{m.body}</Markdown>
+                        {m.body && <Markdown>{m.body}</Markdown>}
+                        {(m.attachments?.length ?? 0) > 0 && (
+                          <AttachmentList attachments={m.attachments!} />
+                        )}
                       </div>
                     ))}
                   </div>
@@ -1140,7 +1250,7 @@ export function App({
 
         {/* Composer */}
         <div className="px-3 pb-3 pt-1 md:px-5 md:pb-5">
-          <div className="relative flex items-end gap-2 rounded-xl border bg-card p-2 shadow-sm focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/20">
+          <div className="relative rounded-xl border bg-card p-2 shadow-sm focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/20">
             {/* @-mention autocomplete */}
             {mention && mentionCandidates.length > 0 && (
               <div
@@ -1173,6 +1283,74 @@ export function App({
                 </div>
               </div>
             )}
+            {/* Staged attachments (upload-first): thumbnails for images, a file icon otherwise. */}
+            {pending.length > 0 && (
+              <div className="mb-2 flex flex-wrap gap-2 px-1">
+                {pending.map((p) => (
+                  <div
+                    key={p.key}
+                    data-testid="pending-attachment"
+                    data-status={p.status}
+                    className={cn(
+                      "flex items-center gap-2 rounded-lg border bg-muted/40 py-1 pl-1.5 pr-1.5 text-sm",
+                      p.status === "error" && "border-destructive/40 bg-destructive/5",
+                    )}
+                  >
+                    {p.previewUrl ? (
+                      <img
+                        src={p.previewUrl}
+                        alt={p.name}
+                        className="size-9 shrink-0 rounded-md border object-cover"
+                      />
+                    ) : (
+                      <span className="flex size-9 shrink-0 items-center justify-center rounded-md border bg-background">
+                        <FileText className="size-4 text-muted-foreground" />
+                      </span>
+                    )}
+                    <span className="max-w-40 truncate">{p.name}</span>
+                    {p.status === "uploading" && (
+                      <Loader2 className="size-4 shrink-0 animate-spin text-muted-foreground" />
+                    )}
+                    {p.status === "error" && (
+                      <span className="shrink-0 text-xs text-destructive" title={p.error}>
+                        failed
+                      </span>
+                    )}
+                    <button
+                      data-testid="pending-attachment-remove"
+                      onClick={() => removePending(p.key)}
+                      aria-label={`Remove ${p.name}`}
+                      className="flex size-5 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                    >
+                      <X className="size-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="flex items-end gap-2">
+            <input
+              ref={fileRef}
+              data-testid="attach-input"
+              type="file"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                if (e.target.files?.length) addFiles(e.target.files);
+                e.target.value = ""; // allow re-picking the same file
+              }}
+            />
+            <Button
+              variant="ghost"
+              size="icon"
+              data-testid="attach-button"
+              aria-label="Attach files"
+              title="Attach files"
+              onClick={() => fileRef.current?.click()}
+              className="shrink-0 text-muted-foreground"
+            >
+              <Paperclip className="size-4" />
+            </Button>
             <Textarea
               ref={taRef}
               data-testid="composer-input"
@@ -1180,6 +1358,12 @@ export function App({
               onChange={(e) => {
                 setDraft(e.target.value);
                 syncMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
+              }}
+              onPaste={(e) => {
+                if (e.clipboardData.files.length) {
+                  e.preventDefault();
+                  addFiles(e.clipboardData.files);
+                }
               }}
               onSelect={(e) => {
                 const t = e.target as HTMLTextAreaElement;
@@ -1232,6 +1416,7 @@ export function App({
             >
               <SendHorizonal className="size-4" />
             </Button>
+            </div>
           </div>
         </div>
       </main>
@@ -1551,6 +1736,44 @@ export function App({
 }
 
 /* ----------------------------- small pieces ----------------------------- */
+
+// Attachments on a delivered message: inline-renderable images as thumbnails (click to open
+// full size), everything else as a download card. Used for both lead and grouped messages.
+function AttachmentList({ attachments }: { attachments: Attachment[] }) {
+  return (
+    <div data-testid="message-attachments" className="flex flex-wrap items-start gap-2">
+      {attachments.map((a) =>
+        INLINE_IMAGE_MIMES.has(a.mime) ? (
+          <a key={a.id} href={attachmentUrl(a)} target="_blank" rel="noreferrer" className="block">
+            <img
+              src={attachmentUrl(a)}
+              alt={a.filename}
+              loading="lazy"
+              // Intrinsic size hints (when the backend measured them) reduce layout shift.
+              width={a.width ?? undefined}
+              height={a.height ?? undefined}
+              className="mt-1.5 max-h-80 max-w-full rounded-lg border object-contain"
+            />
+          </a>
+        ) : (
+          <a
+            key={a.id}
+            href={attachmentUrl(a)}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-1.5 flex items-center gap-2.5 rounded-lg border bg-card px-3 py-2 shadow-sm transition-colors hover:bg-accent"
+          >
+            <FileText className="size-5 shrink-0 text-muted-foreground" />
+            <span className="min-w-0">
+              <span className="block max-w-56 truncate text-sm font-medium">{a.filename}</span>
+              <span className="block text-xs text-muted-foreground">{fmtBytes(a.size_bytes)}</span>
+            </span>
+          </a>
+        ),
+      )}
+    </div>
+  );
+}
 
 // A shadcn-styled single-select built on the DropdownMenu primitive (portal=false so it
 // works inside dialogs). Shows the current option's label; lists options with an optional hint.

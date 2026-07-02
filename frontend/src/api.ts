@@ -46,6 +46,16 @@ export interface Channel {
   has_mention?: boolean; // any unread message @mentions me
 }
 
+export interface Attachment {
+  id: string;
+  filename: string;
+  mime: string;
+  size_bytes: number;
+  width?: number | null;
+  height?: number | null;
+  url: string; // origin-relative signed path — prefix with the API BASE (see attachmentUrl)
+}
+
 export interface Message {
   id: string;
   channel_id: string;
@@ -55,6 +65,24 @@ export interface Message {
   body: string;
   created_at: string;
   mentions?: { id: string; handle: string }[]; // present on WS message frames
+  attachments?: Attachment[]; // may be absent on older cached shapes — treat as empty
+}
+
+// Upload a file (upload-first, Slack-style): returns the stored Attachment whose id is
+// then referenced by the WS `post` frame's attachmentIds. Max 25MB per file.
+export function uploadAttachment(file: File): Promise<Attachment> {
+  const mime = file.type || "application/octet-stream";
+  const qs = `filename=${encodeURIComponent(file.name)}&mime=${encodeURIComponent(mime)}`;
+  return fetch(withDevAuth(`${BASE}/api/attachments?${qs}`), {
+    method: "POST",
+    headers: authHeaders({ "content-type": "application/octet-stream" }),
+    body: file,
+  }).then((r) => json<Attachment>(r, "upload failed"));
+}
+
+// Attachment urls come back origin-relative (signed path); resolve against the API BASE.
+export function attachmentUrl(a: Attachment): string {
+  return `${BASE}${a.url}`;
 }
 
 export interface Participant {

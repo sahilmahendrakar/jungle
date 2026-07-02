@@ -47,7 +47,9 @@ export interface EventFrame {
 export interface SendMessageFrame {
   type: "send_message";
   id: string;
-  input: { to: string; body: string };
+  // attachmentIds reference uploads the runner already made via POST /api/attachments
+  // (authenticated with its runner token).
+  input: { to: string; body: string; attachmentIds?: string[] };
 }
 
 export interface ConfirmRequestFrame {
@@ -91,9 +93,19 @@ export interface ConfigureFrame {
   git?: { token: string; login: string; repoUrl?: string };
 }
 
+// A file attached to the message that produced an inbox item. `url` is an origin-relative
+// signed path (/api/attachments/…?e=…&sig=…); the runner prefixes the backend origin it
+// already dials for its WebSocket.
+export interface EnqueueAttachment {
+  url: string;
+  filename: string;
+  mime: string;
+  sizeBytes?: number;
+}
+
 export interface EnqueueFrame {
   type: "enqueue";
-  items: Array<{ inboxId: string; text: string }>;
+  items: Array<{ inboxId: string; text: string; attachments?: EnqueueAttachment[] }>;
 }
 
 export interface InterruptFrame {

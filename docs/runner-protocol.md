@@ -43,7 +43,7 @@ of the request; responses echo them.
 | `turn_started` | `turnId`, `inboxIds: string[]` | a turn began consuming these inbox items |
 | `consumed` | `inboxIds: string[]` | the SDK has durably received these items (backend marks delivered) |
 | `event` | `turnId`, `event: <SDK message JSON>` | every SDK stream message, verbatim (system/assistant/user/result + tool blocks). Backend persists for the Activity feed |
-| `send_message` | `id`, `input: {to, body}` | the agent's custom tool call; backend posts the chat message and replies `send_message_result` |
+| `send_message` | `id`, `input: {to, body, attachmentIds?}` | the agent's custom tool call; backend posts the chat message and replies `send_message_result`. `attachmentIds` reference uploads the runner already made via `POST /api/attachments` (see Attachments) |
 | `confirm_request` | `id`, `toolName`, `input`, `suggestions?` | `canUseTool` fired; backend surfaces the confirmation card and replies `confirm_result` |
 | `turn_done` | `turnId`, `ok: boolean`, `error?` | turn finished; backend may immediately `enqueue` more. On `ok: false` the backend posts a crash notice from the agent into its last dispatch channel |
 | `fatal` | `error` | unrecoverable runner error (backend should surface + restart container) |
@@ -53,7 +53,7 @@ of the request; responses echo them.
 | type | fields | meaning |
 |---|---|---|
 | `configure` | `model`, `permissionMode`, `systemPromptAppend`, `git?: {token, login, repoUrl?}` | reply to `hello`; also sent when config changes while idle. When `repoUrl` is set the runner clones it to `/workspace/repo` (skip if present) BEFORE starting any turn |
-| `enqueue` | `items: [{inboxId, text}]` | text is fully composed by the backend (sender/channel context included). Runner queues; consumed at next turn boundary |
+| `enqueue` | `items: [{inboxId, text, attachments?}]` | text is fully composed by the backend (sender/channel context included). `attachments: [{url, filename, mime, sizeBytes?}]` are files on the triggering message: `url` is an origin-relative signed path the runner downloads into `/workspace/attachments/` (URLs are signed fresh at drain time). Runner queues; consumed at next turn boundary |
 | `interrupt` | — | `q.interrupt()` the running turn |
 | `set_permission_mode` | `mode` | applied immediately via `setPermissionMode()` |
 | `set_model` | `model` | stored; applied at next turn boundary (query restart with `resume`) |
@@ -71,9 +71,26 @@ Wire values are the SDK's: `default`, `acceptEdits`, `plan`, `bypassPermissions`
 
 Registered in the runner as an in-process SDK MCP server (`createSdkMcpServer`),
 server name `jungle`, tool `send_message` — auto-allowed via
-`allowedTools: ["mcp__jungle__send_message"]`. Schema matches the MA version:
-`{to: "#channel"|"@handle", body: string}`. It is the agent's only way to speak;
-plain assistant text is never shown to users.
+`allowedTools: ["mcp__jungle__send_message"]`. Schema:
+`{to: "#channel"|"@handle", body: string, files?: string[]}`. It is the agent's only
+way to speak; plain assistant text is never shown to users. `files` are workspace
+paths (max 10 × 25MB); the runner uploads each via `POST /api/attachments` before
+sending the frame with the resulting `attachmentIds`.
+
+## Attachments (HTTP, not WS)
+
+File bytes never ride the runner WebSocket — they go over the backend's HTTP API,
+reusing the same reachability assumption (runner dials out to the backend origin):
+
+- **Download** (files people attached): each `enqueue` item may carry `attachments`
+  with origin-relative signed URLs (`/api/attachments/<id>?e=<expiry>&sig=<hmac>`);
+  the runner prefixes the origin derived from `JUNGLE_BACKEND_WS`, saves the bytes to
+  `/workspace/attachments/<inboxId-prefix>/<filename>`, notes the paths in the turn
+  text, and additionally passes allowlisted images ≤3.5MB as image content blocks so
+  the model can see them.
+- **Upload** (files the agent sends): `POST <origin>/api/attachments?filename=&mime=`
+  with header `x-runner-token: <RUNNER_TOKEN>` and raw bytes as the body → `{id, …}`,
+  then referenced as `attachmentIds` in `send_message`.
 
 ## Provisioner seam (backend-side)
 

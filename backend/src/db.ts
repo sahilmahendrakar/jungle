@@ -31,6 +31,18 @@ export interface PersistedMessage {
   created_at: string;
   cascade_budget: number | null;
   mentions: { id: string; handle: string }[];
+  attachments: AttachmentMeta[];
+}
+
+// The attachment fields that ride on messages (a signed download url is added at the edge
+// by attachments.withUrls — never stored).
+export interface AttachmentMeta {
+  id: string;
+  filename: string;
+  mime: string;
+  size_bytes: number;
+  width: number | null;
+  height: number | null;
 }
 
 export async function createParticipant(p: {
@@ -190,13 +202,15 @@ export async function getParticipant(id: string): Promise<Participant | null> {
 }
 
 // The persistence half of the routing rule: store the message (assign seq), record
-// mentions. Idempotent on (sender_id, client_msg_id) for optimistic-send dedupe.
+// mentions, link any pre-uploaded attachments. Idempotent on (sender_id, client_msg_id)
+// for optimistic-send dedupe.
 export async function persistMessage(args: {
   channelId: string;
   senderId: string;
   body: string;
   clientMsgId?: string | null;
   cascadeBudget?: number | null;
+  attachmentIds?: string[];
 }): Promise<PersistedMessage> {
   const mentions = await resolveMentions(args.body);
   const client = await pool.connect();
@@ -210,12 +224,24 @@ export async function persistMessage(args: {
       [args.channelId, args.senderId, args.body, args.clientMsgId ?? null, args.cascadeBudget ?? null],
     );
     let msg = ins.rows[0];
+    let attachments: AttachmentMeta[] = [];
     if (msg) {
       if (mentions.length) {
         await client.query(
           `insert into mentions (message_id, participant_id) select $1, unnest($2::uuid[])`,
           [msg.id, mentions.map((m) => m.id)],
         );
+      }
+      if (args.attachmentIds?.length) {
+        // Only the sender's own not-yet-linked uploads attach; anything else is silently
+        // dropped (prevents attaching someone else's upload or re-linking a sent file).
+        const linked = await client.query<AttachmentMeta>(
+          `update attachments set message_id = $1
+           where id = any($2::uuid[]) and uploader_id = $3 and message_id is null
+           returning id, filename, mime, size_bytes, width, height`,
+          [msg.id, args.attachmentIds, args.senderId],
+        );
+        attachments = linked.rows;
       }
     } else {
       // conflict (duplicate client_msg_id) — return the existing row
@@ -224,6 +250,7 @@ export async function persistMessage(args: {
         [args.senderId, args.clientMsgId],
       );
       msg = ex.rows[0];
+      attachments = (await attachmentsForMessages([msg.id])).get(msg.id) ?? [];
     }
     await client.query("commit");
     const sender = await getParticipant(msg.sender_id);
@@ -237,6 +264,7 @@ export async function persistMessage(args: {
       created_at: msg.created_at,
       cascade_budget: msg.cascade_budget ?? null,
       mentions,
+      attachments,
     };
   } catch (e) {
     await client.query("rollback");
@@ -254,6 +282,7 @@ export async function getMessages(channelId: string, afterSeq = 0): Promise<Pers
      order by m.seq`,
     [channelId, afterSeq],
   );
+  const atts = await attachmentsForMessages(rows.map((r) => r.id));
   return rows.map((r) => ({
     id: r.id,
     channel_id: r.channel_id,
@@ -264,7 +293,84 @@ export async function getMessages(channelId: string, afterSeq = 0): Promise<Pers
     created_at: r.created_at,
     cascade_budget: r.cascade_budget ?? null,
     mentions: [],
+    attachments: atts.get(r.id) ?? [],
   }));
+}
+
+// --- Attachments ---
+
+export interface AttachmentRow extends AttachmentMeta {
+  uploader_id: string;
+  message_id: string | null;
+  storage_key: string;
+  created_at: string;
+}
+
+// Record an upload (message_id starts null; persistMessage links it on post).
+export async function createAttachment(a: {
+  uploaderId: string;
+  filename: string;
+  mime: string;
+  sizeBytes: number;
+  storageKey: string;
+  width?: number | null;
+  height?: number | null;
+}): Promise<AttachmentRow> {
+  const { rows } = await pool.query<AttachmentRow>(
+    `insert into attachments (uploader_id, filename, mime, size_bytes, storage_key, width, height)
+     values ($1, $2, $3, $4, $5, $6, $7) returning *`,
+    [a.uploaderId, a.filename, a.mime, a.sizeBytes, a.storageKey, a.width ?? null, a.height ?? null],
+  );
+  return rows[0];
+}
+
+export async function getAttachment(id: string): Promise<AttachmentRow | null> {
+  const { rows } = await pool.query<AttachmentRow>(`select * from attachments where id = $1`, [id]);
+  return rows[0] ?? null;
+}
+
+// Attachment metas for a set of messages, grouped by message id (avoids N+1 in getMessages).
+export async function attachmentsForMessages(
+  messageIds: string[],
+): Promise<Map<string, AttachmentMeta[]>> {
+  const out = new Map<string, AttachmentMeta[]>();
+  if (!messageIds.length) return out;
+  const { rows } = await pool.query(
+    `select message_id, id, filename, mime, size_bytes, width, height
+     from attachments where message_id = any($1::uuid[]) order by created_at`,
+    [messageIds],
+  );
+  for (const r of rows) {
+    const list = out.get(r.message_id) ?? [];
+    list.push({
+      id: r.id, filename: r.filename, mime: r.mime,
+      size_bytes: Number(r.size_bytes), width: r.width, height: r.height,
+    });
+    out.set(r.message_id, list);
+  }
+  return out;
+}
+
+// Uploads never linked to a message within maxAgeHours (abandoned composer uploads) — GC set.
+export async function orphanAttachments(
+  maxAgeHours: number,
+): Promise<{ id: string; storage_key: string }[]> {
+  const { rows } = await pool.query(
+    `select id, storage_key from attachments
+     where message_id is null and created_at < now() - make_interval(hours => $1)`,
+    [maxAgeHours],
+  );
+  return rows;
+}
+
+export async function deleteAttachmentRow(id: string): Promise<void> {
+  await pool.query(`delete from attachments where id = $1`, [id]);
+}
+
+// Every storage key with a live row (the GC blob sweep keeps only these).
+export async function knownStorageKeys(): Promise<Set<string>> {
+  const { rows } = await pool.query<{ storage_key: string }>(`select storage_key from attachments`);
+  return new Set(rows.map((r) => r.storage_key));
 }
 
 export async function getChannel(
@@ -275,15 +381,20 @@ export async function getChannel(
 }
 
 // Recent messages oldest -> newest, rendered for feeding an agent context on mention.
+// Attached files are noted by name; the triggering message's files are delivered to the
+// runner separately (saved into its workspace).
 export async function getRecentContext(channelId: string, limit = 20): Promise<string> {
-  const { rows } = await pool.query<{ handle: string; body: string }>(
-    `select p.handle, m.body from messages m join participants p on p.id = m.sender_id
+  const { rows } = await pool.query<{ handle: string; body: string; att: string[] | null }>(
+    `select p.handle, m.body,
+            (select array_agg(a.filename order by a.created_at)
+             from attachments a where a.message_id = m.id) as att
+     from messages m join participants p on p.id = m.sender_id
      where m.channel_id = $1 order by m.seq desc limit $2`,
     [channelId, limit],
   );
   return rows
     .reverse()
-    .map((r) => `@${r.handle}: ${r.body}`)
+    .map((r) => `@${r.handle}: ${r.body}${r.att?.length ? ` [attached: ${r.att.join(", ")}]` : ""}`)
     .join("\n");
 }
 
@@ -339,13 +450,19 @@ export async function getAgentRow(id: string): Promise<AgentRow | null> {
 export interface InboxItem {
   id: string;
   text: string;
+  // Attachment refs from the triggering message; drain signs fresh download URLs.
+  attachments: AttachmentMeta[] | null;
 }
 
 // Queue one composed input for an sdk agent. Returns the new row's id.
-export async function enqueueInboxItem(agentId: string, text: string): Promise<string> {
+export async function enqueueInboxItem(
+  agentId: string,
+  text: string,
+  attachments?: AttachmentMeta[],
+): Promise<string> {
   const { rows } = await pool.query<{ id: string }>(
-    `insert into agent_inbox (agent_id, text) values ($1, $2) returning id`,
-    [agentId, text],
+    `insert into agent_inbox (agent_id, text, attachments) values ($1, $2, $3) returning id`,
+    [agentId, text, attachments?.length ? JSON.stringify(attachments) : null],
   );
   return rows[0].id;
 }
@@ -353,7 +470,7 @@ export async function enqueueInboxItem(agentId: string, text: string): Promise<s
 // Undelivered inbox items for an agent, oldest first — the drain set.
 export async function pendingInbox(agentId: string): Promise<InboxItem[]> {
   const { rows } = await pool.query<InboxItem>(
-    `select id, text from agent_inbox
+    `select id, text, attachments from agent_inbox
      where agent_id = $1 and delivered_at is null order by created_at`,
     [agentId],
   );

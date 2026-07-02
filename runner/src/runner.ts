@@ -19,15 +19,23 @@ import { createJungleMcpServer, type SendMessageResult } from "./send-message-to
 import { applyGitCredentials, cloneRepoIfNeeded, getGhToken } from "./git.js";
 import { loadState, saveState } from "./state.js";
 import {
+  downloadAttachments,
+  httpBaseFromWsUrl,
+  inlineableImage,
+  uploadFile,
+} from "./files.js";
+import {
   PROTOCOL_VERSION,
   type BackendToRunner,
   type ConfigureFrame,
+  type EnqueueAttachment,
   type PermissionMode,
 } from "./protocol.js";
 
 interface QueueItem {
   inboxId: string;
   text: string;
+  attachments?: EnqueueAttachment[];
 }
 
 export interface RunnerEnv {
@@ -80,8 +88,15 @@ export class Runner {
 
   private mcpServer: ReturnType<typeof createJungleMcpServer>;
 
+  // Backend HTTP origin for attachment transfer, derived from the WS URL.
+  private readonly httpBase: string;
+
   constructor(private readonly env: RunnerEnv) {
-    this.mcpServer = createJungleMcpServer((id, input) => this.bridgeSendMessage(id, input));
+    this.httpBase = httpBaseFromWsUrl(env.wsUrl);
+    this.mcpServer = createJungleMcpServer(
+      (id, input) => this.bridgeSendMessage(id, input),
+      (filePath) => uploadFile(this.httpBase, this.env.token, this.workspace, filePath),
+    );
     this.conn = new Connection(env.wsUrl, env.token, {
       onFrame: (f) => this.handleFrame(f),
       onOpen: () => this.onOpen(),
@@ -198,11 +213,11 @@ export class Runner {
     this.maybeStartTurn();
   }
 
-  private handleEnqueue(items: Array<{ inboxId: string; text: string }>): void {
+  private handleEnqueue(items: QueueItem[]): void {
     // Dedupe by inboxId against what's already queued (backend re-sends on reconnect).
     for (const it of items) {
       if (!this.queue.some((q) => q.inboxId === it.inboxId)) {
-        this.queue.push({ inboxId: it.inboxId, text: it.text });
+        this.queue.push({ inboxId: it.inboxId, text: it.text, attachments: it.attachments });
       }
     }
     log.info("enqueued items", { count: items.length, queueDepth: this.queue.length });
@@ -357,7 +372,7 @@ export class Runner {
     firstBatch: QueueItem[],
     turnId: string,
   ): AsyncGenerator<SDKUserMessage> {
-    yield this.toUserMessage(firstBatch);
+    yield await this.toUserMessage(firstBatch);
 
     while (true) {
       // If a model change is pending, end the query so it can restart with the new model.
@@ -376,7 +391,7 @@ export class Runner {
       });
 
       if (batch === null || batch.length === 0) return;
-      yield this.toUserMessage(batch);
+      yield await this.toUserMessage(batch);
     }
   }
 
@@ -391,17 +406,59 @@ export class Runner {
     resolve(items);
   }
 
-  private toUserMessage(batch: QueueItem[]): SDKUserMessage {
-    const content =
-      batch.length === 1
-        ? batch[0].text
-        : `You received ${batch.length} messages:\n\n` +
-          batch.map((b, i) => `${i + 1}. ${b.text}`).join("\n\n");
+  // Build one user message from a batch. Items with attachments have their files downloaded
+  // into /workspace/attachments/ first (so the agent's tools can operate on them), the text
+  // notes the saved paths, and small images additionally ride along as image content blocks
+  // so the model can SEE them without a tool call.
+  private async toUserMessage(batch: QueueItem[]): Promise<SDKUserMessage> {
+    const texts: string[] = [];
+    const imageBlocks: Array<{
+      type: "image";
+      source: { type: "base64"; media_type: string; data: string };
+    }> = [];
+    for (const item of batch) {
+      let text = item.text;
+      if (item.attachments?.length) {
+        const saved = await downloadAttachments(
+          this.httpBase,
+          this.workspace,
+          item.inboxId,
+          item.attachments,
+        );
+        const lines = saved.map((s) =>
+          s.ok
+            ? `- ${s.localPath} (${s.mime})`
+            : `- ${s.filename}: DOWNLOAD FAILED (${s.error})`,
+        );
+        text += `\n\n[Attached files, saved into your workspace]\n${lines.join("\n")}`;
+        for (const s of saved) {
+          if (inlineableImage(s) && imageBlocks.length < 8) {
+            imageBlocks.push({
+              type: "image",
+              source: {
+                type: "base64",
+                media_type: s.mime,
+                data: s.bytes!.toString("base64"),
+              },
+            });
+          }
+        }
+      }
+      texts.push(text);
+    }
+    const combined =
+      texts.length === 1
+        ? texts[0]
+        : `You received ${texts.length} messages:\n\n` +
+          texts.map((t, i) => `${i + 1}. ${t}`).join("\n\n");
+    const content = imageBlocks.length
+      ? [{ type: "text" as const, text: combined }, ...imageBlocks]
+      : combined;
     return {
       type: "user",
       message: { role: "user", content },
       parent_tool_use_id: null,
-    };
+    } as SDKUserMessage;
   }
 
   // ---- PreToolUse hook: force prompting modes through canUseTool ----
