@@ -197,10 +197,12 @@ export function App({
   // @-mention autocomplete
   const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
-  // Collapsible sidebar (persisted) + profile dialog (participant id being viewed)
+  // Collapsible sidebar (persisted, desktop) + profile dialog (participant id being viewed)
   const [sidebarOpen, setSidebarOpen] = useState(
     () => localStorage.getItem("jungle.sidebar") !== "closed",
   );
+  // Off-canvas drawer state (mobile only; independent of the desktop persisted preference).
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [profileId, setProfileId] = useState<string | null>(null);
   // Activity view: the sdk agent whose transcript is open, plus a live event buffer for it.
   // We only buffer while a view is open (activityIdRef gates the WS handler), so idle agents
@@ -534,11 +536,19 @@ export function App({
     else window.location.search = ""; // dev path: drop ?as= -> back to the sign-in screen
   }
 
+  // Select a conversation and, on mobile, close the off-canvas drawer so the conversation
+  // shows full-width. (On desktop the drawer isn't used, so this is a harmless no-op there.)
+  function selectAndClose(id: string) {
+    setSelected(id);
+    setDrawerOpen(false);
+  }
+
   async function openDm(otherId: string) {
     if (!participantId) return;
     try {
       const { id } = await createDm(participantId, otherId);
       reloadChannels(id);
+      setDrawerOpen(false);
     } catch (e) {
       setNotice(String((e as Error).message ?? e));
     }
@@ -643,13 +653,29 @@ export function App({
     : null;
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground">
-      {/* ---------- Sidebar (collapsible) ---------- */}
+    <div className="relative flex h-screen-dvh w-full overflow-hidden bg-background text-foreground">
+      {/* Mobile backdrop: tapping it closes the off-canvas drawer. Desktop (md+) never shows it. */}
+      {drawerOpen && (
+        <div
+          data-testid="sidebar-backdrop"
+          onClick={() => setDrawerOpen(false)}
+          className="fixed inset-0 z-30 bg-black/40 md:hidden"
+        />
+      )}
+
+      {/* ---------- Sidebar ----------
+          Desktop (md+): in-flow, collapsible via width transition (persisted preference).
+          Mobile (<md): fixed off-canvas drawer, slid in/out with `drawerOpen`. */}
       <aside
         data-testid="sidebar"
         className={cn(
-          "shrink-0 overflow-hidden transition-[width] duration-200 ease-in-out",
-          sidebarOpen ? "w-72" : "w-0",
+          "shrink-0 overflow-hidden",
+          // Mobile: off-canvas fixed drawer.
+          "fixed inset-y-0 left-0 z-40 w-72 transition-transform duration-200 ease-in-out",
+          drawerOpen ? "translate-x-0" : "-translate-x-full",
+          // Desktop: in-flow width-collapse; reset the mobile transform/positioning.
+          "md:static md:z-auto md:translate-x-0 md:transition-[width] md:duration-200 md:ease-in-out",
+          sidebarOpen ? "md:w-72" : "md:w-0",
         )}
       >
         <div className="flex h-full w-72 flex-col bg-sidebar text-sidebar-foreground">
@@ -663,8 +689,11 @@ export function App({
             <TooltipTrigger asChild>
               <button
                 data-testid="sidebar-collapse"
-                onClick={() => setSidebarOpen(false)}
-                className="flex size-7 items-center justify-center rounded-md text-sidebar-foreground/60 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
+                onClick={() => {
+                  setSidebarOpen(false); // desktop: collapse
+                  setDrawerOpen(false); // mobile: close the off-canvas drawer
+                }}
+                className="flex size-8 items-center justify-center rounded-md text-sidebar-foreground/60 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground md:size-7"
               >
                 <PanelLeftClose className="size-4" />
               </button>
@@ -687,7 +716,7 @@ export function App({
                 key={c.id}
                 testId="channel-item"
                 active={c.id === selected}
-                onClick={() => setSelected(c.id)}
+                onClick={() => selectAndClose(c.id)}
                 icon={<Hash className="size-4 opacity-70" />}
                 label={c.name}
                 working={(working[c.id]?.length ?? 0) > 0}
@@ -709,7 +738,7 @@ export function App({
                       key={c.id}
                       testId="channel-item"
                       active={c.id === selected}
-                      onClick={() => setSelected(c.id)}
+                      onClick={() => selectAndClose(c.id)}
                       icon={
                         <PersonAvatar
                           name={p?.display_name ?? c.dm_with ?? "?"}
@@ -741,7 +770,7 @@ export function App({
                 active={false}
                 onClick={() => {
                   const existing = dmChannelWith(p.handle);
-                  if (existing) setSelected(existing.id);
+                  if (existing) selectAndClose(existing.id);
                   else openDm(p.id);
                 }}
                 icon={
@@ -800,7 +829,19 @@ export function App({
       {/* ---------- Main ---------- */}
       <main className="flex min-w-0 flex-1 flex-col bg-background">
         {/* Channel header */}
-        <header className="flex h-14 shrink-0 items-center gap-2.5 border-b px-5">
+        <header className="flex h-14 shrink-0 items-center gap-2.5 border-b px-3 md:px-5">
+          {/* Mobile hamburger: opens the off-canvas drawer. Hidden on md+ (desktop uses the
+              persisted collapse toggle below instead). */}
+          <Button
+            variant="ghost"
+            size="icon"
+            data-testid="sidebar-toggle"
+            aria-label="Open menu"
+            onClick={() => setDrawerOpen(true)}
+            className="-ml-1 size-9 shrink-0 text-muted-foreground md:hidden"
+          >
+            <PanelLeft className="size-5" />
+          </Button>
           {!sidebarOpen && (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -809,7 +850,7 @@ export function App({
                   size="icon"
                   data-testid="sidebar-expand"
                   onClick={() => setSidebarOpen(true)}
-                  className="-ml-2 size-8 shrink-0 text-muted-foreground"
+                  className="-ml-2 hidden size-8 shrink-0 text-muted-foreground md:inline-flex"
                 >
                   <PanelLeft className="size-4" />
                 </Button>
@@ -899,7 +940,7 @@ export function App({
 
         {/* Messages */}
         <div ref={viewportRef} className="min-h-0 flex-1 overflow-y-auto">
-          <div data-testid="message-list" className="flex flex-col gap-5 px-5 py-6">
+          <div data-testid="message-list" className="flex flex-col gap-5 px-3 py-6 md:px-5">
             {sel && grouped.length === 0 && (
               <div className="flex flex-1 flex-col items-center justify-center gap-2 pt-16 text-center">
                 <div className="flex size-12 items-center justify-center rounded-2xl bg-muted">
@@ -967,7 +1008,7 @@ export function App({
         {workingHere.length > 0 && (
           <div
             data-testid="working-indicator"
-            className="flex items-center gap-2 px-5 py-1.5 text-sm text-muted-foreground"
+            className="flex items-center gap-2 px-3 py-1.5 text-sm text-muted-foreground md:px-5"
           >
             <WorkingDots />
             <span>
@@ -981,7 +1022,7 @@ export function App({
 
         {/* Pending tool confirmations for this channel (always_ask agents) */}
         {selected && confirms.filter((c) => c.channelId === selected).length > 0 && (
-          <div className="mx-5 mb-1 space-y-2">
+          <div className="mx-3 mb-1 space-y-2 md:mx-5">
             {confirms
               .filter((c) => c.channelId === selected)
               .map((c) => (
@@ -994,14 +1035,14 @@ export function App({
         {notice && (
           <div
             data-testid="send-notice"
-            className="mx-5 mb-1 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive"
+            className="mx-3 mb-1 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive md:mx-5"
           >
             {notice}
           </div>
         )}
 
         {/* Composer */}
-        <div className="px-5 pb-5 pt-1">
+        <div className="px-3 pb-3 pt-1 md:px-5 md:pb-5">
           <div className="relative flex items-end gap-2 rounded-xl border bg-card p-2 shadow-sm focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/20">
             {/* @-mention autocomplete */}
             {mention && mentionCandidates.length > 0 && (

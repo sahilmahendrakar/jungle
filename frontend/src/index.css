@@ -90,4 +90,18 @@
   html, body, #root {
     height: 100%;
   }
+  /* Avoid iOS text-size auto-inflation, and prevent horizontal rubber-banding. */
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    overflow-x: hidden;
+  }
+}
+
+/* Full viewport height that accounts for mobile browser chrome / on-screen keyboard.
+   Falls back to 100vh where dvh is unsupported. */
+.h-screen-dvh {
+  height: 100vh;
+  height: 100dvh;
 }
