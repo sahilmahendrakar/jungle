@@ -13,6 +13,7 @@ import {
   deleteChannel,
   confirmToolCall,
   updateAgent,
+  deleteAgent,
   setDevParticipantId,
   WS_BASE,
   type AgentEvent,
@@ -418,6 +419,24 @@ export function App({
           setPeople((ps) =>
             ps.map((p) => (p.id === evt.participant.id ? { ...p, ...evt.participant } : p)),
           );
+          return;
+        }
+        if (evt.type === "participant_deleted") {
+          // Resolve the deleted agent's handle so we can drop its DM channel (DMs are keyed
+          // by the other member's handle via dm_with), then remove the participant itself.
+          setPeople((ps) => {
+            const gone = ps.find((p) => p.id === evt.participantId);
+            if (gone) {
+              setChannels((cs) => {
+                const dm = cs.find((c) => c.kind === "dm" && c.dm_with === gone.handle);
+                if (dm && dm.id === selectedRef.current) setSelected(null);
+                return cs.filter((c) => c.id !== dm?.id);
+              });
+            }
+            return ps.filter((p) => p.id !== evt.participantId);
+          });
+          // Close the profile dialog if it was showing the deleted agent.
+          setProfileId((cur) => (cur === evt.participantId ? null : cur));
           return;
         }
         if (evt.type === "agent_event") {
@@ -1506,6 +1525,11 @@ export function App({
             openActivity(profilePerson.id);
             setProfileId(null);
           }}
+          onDeleted={(id) => {
+            // Optimistic local cleanup; the participant_deleted WS event is idempotent.
+            setPeople((ps) => ps.filter((p) => p.id !== id));
+            setProfileId(null);
+          }}
         />
       )}
 
@@ -1584,12 +1608,14 @@ function ParticipantProfileDialog({
   onClose,
   onSaved,
   onOpenActivity,
+  onDeleted,
 }: {
   person: Participant;
   isSelf: boolean;
   onClose: () => void;
   onSaved: (p: Participant) => void;
   onOpenActivity: () => void;
+  onDeleted: (id: string) => void;
 }) {
   const isAgent = person.kind === "agent";
   const [name, setName] = useState(person.display_name);
@@ -1598,6 +1624,22 @@ function ParticipantProfileDialog({
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [err, setErr] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  async function del() {
+    if (deleting) return;
+    setDeleting(true);
+    setErr("");
+    try {
+      await deleteAgent(person.id);
+      onDeleted(person.id);
+      onClose();
+    } catch (e) {
+      setErr(String((e as Error).message ?? e));
+      setDeleting(false);
+    }
+  }
 
   const dirty =
     name.trim() !== person.display_name ||
@@ -1708,6 +1750,48 @@ function ParticipantProfileDialog({
               View activity
             </Button>
             {err && <p className="text-sm text-destructive">{err}</p>}
+            {/* Danger zone: permanently delete this agent. */}
+            {!isSelf && (
+              <div className="space-y-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3">
+                {!confirmDelete ? (
+                  <Button
+                    variant="ghost"
+                    data-testid="agent-delete"
+                    onClick={() => setConfirmDelete(true)}
+                    className="w-full justify-start gap-2 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                  >
+                    <Trash2 className="size-4" />
+                    Delete agent
+                  </Button>
+                ) : (
+                  <div className="space-y-2">
+                    <p className="text-xs text-muted-foreground">
+                      Permanently delete <span className="font-medium">{person.display_name}</span>,
+                      its container, your DM, and every message it sent. This can't be undone.
+                    </p>
+                    <div className="flex justify-end gap-2">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setConfirmDelete(false)}
+                        disabled={deleting}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        data-testid="agent-delete-confirm"
+                        onClick={del}
+                        disabled={deleting}
+                      >
+                        {deleting ? "Deleting…" : "Delete agent"}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         ) : (
           <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">

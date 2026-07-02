@@ -120,6 +120,15 @@ export function updateAgent(
   }).then((r) => json<Participant>(r, "failed to update agent"));
 }
 
+// Permanently delete an agent: tears down its runner/container and removes all of its data
+// (its DMs and the messages it sent). Irreversible.
+export function deleteAgent(id: string): Promise<{ ok: boolean; error?: string }> {
+  return fetch(withDevAuth(`${BASE}/api/agents/${id}`), {
+    method: "DELETE",
+    headers: authHeaders(),
+  }).then((r) => json<{ ok: boolean; error?: string }>(r, "failed to delete agent"));
+}
+
 // A single Claude Agent SDK stream message persisted for an sdk agent. `event` is the raw
 // SDK message JSON (system/assistant/user/result); render defensively (shapes may vary).
 export interface AgentEvent {

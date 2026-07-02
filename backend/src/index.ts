@@ -220,6 +220,32 @@ app.patch("/api/agents/:id", async (req, res) => {
   }
 });
 
+// Delete an agent entirely: tear down its runner + container/volume, then remove all of its
+// data. Auth-gated (any signed-in user, matching PATCH). Best-effort on the container teardown
+// so a docker hiccup doesn't strand the DB row; the DB delete is the source of truth.
+app.delete("/api/agents/:id", async (req, res) => {
+  try {
+    const me = await requester(req);
+    if (!me) return res.status(401).json({ error: "auth required" });
+    const agent = await db.getParticipant(req.params.id);
+    if (!agent || agent.kind !== "agent") return res.status(404).json({ error: "agent not found" });
+
+    // Stop the runner working and close its socket so it can't reconnect mid-teardown.
+    runners.disconnect(agent.id);
+    // Remove the container + its workspace volume. Best-effort: log but don't fail the request.
+    try {
+      await provisioner.destroy(agent.id);
+    } catch (e) {
+      console.error("provisioner destroy:", e);
+    }
+    await db.deleteAgent(agent.id);
+    broadcastAll({ type: "participant_deleted", participantId: agent.id });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: String((e as Error).message ?? e) });
+  }
+});
+
 // Activity feed history for an sdk agent: persisted SDK stream events, oldest-first within
 // the returned page. Live updates ride the app WS as `agent_event` broadcasts.
 app.get("/api/agents/:id/events", async (req, res) => {

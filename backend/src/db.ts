@@ -600,6 +600,37 @@ export async function deleteChannel(channelId: string): Promise<void> {
   await pool.query(`delete from channels where id = $1`, [channelId]);
 }
 
+// Fully delete an agent participant and everything tied to it. Most FKs cascade off
+// participants (agent_inbox, agent_events, channel_members, channel_reads, github identity),
+// but messages.sender_id is RESTRICT — so we must clear the agent's messages by hand, in a
+// transaction. We also drop any DM channels the agent belonged to (a DM with a deleted agent
+// is meaningless and would otherwise linger with a single member).
+export async function deleteAgent(agentId: string): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    // DM channels the agent is a member of — deleting the channel cascades its members +
+    // messages (including the human's side of the DM), which is what we want for a 1:1 DM.
+    await client.query(
+      `delete from channels
+        where kind = 'dm'
+          and id in (select channel_id from channel_members where participant_id = $1)`,
+      [agentId],
+    );
+    // Remaining messages the agent sent in group channels (sender_id is RESTRICT, no cascade).
+    await client.query(`delete from messages where sender_id = $1`, [agentId]);
+    // The participant row — cascades agent_inbox, agent_events, channel_members, channel_reads,
+    // and the github identity row.
+    await client.query(`delete from participants where id = $1`, [agentId]);
+    await client.query("commit");
+  } catch (e) {
+    await client.query("rollback");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
 export async function findOrCreateDm(aId: string, bId: string): Promise<string> {
   const found = await pool.query(
     `select c.id from channels c

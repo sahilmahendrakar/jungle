@@ -192,6 +192,19 @@ export function runnerState(agentId: string): { connected: boolean; state: "idle
   return { connected: !!conn, state: conn?.state ?? "idle" };
 }
 
+// Drop a runner connection (agent deletion). Closes the socket with 4003 so the runner
+// exits rather than reconnecting, and forgets it immediately.
+export function disconnect(agentId: string): void {
+  const conn = conns.get(agentId);
+  if (!conn) return;
+  conns.delete(agentId);
+  try {
+    conn.ws.close(4003, "agent deleted");
+  } catch {
+    // socket may already be closing — nothing to do.
+  }
+}
+
 // --- Confirm routing (called by the decision endpoint in index.ts) ---
 
 // Resolve a runner's confirm_request. Returns false if no live runner / unknown id.
