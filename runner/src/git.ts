@@ -55,7 +55,9 @@ export async function applyGitCredentials(token: string, login: string): Promise
   }
 }
 
-// Clone repoUrl into /workspace/repo if it doesn't already exist there.
+// Clone repoUrl into /workspace/repo if it doesn't already exist there. Retries with
+// backoff: a just-minted GitHub App installation token can 404 ("Repository not found")
+// on GitHub's git endpoints for a few seconds until it propagates.
 export async function cloneRepoIfNeeded(repoUrl: string): Promise<void> {
   try {
     await fs.access(path.join(REPO_DIR, ".git"));
@@ -64,13 +66,18 @@ export async function cloneRepoIfNeeded(repoUrl: string): Promise<void> {
   } catch {
     // not present -> clone
   }
-  log.info("cloning repo", { repoUrl, dir: REPO_DIR });
   const env = { ...process.env };
   if (currentToken) env.GH_TOKEN = currentToken;
-  const { code, stderr } = await run("git", ["clone", repoUrl, REPO_DIR], { env });
-  if (code !== 0) {
-    log.error("git clone failed", { code, stderr: stderr.slice(0, 500) });
-  } else {
-    log.info("git clone complete", { dir: REPO_DIR });
+  const delays = [0, 2000, 5000, 10000];
+  for (let attempt = 0; attempt < delays.length; attempt++) {
+    if (delays[attempt]) await new Promise((r) => setTimeout(r, delays[attempt]));
+    log.info("cloning repo", { repoUrl, dir: REPO_DIR, attempt: attempt + 1 });
+    const { code, stderr } = await run("git", ["clone", repoUrl, REPO_DIR], { env });
+    if (code === 0) {
+      log.info("git clone complete", { dir: REPO_DIR });
+      return;
+    }
+    log.warn("git clone failed", { code, attempt: attempt + 1, stderr: stderr.slice(0, 300) });
   }
+  log.error("git clone failed after all retries; agent will have to clone manually", { repoUrl });
 }

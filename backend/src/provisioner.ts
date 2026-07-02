@@ -58,8 +58,13 @@ export class DockerProvisioner implements Provisioner {
       "create",
       "--name", containerName(agent.id),
       "--restart=unless-stopped",
-      "--memory=1g",
+      // 3g: a web-dev turn realistically runs the SDK process + `next dev` + headless
+      // Chromium at once; 1g OOM-killed the SDK mid-turn (2026-07-02, selenite-agent).
+      // Caps are not reservations — idle agents cost nothing.
+      "--memory=3g",
       "--cpus=1",
+      // Chromium crashes with the 64mb docker default /dev/shm.
+      "--shm-size=512m",
       "--add-host=host.docker.internal:host-gateway",
       "-v", `${volumeName(agent.id)}:/workspace`,
       "-e", `JUNGLE_BACKEND_WS=${BACKEND_WS}`,

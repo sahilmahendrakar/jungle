@@ -17,13 +17,25 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends gh \
   && rm -rf /var/lib/apt/lists/*
 
+# Headless Chromium + its system libs + fonts, shared at a world-readable path so the
+# unprivileged agent can drive it via playwright/playwright-core. Agents building web
+# apps need screenshots constantly; without this one agent spent 15 minutes hand-
+# extracting 30 .debs into an LD_LIBRARY_PATH prefix (no root, no apt at runtime).
+# If a project pins a different playwright version it just downloads its own browser
+# build — the system libs baked here are what make that work.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN npx -y playwright@latest install --with-deps chromium \
+  && chmod -R a+rX /ms-playwright \
+  && rm -rf /var/lib/apt/lists/* /root/.npm /root/.cache
+
 # Unprivileged runtime user.
 RUN useradd --uid 1001 --create-home --shell /bin/bash agent
 
 # Claude Code refuses bypassPermissions as root without this; we run as `agent`
-# anyway (belt and suspenders).
+# anyway (belt and suspenders). NOTE: deliberately no NODE_ENV=production — the agent's
+# child processes inherit this env, and production mode breaks `npm install` of
+# devDependencies in agent workspaces (the runner strips it too; see childEnv()).
 ENV IS_SANDBOX=1
-ENV NODE_ENV=production
 
 WORKDIR /app
 

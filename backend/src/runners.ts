@@ -42,6 +42,9 @@ export interface RunnerHooks {
   ) => Promise<ConfirmDecision>;
   // Persist an SDK stream event and broadcast it to app websockets.
   onAgentEvent: (agentId: string, turnId: string | null, event: unknown) => void;
+  // A turn died (SDK crash, OOM kill, API error). Tell the humans who were waiting —
+  // otherwise the agent just goes silent mid-task.
+  onTurnFailed: (agent: { id: string; handle: string }, error: string) => void;
 }
 
 let hooks: RunnerHooks | null = null;
@@ -108,12 +111,19 @@ export function systemPromptAppend(agent: db.AgentRow): string {
     const gitEmail = `${agent.handle}@agents.jungle.dev`;
     s +=
       `\n\n— Working on ${agent.repo} —\n` +
-      `The repo is available in your workspace. Make and COMMIT changes with git so commits are ` +
-      `authored as you. Before committing, run once:\n` +
+      `The repo is already cloned at /workspace/repo with git credentials configured ` +
+      `(if it's ever missing, clone it yourself with gh). Make and COMMIT changes with git so ` +
+      `commits are authored as you. Before committing, run once:\n` +
       `  git config user.name ${JSON.stringify(gitName)}\n` +
       `  git config user.email ${JSON.stringify(gitEmail)}\n` +
       `Then push your branch and open the pull request.`;
   }
+  s +=
+    `\n\n— Your environment —\n` +
+    `You run in a Linux container: no sudo/apt, ~3GB memory (don't run several heavy ` +
+    `processes at once), Chromium preinstalled for Playwright (PLAYWRIGHT_BROWSERS_PATH is set). ` +
+    `Dev servers and other long-running processes MUST use the Bash tool's run_in_background ` +
+    `option — plain \`&\` background jobs are killed when the Bash call returns.`;
   return s;
 }
 
@@ -130,7 +140,8 @@ async function buildConfigure(agent: db.AgentRow): Promise<Record<string, unknow
     try {
       const token = await gh.installationTokenForRepo(agent.repo);
       const login = agent.handle; // git identity/login the runner presents
-      frame.git = { token, login };
+      // repoUrl makes the runner clone into /workspace/repo before its first turn.
+      frame.git = { token, login, repoUrl: `https://github.com/${agent.repo}.git` };
     } catch (e) {
       console.error(`runner[${agent.id}] configure: could not mint git token:`, e);
     }
@@ -351,7 +362,16 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
       }
       case "turn_done": {
         conn.state = "idle";
-        if (!frame.ok) console.error(`runner[${agentId}] turn ${frame.turnId} failed:`, frame.error);
+        if (!frame.ok) {
+          console.error(`runner[${agentId}] turn ${frame.turnId} failed:`, frame.error);
+          const agent = await db.getAgentRow(agentId);
+          if (agent && hooks) {
+            hooks.onTurnFailed(
+              { id: agent.id, handle: agent.handle },
+              String(frame.error ?? "unknown error"),
+            );
+          }
+        }
         // A turn finished; more work may have queued while it ran.
         await drain(agentId);
         break;

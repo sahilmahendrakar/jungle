@@ -97,11 +97,12 @@ async function main() {
   await waitFor("answer #2", agentMsg(seqBefore2, "blue"));
   check("rapid double message: both answered", true);
 
-  // 6. interrupt a long turn
-  post(`@${HANDLE} using Bash run \`sleep 90\` and only reply after it finishes.`);
-  const card2 = await waitFor("sleep confirm card",
+  // 6. interrupt a long turn. NOTE: the Claude CLI hard-blocks standalone `sleep N`
+  // before the permission layer (no confirm card would ever surface), so use a loop.
+  post(`@${HANDLE} using Bash run exactly \`for i in $(seq 1 90); do echo tick $i; sleep 1; done\` (a slow counting loop) and only reply after it finishes.`);
+  const card2 = await waitFor("slow-loop confirm card",
     (f) => f.type === "tool_confirmation_request" && f.agentId === agent.id &&
-           JSON.stringify(f.input ?? "").includes("sleep"));
+           JSON.stringify(f.input ?? "").includes("seq 1 90"));
   await api("POST", "/agents/confirm", { confirmId: card2.confirmId, decision: "allow", participantId: HUMAN });
   await new Promise((r) => setTimeout(r, 5_000)); // let the sleep start
   const intr = await api("POST", `/agents/${agent.id}/interrupt`, { participantId: HUMAN });

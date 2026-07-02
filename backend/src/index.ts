@@ -823,6 +823,22 @@ runners.init(server, {
     void db.insertAgentEvent(agentId, turnId, event).catch((e) => console.error("insertAgentEvent:", e));
     broadcastAll({ type: "agent_event", agentId, turnId, event });
   },
+  // A turn crashed (e.g. OOM-killed SDK process). Post a notice from the agent into the
+  // channel that triggered it so the humans waiting aren't ghosted. cascadeBudget 0: a
+  // crash notice must never trigger other agents.
+  onTurnFailed: (agent, error) => {
+    const channelId = sdkContext.get(agent.id)?.channelId;
+    if (!channelId) return;
+    void (async () => {
+      const msg = await db.persistMessage({
+        channelId,
+        senderId: agent.id,
+        body: `⚠️ My turn crashed before I could finish (\`${error}\`). Any uncommitted work is still in my workspace — message me to pick it back up.`,
+        cascadeBudget: 0,
+      });
+      await fanOut(channelId, { type: "message", message: msg });
+    })().catch((e) => console.error("onTurnFailed:", e));
+  },
 });
 
 const PORT = Number(process.env.PORT ?? 3001);

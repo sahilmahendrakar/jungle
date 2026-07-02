@@ -11,6 +11,8 @@
 //     a pending model change via query restart with resume).
 import { query, type Query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { randomUUID } from "node:crypto";
+import { promises as fs } from "node:fs";
+import path from "node:path";
 import { log } from "./log.js";
 import { Connection } from "./connection.js";
 import { createJungleMcpServer, type SendMessageResult } from "./send-message-tool.js";
@@ -136,7 +138,7 @@ export class Runner {
   private handleFrame(frame: BackendToRunner): void {
     switch (frame.type) {
       case "configure":
-        this.handleConfigure(frame);
+        void this.handleConfigure(frame);
         break;
       case "enqueue":
         this.handleEnqueue(frame.items);
@@ -178,17 +180,19 @@ export class Runner {
     }
   }
 
-  private handleConfigure(frame: ConfigureFrame): void {
+  private async handleConfigure(frame: ConfigureFrame): Promise<void> {
     this.model = frame.model;
     this.permissionMode = frame.permissionMode;
     this.systemPromptAppend = frame.systemPromptAppend ?? "";
-    this.configured = true;
     if (frame.git) {
-      void (async () => {
-        await applyGitCredentials(frame.git!.token, frame.git!.login);
-        if (frame.git!.repoUrl) await cloneRepoIfNeeded(frame.git!.repoUrl);
-      })();
+      // Finish repo/credential setup BEFORE allowing turns: the system prompt tells the
+      // agent the repo is already in its workspace, so it must actually be there. Items
+      // enqueued meanwhile just wait (maybeStartTurn no-ops until `configured`). On
+      // reconnects the clone is a fast already-present check.
+      await applyGitCredentials(frame.git.token, frame.git.login);
+      if (frame.git.repoUrl) await cloneRepoIfNeeded(frame.git.repoUrl);
     }
+    this.configured = true;
     void saveState({ sessionId: this.sessionId, model: this.model });
     this.sendState();
     this.maybeStartTurn();
@@ -272,13 +276,14 @@ export class Runner {
     this.conn.send({ type: "consumed", inboxIds: firstBatch.map((i) => i.inboxId) });
     this.sendState();
 
+    const resumeId = await this.resumableSessionId();
     const q = query({
       prompt: this.makeInputGenerator(firstBatch, turnId),
       options: {
         cwd: this.workspace,
         model: this.model ?? undefined,
         permissionMode: this.permissionMode,
-        resume: this.sessionId ?? undefined,
+        resume: resumeId ?? undefined,
         systemPrompt: {
           type: "preset",
           preset: "claude_code",
@@ -489,9 +494,35 @@ export class Runner {
     for (const [k, v] of Object.entries(process.env)) {
       if (typeof v === "string") env[k] = v;
     }
+    // Don't leak runner plumbing into the agent's child processes. NODE_ENV especially:
+    // "production" makes `npm install` silently skip devDependencies in agent workspaces.
+    delete env.NODE_ENV;
+    delete env.JUNGLE_RUNNER_TOKEN;
+    delete env.JUNGLE_BACKEND_WS;
+    // Keep Claude Code state (session JSONL transcripts) on the workspace volume so the
+    // agent's memory survives container recreation (image upgrades, config changes).
+    env.CLAUDE_CONFIG_DIR = path.join(this.workspace, ".claude");
     const gh = getGhToken();
     if (gh) env.GH_TOKEN = gh;
     return env;
+  }
+
+  // Only pass `resume` when the session transcript actually exists — a stale sessionId
+  // (container recreated before CLAUDE_CONFIG_DIR lived on the volume, transcript pruned,
+  // …) would otherwise make every turn fail at startup. Falls back to a fresh session.
+  private async resumableSessionId(): Promise<string | null> {
+    if (!this.sessionId) return null;
+    const slug = this.workspace.replace(/[^a-zA-Z0-9]/g, "-"); // Claude Code project-dir slug
+    const file = path.join(this.workspace, ".claude", "projects", slug, `${this.sessionId}.jsonl`);
+    try {
+      await fs.access(file);
+      return this.sessionId;
+    } catch {
+      log.warn("session transcript missing; starting fresh session", { sessionId: this.sessionId });
+      this.sessionId = null;
+      void saveState({ sessionId: null, model: this.model });
+      return null;
+    }
   }
 
   fatal(error: string): void {

@@ -45,14 +45,14 @@ of the request; responses echo them.
 | `event` | `turnId`, `event: <SDK message JSON>` | every SDK stream message, verbatim (system/assistant/user/result + tool blocks). Backend persists for the Activity feed |
 | `send_message` | `id`, `input: {to, body}` | the agent's custom tool call; backend posts the chat message and replies `send_message_result` |
 | `confirm_request` | `id`, `toolName`, `input`, `suggestions?` | `canUseTool` fired; backend surfaces the confirmation card and replies `confirm_result` |
-| `turn_done` | `turnId`, `ok: boolean`, `error?` | turn finished; backend may immediately `enqueue` more |
+| `turn_done` | `turnId`, `ok: boolean`, `error?` | turn finished; backend may immediately `enqueue` more. On `ok: false` the backend posts a crash notice from the agent into its last dispatch channel |
 | `fatal` | `error` | unrecoverable runner error (backend should surface + restart container) |
 
 ## Backend → runner frames
 
 | type | fields | meaning |
 |---|---|---|
-| `configure` | `model`, `permissionMode`, `systemPromptAppend`, `git?: {token, login}` | reply to `hello`; also sent when config changes while idle |
+| `configure` | `model`, `permissionMode`, `systemPromptAppend`, `git?: {token, login, repoUrl?}` | reply to `hello`; also sent when config changes while idle. When `repoUrl` is set the runner clones it to `/workspace/repo` (skip if present) BEFORE starting any turn |
 | `enqueue` | `items: [{inboxId, text}]` | text is fully composed by the backend (sender/channel context included). Runner queues; consumed at next turn boundary |
 | `interrupt` | — | `q.interrupt()` the running turn |
 | `set_permission_mode` | `mode` | applied immediately via `setPermissionMode()` |
