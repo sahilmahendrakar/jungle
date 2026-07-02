@@ -81,13 +81,7 @@ const MODEL_OPTIONS = [
   { id: "claude-sonnet-5", label: "Sonnet 5", hint: "Balanced" },
   { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5", hint: "Fastest" },
 ];
-// Legacy Managed-Agents permission modes (ma agents only).
-const MODE_OPTIONS = [
-  { id: "always_allow", label: "Always allow", hint: "Runs tools without asking" },
-  { id: "always_ask", label: "Always ask", hint: "Confirm each tool call in chat" },
-];
-// SDK-runner permission modes. `default` is first (create-agent default). Note: the backend
-// falls back to bypassPermissions if mode is omitted, so we always SEND the selected mode.
+// Agent permission modes (SDK runner). `default` is first (the create-agent default).
 const SDK_MODE_OPTIONS = [
   {
     id: "default",
@@ -1462,9 +1456,8 @@ function SelectMenu({
 }
 
 // Slack-style profile for viewing another participant. Humans are read-only (just their alias
-// for now). Agents expose an editable config: display name + tool-permission mode (applied live).
-// sdk agents also expose an editable model (applied at the next turn) and an Activity view;
-// ma (legacy Managed Agents) agents keep the read-only model + legacy two-mode dropdown.
+// for now). Agents expose an editable config: display name + tool-permission mode (applied live),
+// model (applied at the next turn), and an Activity view.
 // (The current user's own settings — email, GitHub, sign out — live at the /settings route.)
 function ParticipantProfileDialog({
   person,
@@ -1480,11 +1473,8 @@ function ParticipantProfileDialog({
   onOpenActivity: () => void;
 }) {
   const isAgent = person.kind === "agent";
-  const isSdk = person.runtime === "sdk";
-  const modeOptions = isSdk ? SDK_MODE_OPTIONS : MODE_OPTIONS;
-  const defaultMode = isSdk ? "default" : "always_allow";
   const [name, setName] = useState(person.display_name);
-  const [mode, setMode] = useState(person.mode ?? defaultMode);
+  const [mode, setMode] = useState(person.mode ?? "default");
   const [model, setModel] = useState(person.model ?? MODEL_OPTIONS[0].id);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -1492,10 +1482,8 @@ function ParticipantProfileDialog({
 
   const dirty =
     name.trim() !== person.display_name ||
-    mode !== (person.mode ?? defaultMode) ||
-    (isSdk && model !== (person.model ?? MODEL_OPTIONS[0].id));
-  const modelLabel =
-    MODEL_OPTIONS.find((m) => m.id === person.model)?.label ?? "Default (Opus 4.8)";
+    mode !== (person.mode ?? "default") ||
+    model !== (person.model ?? MODEL_OPTIONS[0].id);
 
   async function save() {
     if (!dirty || saving || !name.trim()) return;
@@ -1505,8 +1493,8 @@ function ParticipantProfileDialog({
       const patch: { displayName?: string; mode?: string; model?: string } = {
         displayName: name.trim(),
         mode,
+        model,
       };
-      if (isSdk) patch.model = model; // model is editable only for sdk agents
       const updated = await updateAgent(person.id, patch);
       onSaved(updated);
       setSaved(true);
@@ -1561,73 +1549,45 @@ function ParticipantProfileDialog({
               <SelectMenu
                 value={mode}
                 onChange={setMode}
-                options={modeOptions}
+                options={SDK_MODE_OPTIONS}
                 testId="agent-mode-select"
               />
             </div>
-            {isSdk ? (
-              <>
-                <div className="space-y-1.5">
-                  <Label>Model</Label>
-                  <SelectMenu
-                    value={model}
-                    onChange={setModel}
-                    options={MODEL_OPTIONS}
-                    testId="agent-model-select"
-                  />
-                  <p className="text-[11px] leading-tight text-muted-foreground">
-                    Applies at the agent's next turn.
-                  </p>
-                </div>
-                {person.repo && (
-                  <div className="min-w-0 space-y-0.5 rounded-lg border bg-muted/30 p-3">
-                    <div className="text-xs font-medium text-muted-foreground">Repository</div>
-                    <a
-                      href={`https://github.com/${person.repo}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="flex items-center gap-1 truncate text-sm text-primary hover:underline"
-                    >
-                      <GitBranch className="size-3.5 shrink-0" />
-                      <span className="truncate">{person.repo}</span>
-                    </a>
-                  </div>
-                )}
-                <Button
-                  variant="outline"
-                  data-testid="activity-open"
-                  onClick={onOpenActivity}
-                  className="w-full justify-start gap-2 text-muted-foreground"
+            <div className="space-y-1.5">
+              <Label>Model</Label>
+              <SelectMenu
+                value={model}
+                onChange={setModel}
+                options={MODEL_OPTIONS}
+                testId="agent-model-select"
+              />
+              <p className="text-[11px] leading-tight text-muted-foreground">
+                Applies at the agent's next turn.
+              </p>
+            </div>
+            {person.repo && (
+              <div className="min-w-0 space-y-0.5 rounded-lg border bg-muted/30 p-3">
+                <div className="text-xs font-medium text-muted-foreground">Repository</div>
+                <a
+                  href={`https://github.com/${person.repo}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-center gap-1 truncate text-sm text-primary hover:underline"
                 >
-                  <Activity className="size-4" />
-                  View activity
-                </Button>
-              </>
-            ) : (
-              <div className="grid grid-cols-2 gap-4 rounded-lg border bg-muted/30 p-3">
-                <div className="space-y-0.5">
-                  <div className="text-xs font-medium text-muted-foreground">Model</div>
-                  <div className="text-sm">{modelLabel}</div>
-                  <p className="text-[11px] leading-tight text-muted-foreground">
-                    Fixed for this agent's lifetime.
-                  </p>
-                </div>
-                {person.repo && (
-                  <div className="min-w-0 space-y-0.5">
-                    <div className="text-xs font-medium text-muted-foreground">Repository</div>
-                    <a
-                      href={`https://github.com/${person.repo}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="flex items-center gap-1 truncate text-sm text-primary hover:underline"
-                    >
-                      <GitBranch className="size-3.5 shrink-0" />
-                      <span className="truncate">{person.repo}</span>
-                    </a>
-                  </div>
-                )}
+                  <GitBranch className="size-3.5 shrink-0" />
+                  <span className="truncate">{person.repo}</span>
+                </a>
               </div>
             )}
+            <Button
+              variant="outline"
+              data-testid="activity-open"
+              onClick={onOpenActivity}
+              className="w-full justify-start gap-2 text-muted-foreground"
+            >
+              <Activity className="size-4" />
+              View activity
+            </Button>
             {err && <p className="text-sm text-destructive">{err}</p>}
           </div>
         ) : (

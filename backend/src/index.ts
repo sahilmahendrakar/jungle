@@ -4,7 +4,6 @@ import { createServer } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
 import { randomBytes } from "node:crypto";
 import * as db from "./db";
-import * as ma from "./ma";
 import * as gh from "./github";
 import * as auth from "./auth";
 import * as runners from "./runners";
@@ -63,11 +62,11 @@ app.get("/api/participants", async (_req, res) => {
 
 app.post("/api/participants", async (req, res) => {
   try {
-    const { kind, handle, displayName, maSessionId } = req.body ?? {};
+    const { kind, handle, displayName } = req.body ?? {};
     if (!kind || !handle || !displayName) {
       return res.status(400).json({ error: "kind, handle, displayName required" });
     }
-    res.status(201).json(await db.createParticipant({ kind, handle, displayName, maSessionId }));
+    res.status(201).json(await db.createParticipant({ kind, handle, displayName }));
   } catch (e) {
     res.status(500).json({ error: String((e as Error).message ?? e) });
   }
@@ -145,12 +144,11 @@ app.post("/api/channels", async (req, res) => {
   }
 });
 
-// Create an agent = one MA session + a participant of kind 'agent'. If `repo` ("owner/name")
-// is given, provision a GitHub-capable agent: mint a repo-scoped installation token, build a
-// vault with the GitHub MCP credential, and create the session with the repo mounted.
+// Create an agent = a participant of kind 'agent' running on the SDK runner: mint a per-agent
+// runner token and provision its container. If `repo` ("owner/name") is given, the runner
+// clones it and gets a fresh GitHub installation token in each `configure` (see runners.ts).
 // Models an agent may run (id must be a real model; keep in sync with the UI dropdown).
 const ALLOWED_MODELS = new Set(["claude-haiku-4-5-20251001", "claude-sonnet-5", "claude-opus-4-8"]);
-const ALLOWED_MODES = new Set(["always_ask", "always_allow"]);
 // SDK runner permission modes (docs/runner-protocol.md §"Permission modes").
 const ALLOWED_SDK_MODES = new Set(["default", "acceptEdits", "plan", "bypassPermissions", "dontAsk"]);
 
@@ -160,72 +158,34 @@ app.post("/api/agents", async (req, res) => {
     if (!handle || !displayName) {
       return res.status(400).json({ error: "handle, displayName required" });
     }
-    // New agents default to the SDK runner runtime; existing/explicit MA agents pass 'ma'.
-    const runtime = req.body?.runtime ? String(req.body.runtime) : "sdk";
-    if (runtime !== "sdk" && runtime !== "ma") {
-      return res.status(400).json({ error: `unsupported runtime: ${runtime}` });
-    }
     const model = req.body?.model ? String(req.body.model) : null;
     if (model && !ALLOWED_MODELS.has(model)) return res.status(400).json({ error: `unsupported model: ${model}` });
-
-    // --- SDK runner agent: no MA session; mint a runner token + provision a container. ---
-    if (runtime === "sdk") {
-      const mode = req.body?.mode ? String(req.body.mode) : "bypassPermissions";
-      if (!ALLOWED_SDK_MODES.has(mode)) {
-        return res.status(400).json({ error: `unsupported sdk mode: ${mode}` });
-      }
-      const runnerToken = randomBytes(32).toString("hex");
-      const participant = await db.createParticipant({
-        kind: "agent", handle, displayName, runtime: "sdk", runnerToken, repo: repo ?? null, model, mode,
-      });
-      // Provision + start the container. Best-effort: if docker isn't available the agent row
-      // still exists and a runner can be started later; surface the error but don't 500 away
-      // the created agent.
-      try {
-        await provisioner.create({ id: participant.id, handle, runnerToken });
-        await provisioner.start(participant.id);
-      } catch (e) {
-        console.error("provisioner create/start:", e);
-      }
-      return res.status(201).json(publicParticipant(participant));
+    const mode = req.body?.mode ? String(req.body.mode) : "default";
+    if (!ALLOWED_SDK_MODES.has(mode)) {
+      return res.status(400).json({ error: `unsupported mode: ${mode}` });
     }
-
-    // --- MA agent (legacy runtime): unchanged. ---
-    const mode = req.body?.mode ? String(req.body.mode) : "always_allow";
-    if (!ALLOWED_MODES.has(mode)) return res.status(400).json({ error: `unsupported mode: ${mode}` });
-
-    if (repo) {
-      if (!gh.appAuthConfigured()) {
-        return res.status(500).json({ error: "GitHub App private key not configured" });
-      }
-      const token = await gh.installationTokenForRepo(repo);
-      const { vaultId, credentialId } = await ma.createMcpVault(
-        `jungle @${handle}`, gh.GITHUB_MCP_URL, token,
-      );
-      const { sessionId, repoResourceId } = await ma.createRepoAgentSession(
-        `jungle agent @${handle}`,
-        { repoUrl: `https://github.com/${repo}`, repoToken: token, vaultId },
-        model,
-        mode as ma.AgentMode,
-      );
-      return res.status(201).json(
-        await db.createParticipant({
-          kind: "agent", handle, displayName, maSessionId: sessionId,
-          repo, vaultId, repoResourceId, mcpCredentialId: credentialId, model, mode,
-        }),
-      );
+    const runnerToken = randomBytes(32).toString("hex");
+    const participant = await db.createParticipant({
+      kind: "agent", handle, displayName, runtime: "sdk", runnerToken, repo: repo ?? null, model, mode,
+    });
+    // Provision + start the container. Best-effort: if docker isn't available the agent row
+    // still exists and a runner can be started later; surface the error but don't 500 away
+    // the created agent.
+    try {
+      await provisioner.create({ id: participant.id, handle, runnerToken });
+      await provisioner.start(participant.id);
+    } catch (e) {
+      console.error("provisioner create/start:", e);
     }
-    const maSessionId = await ma.createAgentSession(`jungle agent @${handle}`, model, mode as ma.AgentMode);
-    res.status(201).json(
-      await db.createParticipant({ kind: "agent", handle, displayName, maSessionId, model, mode }),
-    );
+    return res.status(201).json(publicParticipant(participant));
   } catch (e) {
     res.status(500).json({ error: String((e as Error).message ?? e) });
   }
 });
 
 // Update an agent's config from its profile page. Auth-gated (any signed-in user).
-// `mode` is applied live to the MA session; `model` is read-only (fixed at creation).
+// `mode` is pushed live to the runner (applies immediately); `model` is applied at the
+// agent's next turn boundary.
 app.patch("/api/agents/:id", async (req, res) => {
   try {
     const me = await requester(req);
@@ -239,25 +199,13 @@ app.patch("/api/agents/:id", async (req, res) => {
       if (!dn) return res.status(400).json({ error: "display name cannot be empty" });
       patch.displayName = dn;
     }
-    const isSdk = agent.runtime === "sdk";
     if (req.body?.mode !== undefined) {
       const mode = String(req.body.mode);
-      if (isSdk) {
-        // SDK permission modes; pushed live (setPermissionMode applies immediately).
-        if (!ALLOWED_SDK_MODES.has(mode)) return res.status(400).json({ error: `unsupported sdk mode: ${mode}` });
-        if (mode !== agent.mode) runners.setPermissionMode(agent.id, mode);
-      } else {
-        if (!ALLOWED_MODES.has(mode)) return res.status(400).json({ error: `unsupported mode: ${mode}` });
-        // Apply the permission-policy change to the live MA session before persisting.
-        if (mode !== agent.mode && agent.ma_session_id) {
-          await ma.updateSessionMode(agent.ma_session_id, !!agent.repo, mode as ma.AgentMode);
-        }
-      }
+      if (!ALLOWED_SDK_MODES.has(mode)) return res.status(400).json({ error: `unsupported mode: ${mode}` });
+      if (mode !== agent.mode) runners.setPermissionMode(agent.id, mode);
       patch.mode = mode;
     }
-    // Model is editable for sdk agents (applied at the next turn boundary via set_model);
-    // for MA agents it's fixed at creation (the session's memory is tied to its model).
-    if (req.body?.model !== undefined && isSdk) {
+    if (req.body?.model !== undefined) {
       const model = String(req.body.model);
       if (!ALLOWED_MODELS.has(model)) return res.status(400).json({ error: `unsupported model: ${model}` });
       if (model !== agent.model) runners.setModel(agent.id, model);
@@ -298,7 +246,6 @@ app.post("/api/agents/:id/interrupt", async (req, res) => {
     if (!me) return res.status(401).json({ error: "auth required" });
     const agent = await db.getParticipant(req.params.id);
     if (!agent || agent.kind !== "agent") return res.status(404).json({ error: "agent not found" });
-    if (agent.runtime !== "sdk") return res.status(400).json({ error: "not an sdk-runtime agent" });
     const delivered = runners.interrupt(agent.id);
     res.json({ ok: delivered, ...(delivered ? {} : { error: "runner not connected" }) });
   } catch (e) {
@@ -306,10 +253,9 @@ app.post("/api/agents/:id/interrupt", async (req, res) => {
   }
 });
 
-// Approve/deny a pending tool confirmation card. Serves BOTH runtimes: the pending promise it
-// resolves is the same one for MA (ma.runAgentTurn's onConfirm) and for SDK runners. For an
-// sdk agent, resolving here fulfils the promise runners.ts is awaiting, which then relays the
-// decision to the runner as a `confirm_result` frame — so no runtime branch is needed here.
+// Approve/deny a pending tool confirmation card. Resolving here fulfils the promise runners.ts
+// is awaiting for that confirm, which then relays the decision to the runner as a
+// `confirm_result` frame.
 app.post("/api/agents/confirm", async (req, res) => {
   try {
     const me = await requester(req);
@@ -649,11 +595,10 @@ function broadcastAll(payload: unknown) {
   }
 }
 
-// --- Tool confirmations (always_ask agents) ---
+// --- Tool confirmations ---
 // A tool call awaiting a human's allow/deny. Kept in memory (single backend); the WS card
-// the human clicks resolves the promise the agent turn is awaiting.
-// A decision can carry updatedInput (SDK canUseTool "allow with edited input"); the MA path
-// ignores that field. One superset type covers both runtimes.
+// the human clicks resolves the promise the runner's confirm_request is awaiting.
+// A decision can carry updatedInput (SDK canUseTool "allow with edited input").
 type ConfirmDecision = { result: "allow" | "deny"; denyMessage?: string; updatedInput?: unknown };
 interface PendingConfirm {
   channelId: string;
@@ -692,15 +637,6 @@ function surfaceConfirmCard(
       input,
     });
   });
-}
-
-// Build the onConfirm callback for one MA agent turn: always_allow auto-approves; always_ask
-// surfaces a confirmation card into the channel and waits for a human decision.
-function makeOnConfirm(agent: db.AgentRow, channelId: string) {
-  return (req: ma.ToolConfirmRequest): Promise<ma.ConfirmDecision> => {
-    if (agent.mode !== "always_ask") return Promise.resolve({ result: "allow" });
-    return surfaceConfirmCard(agent, channelId, req.name, req.input);
-  };
 }
 
 // A human message starts a cascade with this budget; each agent->agent hop decrements
@@ -746,61 +682,22 @@ async function runAgentReply(
     });
   await status("working");
   try {
-    // MA-only: refresh the session's (≤1h) installation token before the turn so git + the
-    // GitHub MCP server stay authenticated. Best-effort — a still-valid token survives. (SDK
-    // runners get a fresh git token in each `configure`, so this path is skipped for them.)
-    if (agent.runtime !== "sdk" && agent.repo && agent.vault_id && agent.mcp_credential_id) {
-      try {
-        const token = await gh.installationTokenForRepo(agent.repo);
-        await ma.rotateRepoAuth({
-          sessionId: agent.ma_session_id ?? "",
-          repoResourceId: agent.repo_resource_id ?? "",
-          vaultId: agent.vault_id,
-          credentialId: agent.mcp_credential_id,
-          token,
-        });
-      } catch (e) {
-        console.error("rotateRepoAuth:", e);
-      }
-    }
     const context = await db.getRecentContext(triggerChannelId, 20);
-    let input =
+    const input =
       `You are @${agent.handle} in Jungle. You were addressed in #${triggerChannelName}.\n\n` +
       `Recent conversation:\n${context}\n\n` +
       `Respond by calling send_message — to reply in this channel use to:"#${triggerChannelName}". ` +
       `You may also DM someone with to:"@handle", or post in another channel you belong to.`;
+    // Repo-specific working instructions live in the runner's systemPromptAppend (runners.ts).
 
-    // Attribute git work to the agent (not the shared app bot). Commits made via git in the
-    // mounted repo carry whatever git identity is configured, so we set it to the agent and
-    // tell it to commit with git — using the GitHub tools only to open the PR.
-    if (agent.repo) {
-      const gitName = agent.display_name || agent.handle;
-      const gitEmail = `${agent.handle}@agents.jungle.dev`;
-      input +=
-        `\n\n— Working on ${agent.repo} —\n` +
-        `The repo is mounted. Make and COMMIT your changes with git (not the GitHub file-write ` +
-        `tools) so the commits are authored as you. Before committing, run once:\n` +
-        `  git config user.name ${JSON.stringify(gitName)}\n` +
-        `  git config user.email ${JSON.stringify(gitEmail)}\n` +
-        `Then push your branch and use the GitHub tools only to open the pull request. ` +
-        `(The PR is opened by the Jungle app; your commits will show "${gitName}" as the author.)`;
-    }
-    if (agent.runtime === "sdk") {
-      // SDK runner path: delivery is durable + asynchronous. Remember the reply budget +
-      // the channel this dispatch came from (so a send_message with no explicit destination,
-      // and the confirm card, land in the right place), enqueue the composed input, and push
-      // it to the runner if one is connected. If not, it waits in the inbox until `hello`.
-      sdkContext.set(agent.id, { budget: replyBudget, channelId: triggerChannelId });
-      await db.enqueueInboxItem(agent.id, input);
-      await runners.drain(agent.id);
-      // The turn runs asynchronously on the runner; we don't hold "working" for its duration
-      // here (agent_status/turn events drive richer UI). Clear the transient indicator.
-    } else {
-      await ma.runAgentTurn(agent.ma_session_id ?? "", input, {
-        onSend: (toolInput) => deliverAgentMessage(agent, toolInput, replyBudget),
-        onConfirm: makeOnConfirm(agent, triggerChannelId),
-      });
-    }
+    // Delivery is durable + asynchronous. Remember the reply budget + the channel this dispatch
+    // came from (so a send_message with no explicit destination, and the confirm card, land in
+    // the right place), enqueue the composed input, and push it to the runner if one is
+    // connected. If not, it waits in the inbox until the runner's next `hello`.
+    sdkContext.set(agent.id, { budget: replyBudget, channelId: triggerChannelId });
+    await db.enqueueInboxItem(agent.id, input);
+    await runners.drain(agent.id);
+    // The turn runs asynchronously on the runner; we don't hold "working" for its duration.
   } catch (e) {
     console.error("runAgentReply:", e);
   } finally {
@@ -817,9 +714,9 @@ const sdkContext = new Map<string, { budget: number; channelId: string }>();
 // @handle), post via the routing rule (persist + fan out + cascade), and report back.
 async function deliverAgentMessage(
   agent: { id: string; handle: string },
-  toolInput: ma.SendMessageInput,
+  toolInput: runners.SendMessageInput,
   budget: number,
-): Promise<ma.SendMessageResult> {
+): Promise<runners.SendMessageResult> {
   const to = String(toolInput.to ?? "").trim();
   const body = String(toolInput.body ?? "").trim();
   if (!body) return { ok: false, error: "body is required" };
@@ -908,11 +805,11 @@ runners.init(server, {
   // let deliverAgentMessage report the error back to the tool call.
   deliverAgentMessage: (agent, input) => {
     const budget = sdkContext.get(agent.id)?.budget ?? 0;
-    return deliverAgentMessage(agent, input as ma.SendMessageInput, budget);
+    return deliverAgentMessage(agent, input, budget);
   },
-  // A runner's confirm_request -> surface the same card the MA always_ask path uses, in the
-  // channel that triggered this agent. Resolving the card (via /api/agents/confirm) resolves
-  // this promise; runners.ts then relays the decision to the runner as confirm_result.
+  // A runner's confirm_request -> surface a confirmation card in the channel that triggered
+  // this agent. Resolving the card (via /api/agents/confirm) resolves this promise; runners.ts
+  // then relays the decision to the runner as confirm_result.
   requestConfirm: (agent, confirm) => {
     const channelId = sdkContext.get(agent.id)?.channelId;
     if (!channelId) {

@@ -11,18 +11,14 @@ export interface Participant {
   kind: Kind;
   handle: string;
   display_name: string;
-  ma_session_id: string | null;
   repo: string | null;
-  vault_id: string | null;
-  repo_resource_id: string | null;
-  mcp_credential_id: string | null;
   firebase_uid: string | null;
   email: string | null;
   avatar_url: string | null;
   model: string | null; // agent model override (null = agent-config default)
-  mode: string; // ma: 'always_ask' | 'always_allow'; sdk: an SDK permission mode
-  runtime: string; // 'ma' (default) | 'sdk'
-  runner_token: string | null; // per-agent runner secret (sdk agents only)
+  mode: string; // an SDK permission mode: default|acceptEdits|plan|bypassPermissions|dontAsk
+  runtime: string; // 'sdk' (all agents; legacy 'ma' rows may exist on old databases)
+  runner_token: string | null; // per-agent runner secret
 }
 
 export interface PersistedMessage {
@@ -41,11 +37,7 @@ export async function createParticipant(p: {
   kind: Kind;
   handle: string;
   displayName: string;
-  maSessionId?: string | null;
   repo?: string | null;
-  vaultId?: string | null;
-  repoResourceId?: string | null;
-  mcpCredentialId?: string | null;
   firebaseUid?: string | null;
   email?: string | null;
   avatarUrl?: string | null;
@@ -56,14 +48,13 @@ export async function createParticipant(p: {
 }): Promise<Participant> {
   const { rows } = await pool.query<Participant>(
     `insert into participants
-       (kind, handle, display_name, ma_session_id, repo, vault_id, repo_resource_id,
-        mcp_credential_id, firebase_uid, email, avatar_url, model, mode, runtime, runner_token)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, coalesce($13, 'always_allow'),
-             coalesce($14, 'ma'), $15)
+       (kind, handle, display_name, repo, firebase_uid, email, avatar_url,
+        model, mode, runtime, runner_token)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, coalesce($9, 'default'),
+             coalesce($10, 'sdk'), $11)
      returning *`,
     [
-      p.kind, p.handle, p.displayName, p.maSessionId ?? null,
-      p.repo ?? null, p.vaultId ?? null, p.repoResourceId ?? null, p.mcpCredentialId ?? null,
+      p.kind, p.handle, p.displayName, p.repo ?? null,
       p.firebaseUid ?? null, p.email ?? null, p.avatarUrl ?? null,
       p.model ?? null, p.mode ?? null, p.runtime ?? null, p.runnerToken ?? null,
     ],
@@ -300,53 +291,42 @@ export interface AgentRow {
   id: string;
   handle: string;
   display_name: string;
-  ma_session_id: string | null; // null for sdk-runtime agents (no MA session)
   repo: string | null;
-  vault_id: string | null;
-  repo_resource_id: string | null;
-  mcp_credential_id: string | null;
   model: string | null;
   mode: string;
-  runtime: string; // 'ma' | 'sdk'
+  runtime: string; // 'sdk'
   runner_token: string | null;
 }
 
-// Of the given participant ids, the ones that are agents (with their MA session id +
-// GitHub provisioning, if any). Includes both runtimes: ma agents have an ma_session_id,
-// sdk agents have runtime='sdk' (no session) — the dispatch seam branches on `runtime`.
+// Of the given participant ids, the ones that are agents.
 export async function agentsByIds(ids: string[]): Promise<AgentRow[]> {
   if (!ids.length) return [];
   const { rows } = await pool.query<AgentRow>(
-    `select id, handle, display_name, ma_session_id, repo, vault_id, repo_resource_id,
-            mcp_credential_id, model, mode, runtime, runner_token
+    `select id, handle, display_name, repo, model, mode, runtime, runner_token
      from participants
-     where kind = 'agent'
-       and (ma_session_id is not null or runtime = 'sdk')
-       and id = any($1)`,
+     where kind = 'agent' and id = any($1)`,
     [ids],
   );
   return rows;
 }
 
-// The agent bound to a runner_token, iff it is an sdk-runtime agent. Authenticates a runner's
-// inbound WebSocket. Returns the full AgentRow so the caller can build `configure`.
+// The agent bound to a runner_token. Authenticates a runner's inbound WebSocket.
+// Returns the full AgentRow so the caller can build `configure`.
 export async function agentByRunnerToken(token: string): Promise<AgentRow | null> {
   if (!token) return null;
   const { rows } = await pool.query<AgentRow>(
-    `select id, handle, display_name, ma_session_id, repo, vault_id, repo_resource_id,
-            mcp_credential_id, model, mode, runtime, runner_token
+    `select id, handle, display_name, repo, model, mode, runtime, runner_token
      from participants
-     where kind = 'agent' and runtime = 'sdk' and runner_token = $1`,
+     where kind = 'agent' and runner_token = $1`,
     [token],
   );
   return rows[0] ?? null;
 }
 
-// Fetch a single agent by id (both runtimes), for the runner registry / lifecycle.
+// Fetch a single agent by id, for the runner registry / lifecycle.
 export async function getAgentRow(id: string): Promise<AgentRow | null> {
   const { rows } = await pool.query<AgentRow>(
-    `select id, handle, display_name, ma_session_id, repo, vault_id, repo_resource_id,
-            mcp_credential_id, model, mode, runtime, runner_token
+    `select id, handle, display_name, repo, model, mode, runtime, runner_token
      from participants
      where kind = 'agent' and id = $1`,
     [id],

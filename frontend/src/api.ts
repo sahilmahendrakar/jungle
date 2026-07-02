@@ -61,9 +61,8 @@ export interface Participant {
   display_name: string;
   repo?: string | null;
   model?: string | null; // agent model (null = agent-config default)
-  mode?: string; // tool-permission mode. ma agents: 'always_ask' | 'always_allow'.
-  // sdk agents: 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions' | 'dontAsk'
-  runtime?: string; // 'ma' (legacy Managed Agents; may be undefined) | 'sdk' (per-agent runner)
+  mode?: string; // SDK permission mode: 'default'|'acceptEdits'|'plan'|'bypassPermissions'|'dontAsk'
+  runtime?: string; // 'sdk' (per-agent runner)
 }
 
 export function listParticipants(): Promise<Participant[]> {

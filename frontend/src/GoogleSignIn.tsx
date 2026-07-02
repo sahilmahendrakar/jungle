@@ -82,7 +82,7 @@ export function GoogleSignIn() {
           </div>
         </div>
         <div className="relative text-xs text-sidebar-foreground/45">
-          Built on Claude Managed Agents.
+          Built on the Claude Agent SDK.
         </div>
       </div>
 

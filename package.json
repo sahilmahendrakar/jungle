@@ -9,13 +9,11 @@
     "frontend"
   ],
   "scripts": {
-    "smoke": "node scripts/smoke.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "db:up": "node scripts/db-up.mjs",
     "db:migrate": "node scripts/db-migrate.mjs",
     "db:down": "node scripts/db-down.mjs",
     "setup": "npm install && node scripts/db-up.mjs && node scripts/db-migrate.mjs",
-    "setup:agents": "npm run smoke",
     "dev": "node scripts/dev.mjs",
     "dev:backend": "npm run dev -w @jungle/backend",
     "dev:frontend": "npm run dev -w @jungle/frontend"
