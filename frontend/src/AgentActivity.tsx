@@ -431,7 +431,12 @@ export function AgentActivity({
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent
         data-testid="agent-activity"
-        className="flex h-[85vh] max-h-[85vh] w-[92vw] max-w-3xl flex-col gap-0 overflow-hidden p-0"
+        className={cn(
+          // Mobile: full-screen sheet (no rounded corners, edge-to-edge).
+          "flex h-screen-dvh max-h-none w-screen max-w-none flex-col gap-0 overflow-hidden rounded-none border-0 p-0",
+          // Desktop: centered panel.
+          "md:h-[85vh] md:max-h-[85vh] md:w-[92vw] md:max-w-3xl md:rounded-xl md:border",
+        )}
       >
         {/* Header: identity + status + stop */}
         <DialogHeader className="flex flex-row items-center gap-3 border-b px-4 py-3">
