@@ -47,6 +47,8 @@ export interface Participant {
   handle: string;
   display_name: string;
   repo?: string | null;
+  model?: string | null; // agent model (null = agent-config default)
+  mode?: string; // agent tool-permission mode: 'always_ask' | 'always_allow'
 }
 
 export function listParticipants(): Promise<Participant[]> {
@@ -86,6 +88,18 @@ export function createParticipant(p: {
     if (!r.ok) throw new Error(j.error ?? "create failed");
     return j;
   });
+}
+
+// Update an agent's editable config from its profile page (display name and/or tool mode).
+export function updateAgent(
+  id: string,
+  patch: { displayName?: string; mode?: string },
+): Promise<Participant> {
+  return fetch(`${BASE}/api/agents/${id}`, {
+    method: "PATCH",
+    headers: authHeaders({ "content-type": "application/json" }),
+    body: JSON.stringify(patch),
+  }).then((r) => json<Participant>(r, "failed to update agent"));
 }
 
 export function listChannels(participantId: string): Promise<Channel[]> {
@@ -212,6 +226,14 @@ export function githubConnectUrl(): Promise<{ url: string }> {
     method: "POST",
     headers: authHeaders(),
   }).then((r) => json<{ url: string }>(r, "failed to start GitHub connect"));
+}
+
+// Disconnect the current user's GitHub account (removes stored tokens).
+export function disconnectGithub(): Promise<{ ok: boolean }> {
+  return fetch(`${BASE}/api/github/connection`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  }).then((r) => json<{ ok: boolean }>(r, "failed to disconnect GitHub"));
 }
 
 export interface Repo {

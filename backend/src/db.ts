@@ -66,6 +66,34 @@ export async function createParticipant(p: {
   return rows[0];
 }
 
+// Patch an agent's editable config (display name / permission mode). Agents only; returns the
+// updated row (null if the id isn't an agent). No-op patches just return the current row.
+export async function updateAgentConfig(
+  id: string,
+  patch: { displayName?: string; mode?: string },
+): Promise<Participant | null> {
+  const sets: string[] = [];
+  const vals: unknown[] = [];
+  if (patch.displayName !== undefined) {
+    vals.push(patch.displayName);
+    sets.push(`display_name = $${vals.length}`);
+  }
+  if (patch.mode !== undefined) {
+    vals.push(patch.mode);
+    sets.push(`mode = $${vals.length}`);
+  }
+  if (!sets.length) {
+    const p = await getParticipant(id);
+    return p && p.kind === "agent" ? p : null;
+  }
+  vals.push(id);
+  const { rows } = await pool.query<Participant>(
+    `update participants set ${sets.join(", ")} where id = $${vals.length} and kind = 'agent' returning *`,
+    vals,
+  );
+  return rows[0] ?? null;
+}
+
 // Look up the human participant linked to a Firebase Auth uid (null if not onboarded yet).
 export async function getParticipantByFirebaseUid(uid: string): Promise<Participant | null> {
   const { rows } = await pool.query<Participant>(

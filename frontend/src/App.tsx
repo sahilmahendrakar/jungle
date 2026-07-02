@@ -11,6 +11,7 @@ import {
   removeChannelMember,
   deleteChannel,
   confirmToolCall,
+  updateAgent,
   WS_BASE,
   type Channel,
   type Message,
@@ -47,6 +48,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { RepoCombobox } from "./RepoCombobox";
 import { Markdown } from "./Markdown";
+import { ProfileDialog } from "./ProfileDialog";
 import {
   Bot,
   Check,
@@ -56,6 +58,8 @@ import {
   LogOut,
   MessagesSquare,
   MoreVertical,
+  PanelLeft,
+  PanelLeftClose,
   Plus,
   SendHorizonal,
   ShieldQuestion,
@@ -139,11 +143,17 @@ export function App({
   authParticipantId,
   getWsToken,
   me: meProp,
+  email,
+  picture,
+  github,
   onSignOut,
 }: {
   authParticipantId?: string; // from Firebase onboarding; overrides the ?as= dev path
   getWsToken?: () => Promise<string | null>; // fresh ID token for the WS handshake
   me?: Participant; // current user (Firebase mode)
+  email?: string | null; // current user's email (Firebase profile)
+  picture?: string | null; // current user's avatar URL (Firebase profile)
+  github?: { connected: boolean; login?: string }; // GitHub connection state
   onSignOut?: () => void; // Firebase sign-out (else clears ?as=)
 } = {}) {
   const participantId = authParticipantId ?? new URLSearchParams(location.search).get("as");
@@ -179,7 +189,14 @@ export function App({
   // @-mention autocomplete
   const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
+  // Collapsible sidebar (persisted) + profile dialog (participant id being viewed)
+  const [sidebarOpen, setSidebarOpen] = useState(
+    () => localStorage.getItem("jungle.sidebar") !== "closed",
+  );
+  const [profileId, setProfileId] = useState<string | null>(null);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
+  // Profile / settings dialog
+  const [showProfile, setShowProfile] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const selectedRef = useRef<string | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -281,6 +298,21 @@ export function App({
     if (vp) vp.scrollTop = vp.scrollHeight;
   }, [messages, selected]);
 
+  // Persist the sidebar open/closed preference and support a ⌘\ / Ctrl+\ toggle (like Slack).
+  useEffect(() => {
+    localStorage.setItem("jungle.sidebar", sidebarOpen ? "open" : "closed");
+  }, [sidebarOpen]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "\\") {
+        e.preventDefault();
+        setSidebarOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   // One auto-reconnecting WebSocket. On (re)connect, backfill history for the open
   // channel so anything that arrived while disconnected isn't missed (cross-device).
   useEffect(() => {
@@ -323,6 +355,12 @@ export function App({
         if (evt.type === "channel_deleted") {
           setChannels((cs) => cs.filter((c) => c.id !== evt.channelId));
           if (evt.channelId === selectedRef.current) setSelected(null);
+          return;
+        }
+        if (evt.type === "participant_updated" && evt.participant) {
+          setPeople((ps) =>
+            ps.map((p) => (p.id === evt.participant.id ? { ...p, ...evt.participant } : p)),
+          );
           return;
         }
         if (evt.type === "tool_confirmation_request") {
@@ -535,6 +573,9 @@ export function App({
   const personByHandle = (h?: string | null) =>
     h ? people.find((p) => p.handle === h) : undefined;
   const workingHere = (selected && working[selected]) || [];
+  const profilePerson = profileId
+    ? people.find((p) => p.id === profileId) ?? (me?.id === profileId ? me : undefined)
+    : undefined;
 
   const headerTitle = sel
     ? sel.kind === "dm"
@@ -544,14 +585,33 @@ export function App({
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground">
-      {/* ---------- Sidebar ---------- */}
-      <aside className="flex w-72 shrink-0 flex-col bg-sidebar text-sidebar-foreground">
+      {/* ---------- Sidebar (collapsible) ---------- */}
+      <aside
+        data-testid="sidebar"
+        className={cn(
+          "shrink-0 overflow-hidden transition-[width] duration-200 ease-in-out",
+          sidebarOpen ? "w-72" : "w-0",
+        )}
+      >
+        <div className="flex h-full w-72 flex-col bg-sidebar text-sidebar-foreground">
         {/* Workspace header */}
         <div className="flex shrink-0 items-center gap-2.5 border-b border-sidebar-border px-4 py-3.5">
           <img src="/icon-192.png" alt="Jungle" className="size-8 rounded-lg shadow-sm" />
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <div className="truncate font-bold leading-tight">Jungle</div>
           </div>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                data-testid="sidebar-collapse"
+                onClick={() => setSidebarOpen(false)}
+                className="flex size-7 items-center justify-center rounded-md text-sidebar-foreground/60 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
+              >
+                <PanelLeftClose className="size-4" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>Collapse sidebar (⌘\)</TooltipContent>
+          </Tooltip>
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto">
@@ -647,20 +707,26 @@ export function App({
 
         {/* User footer */}
         {me && (
-          <div className="flex shrink-0 items-center gap-2.5 border-t border-sidebar-border px-3 py-2.5">
-            <PersonAvatar name={me.display_name} handle={me.handle} />
-            <div className="min-w-0 flex-1" title={`@${me.handle}`}>
-              <div className="truncate text-sm font-semibold">
-                {me.display_name}
+          <div className="flex shrink-0 items-center gap-1 border-t border-sidebar-border px-2 py-2.5">
+            <button
+              data-testid="open-profile"
+              onClick={() => setShowProfile(true)}
+              title="Profile & settings"
+              className="flex min-w-0 flex-1 items-center gap-2.5 rounded-md px-1 py-1 text-left transition-colors hover:bg-sidebar-accent"
+            >
+              <PersonAvatar name={me.display_name} handle={me.handle} />
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm font-semibold">{me.display_name}</div>
+                <div className="truncate text-xs text-sidebar-foreground/50">@{me.handle}</div>
               </div>
-            </div>
+            </button>
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
                   data-testid="switch-user"
                   onClick={signOut}
                   title="Switch user"
-                  className="flex size-8 items-center justify-center rounded-md text-sidebar-foreground/70 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
+                  className="flex size-8 shrink-0 items-center justify-center rounded-md text-sidebar-foreground/70 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
                 >
                   <LogOut className="size-4" />
                 </button>
@@ -669,24 +735,54 @@ export function App({
             </Tooltip>
           </div>
         )}
+        </div>
       </aside>
 
       {/* ---------- Main ---------- */}
       <main className="flex min-w-0 flex-1 flex-col bg-background">
         {/* Channel header */}
         <header className="flex h-14 shrink-0 items-center gap-2.5 border-b px-5">
+          {!sidebarOpen && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  data-testid="sidebar-expand"
+                  onClick={() => setSidebarOpen(true)}
+                  className="-ml-2 size-8 shrink-0 text-muted-foreground"
+                >
+                  <PanelLeft className="size-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Open sidebar (⌘\)</TooltipContent>
+            </Tooltip>
+          )}
           {sel ? (
             <>
               {sel.kind === "dm" ? (
-                <PersonAvatar
-                  name={personByHandle(sel.dm_with)?.display_name ?? sel.dm_with ?? "?"}
-                  handle={sel.dm_with ?? "?"}
-                  size="sm"
-                />
+                <button
+                  data-testid="dm-header-profile"
+                  onClick={() => {
+                    const other = personByHandle(sel.dm_with);
+                    if (other) setProfileId(other.id);
+                  }}
+                  className="flex min-w-0 items-center gap-2.5 rounded-md px-1.5 py-1 -mx-1.5 transition-colors hover:bg-accent"
+                  title="View profile"
+                >
+                  <PersonAvatar
+                    name={personByHandle(sel.dm_with)?.display_name ?? sel.dm_with ?? "?"}
+                    handle={sel.dm_with ?? "?"}
+                    size="sm"
+                  />
+                  <h2 className="truncate font-semibold">{headerTitle}</h2>
+                </button>
               ) : (
-                <Hash className="size-5 text-muted-foreground" />
+                <>
+                  <Hash className="size-5 text-muted-foreground" />
+                  <h2 className="truncate font-semibold">{headerTitle}</h2>
+                </>
               )}
-              <h2 className="truncate font-semibold">{headerTitle}</h2>
 
               {sel.kind !== "dm" && (
                 <div className="ml-auto flex items-center gap-1">
@@ -763,18 +859,27 @@ export function App({
               const isAgent = sender?.kind === "agent";
               return (
                 <div key={lead.id} className="flex gap-3">
-                  <PersonAvatar
-                    name={sender?.display_name ?? lead.sender_handle}
-                    handle={lead.sender_handle}
-                  />
+                  <button
+                    onClick={() => sender && setProfileId(sender.id)}
+                    disabled={!sender}
+                    className="h-fit shrink-0 rounded-md transition-opacity hover:opacity-80 disabled:cursor-default"
+                    title={sender ? `View @${sender.handle}` : undefined}
+                  >
+                    <PersonAvatar
+                      name={sender?.display_name ?? lead.sender_handle}
+                      handle={lead.sender_handle}
+                    />
+                  </button>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-baseline gap-2">
-                      <span
+                      <button
                         data-testid="message-sender"
-                        className="font-semibold"
+                        onClick={() => sender && setProfileId(sender.id)}
+                        disabled={!sender}
+                        className="font-semibold hover:underline disabled:no-underline"
                       >
                         {sender?.display_name ?? lead.sender_handle}
-                      </span>
+                      </button>
                       {isAgent && (
                         <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
                           <Sparkles className="size-2.5" /> agent
@@ -1208,6 +1313,32 @@ export function App({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Your own profile / settings (avatar, email, GitHub connect, sign out) */}
+      {me && (
+        <ProfileDialog
+          open={showProfile}
+          onOpenChange={setShowProfile}
+          me={me}
+          email={email}
+          picture={picture}
+          github={github}
+          onSignOut={signOut}
+        />
+      )}
+
+      {/* Viewing another participant: human = read-only alias; agent = editable config */}
+      {profilePerson && (
+        <ParticipantProfileDialog
+          key={profilePerson.id}
+          person={profilePerson}
+          isSelf={profilePerson.id === participantId}
+          onClose={() => setProfileId(null)}
+          onSaved={(u) =>
+            setPeople((ps) => ps.map((p) => (p.id === u.id ? { ...p, ...u } : p)))
+          }
+        />
+      )}
     </div>
   );
 }
@@ -1257,6 +1388,148 @@ function SelectMenu({
         ))}
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+// Slack-style profile for viewing another participant. Humans are read-only (just their alias
+// for now). Agents expose an editable config: display name + tool-permission mode (applied live
+// to the running session). Model is read-only — it's fixed for an agent's lifetime (its memory
+// lives on the session). (Distinct from the self ProfileDialog in ./ProfileDialog, which is the
+// current user's own settings: email, GitHub connect, sign out.)
+function ParticipantProfileDialog({
+  person,
+  isSelf,
+  onClose,
+  onSaved,
+}: {
+  person: Participant;
+  isSelf: boolean;
+  onClose: () => void;
+  onSaved: (p: Participant) => void;
+}) {
+  const isAgent = person.kind === "agent";
+  const [name, setName] = useState(person.display_name);
+  const [mode, setMode] = useState(person.mode ?? "always_allow");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState("");
+
+  const dirty = name.trim() !== person.display_name || mode !== (person.mode ?? "always_allow");
+  const modelLabel =
+    MODEL_OPTIONS.find((m) => m.id === person.model)?.label ?? "Default (Opus 4.8)";
+
+  async function save() {
+    if (!dirty || saving || !name.trim()) return;
+    setSaving(true);
+    setErr("");
+    try {
+      const updated = await updateAgent(person.id, { displayName: name.trim(), mode });
+      onSaved(updated);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (e) {
+      setErr(String((e as Error).message ?? e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent data-testid="profile-dialog" className="sm:max-w-md">
+        <DialogHeader className="sr-only">
+          <DialogTitle>{person.display_name}'s profile</DialogTitle>
+        </DialogHeader>
+        {/* Identity header */}
+        <div className="flex items-center gap-4">
+          <Avatar className="size-16 rounded-xl">
+            <AvatarFallback className={cn(avatarClass(person.handle), "rounded-xl text-xl")}>
+              {initials(person.display_name)}
+            </AvatarFallback>
+          </Avatar>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <h2 className="truncate text-lg font-bold">{person.display_name}</h2>
+              {isAgent && (
+                <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                  <Sparkles className="size-2.5" /> agent
+                </span>
+              )}
+              {isSelf && <span className="text-xs text-muted-foreground">(you)</span>}
+            </div>
+            <div className="truncate text-sm text-muted-foreground">@{person.handle}</div>
+          </div>
+        </div>
+
+        {isAgent ? (
+          <div className="space-y-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="profile-name">Display name</Label>
+              <Input
+                id="profile-name"
+                data-testid="profile-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Tool permissions</Label>
+              <SelectMenu value={mode} onChange={setMode} options={MODE_OPTIONS} testId="profile-mode" />
+            </div>
+            <div className="grid grid-cols-2 gap-4 rounded-lg border bg-muted/30 p-3">
+              <div className="space-y-0.5">
+                <div className="text-xs font-medium text-muted-foreground">Model</div>
+                <div className="text-sm">{modelLabel}</div>
+                <p className="text-[11px] leading-tight text-muted-foreground">
+                  Fixed for this agent's lifetime.
+                </p>
+              </div>
+              {person.repo && (
+                <div className="min-w-0 space-y-0.5">
+                  <div className="text-xs font-medium text-muted-foreground">Repository</div>
+                  <a
+                    href={`https://github.com/${person.repo}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex items-center gap-1 truncate text-sm text-primary hover:underline"
+                  >
+                    <GitBranch className="size-3.5 shrink-0" />
+                    <span className="truncate">{person.repo}</span>
+                  </a>
+                </div>
+              )}
+            </div>
+            {err && <p className="text-sm text-destructive">{err}</p>}
+          </div>
+        ) : (
+          <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+            {isSelf
+              ? "This is how you appear to everyone in the workspace."
+              : `${person.display_name} is a member of the workspace.`}
+          </div>
+        )}
+
+        {isAgent && (
+          <DialogFooter>
+            {saved && (
+              <span className="mr-auto flex items-center gap-1 text-sm text-emerald-600">
+                <Check className="size-4" /> Saved
+              </span>
+            )}
+            <Button variant="ghost" onClick={onClose}>
+              Close
+            </Button>
+            <Button
+              data-testid="profile-save"
+              onClick={save}
+              disabled={!dirty || saving || !name.trim()}
+            >
+              {saving ? "Saving…" : "Save changes"}
+            </Button>
+          </DialogFooter>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }
 

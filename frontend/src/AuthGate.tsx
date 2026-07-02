@@ -55,6 +55,9 @@ export function AuthGate() {
     <App
       authParticipantId={me.participant!.id}
       me={me.participant}
+      email={me.profile?.email}
+      picture={me.profile?.picture}
+      github={me.github}
       getWsToken={getToken}
       onSignOut={signOut}
     />

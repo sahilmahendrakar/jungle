@@ -71,6 +71,19 @@ function agentOverride(
   };
 }
 
+// Change an existing agent's tool-permission mode (always_ask <-> always_allow) on its live
+// session. Only `tools`/`mcp_servers` are updatable mid-session, so this replaces the tools
+// override with one carrying the new permission_policy. (Model can't change — it's fixed for
+// the session's lifetime, since the agent's memory lives on the session.) `github` must match
+// how the session was created so the GitHub MCP toolset is preserved.
+export async function updateSessionMode(
+  sessionId: string,
+  github: boolean,
+  mode: AgentMode,
+): Promise<void> {
+  await client.beta.sessions.update(sessionId, { agent: { tools: toolsOverride(github, mode) } });
+}
+
 // One MA session per agent participant — clean memory per agent. Per-agent model + permission
 // mode are applied as per-session overrides on the shared config.
 export async function createAgentSession(
