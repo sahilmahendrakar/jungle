@@ -43,7 +43,7 @@ of the request; responses echo them.
 | `turn_started` | `turnId`, `inboxIds: string[]` | a turn began consuming these inbox items |
 | `consumed` | `inboxIds: string[]` | the SDK has durably received these items (backend marks delivered) |
 | `event` | `turnId`, `event: <SDK message JSON>` | every SDK stream message, verbatim (system/assistant/user/result + tool blocks). Backend persists for the Activity feed |
-| `send_message` | `id`, `input: {to, body, attachmentIds?}` | the agent's custom tool call; backend posts the chat message and replies `send_message_result`. `attachmentIds` reference uploads the runner already made via `POST /api/attachments` (see Attachments) |
+| `send_message` | `id`, `input: {to, body, attachmentIds?, threadRootId?, alsoToChannel?}` | the agent's custom tool call; backend posts the chat message and replies `send_message_result`. `attachmentIds` reference uploads the runner already made via `POST /api/attachments` (see Attachments). `threadRootId` replies into a thread (omitted → backend defaults to the thread the agent was triggered in; pass `null` to force top-level); `alsoToChannel` echoes a thread reply into the main channel timeline |
 | `confirm_request` | `id`, `toolName`, `input`, `suggestions?` | `canUseTool` fired; backend surfaces the confirmation card and replies `confirm_result` |
 | `turn_done` | `turnId`, `ok: boolean`, `error?` | turn finished; backend may immediately `enqueue` more. On `ok: false` the backend posts a crash notice from the agent into its last dispatch channel |
 | `fatal` | `error` | unrecoverable runner error (backend should surface + restart container) |
@@ -72,10 +72,13 @@ Wire values are the SDK's: `default`, `acceptEdits`, `plan`, `bypassPermissions`
 Registered in the runner as an in-process SDK MCP server (`createSdkMcpServer`),
 server name `jungle`, tool `send_message` — auto-allowed via
 `allowedTools: ["mcp__jungle__send_message"]`. Schema:
-`{to: "#channel"|"@handle", body: string, files?: string[]}`. It is the agent's only
-way to speak; plain assistant text is never shown to users. `files` are workspace
-paths (max 10 × 25MB); the runner uploads each via `POST /api/attachments` before
-sending the frame with the resulting `attachmentIds`.
+`{to: "#channel"|"@handle", body: string, files?: string[], threadRootId?: string,
+alsoToChannel?: boolean}`. It is the agent's only way to speak; plain assistant text is
+never shown to users. `files` are workspace paths (max 10 × 25MB); the runner uploads
+each via `POST /api/attachments` before sending the frame with the resulting
+`attachmentIds`. `threadRootId`/`alsoToChannel` are the thread controls (see the
+`send_message` frame row above); agents normally omit them and let the backend thread
+replies automatically.
 
 ## Attachments (HTTP, not WS)
 

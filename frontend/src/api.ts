@@ -66,6 +66,25 @@ export interface Message {
   created_at: string;
   mentions?: { id: string; handle: string }[]; // present on WS message frames
   attachments?: Attachment[]; // may be absent on older cached shapes — treat as empty
+  // Threads: null/absent on top-level messages; the root message's id on replies.
+  // also_to_channel marks a reply also echoed into the main timeline. reply_count/last_reply_at
+  // are denormed on the ROOT (the client also derives replies from loaded messages).
+  thread_root_id?: string | null;
+  also_to_channel?: boolean;
+  reply_count?: number;
+  last_reply_at?: string | null;
+}
+
+// A followed thread with unread replies, for the "Threads" view (GET /api/threads/unread).
+export interface UnreadThread {
+  root_id: string;
+  channel_id: string;
+  channel_name: string;
+  root_sender_handle: string;
+  root_body: string;
+  reply_count: number;
+  last_reply_at: string | null;
+  unread_count: number;
 }
 
 // Upload a file (upload-first, Slack-style): returns the stored Attachment whose id is
@@ -231,6 +250,36 @@ export function createChannel(c: {
 
 export function getMessages(channelId: string): Promise<Message[]> {
   return fetch(`${BASE}/api/channels/${channelId}/messages`).then((r) => r.json());
+}
+
+// --- Threads ---
+
+// Full transcript of one thread (root + replies, seq order). Used to lazy-load a thread the
+// client doesn't already hold locally (e.g. opened from the Threads view in another channel).
+export function getThread(channelId: string, rootId: string): Promise<Message[]> {
+  return fetch(withDevAuth(`${BASE}/api/channels/${channelId}/threads/${rootId}`), {
+    headers: authHeaders(),
+  }).then((r) => json<Message[]>(r, "failed to load thread"));
+}
+
+// Mark a thread read for the current user (participation-gated thread unreads): advances my
+// per-thread last_read_seq to the thread's max seq (or the supplied `seq`).
+export function markThreadRead(
+  rootId: string,
+  seq?: number,
+): Promise<{ ok: boolean; lastReadSeq: number }> {
+  return fetch(withDevAuth(`${BASE}/api/threads/${rootId}/read`), {
+    method: "POST",
+    headers: authHeaders({ "content-type": "application/json" }),
+    body: JSON.stringify(seq != null ? { seq } : {}),
+  }).then((r) => json<{ ok: boolean; lastReadSeq: number }>(r, "failed to mark thread read"));
+}
+
+// My followed threads (authored root / replied / @mentioned) that have unread replies.
+export function listUnreadThreads(): Promise<UnreadThread[]> {
+  return fetch(withDevAuth(`${BASE}/api/threads/unread`), { headers: authHeaders() }).then((r) =>
+    json<UnreadThread[]>(r, "failed to load threads"),
+  );
 }
 
 // Find-or-create a 1:1 DM with another participant.
