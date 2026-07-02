@@ -425,6 +425,19 @@ app.get("/api/github/repos", auth.requireAuth, async (req, res) => {
   }
 });
 
+// Disconnect the authed user's GitHub account (removes the stored identity/tokens).
+app.delete("/api/github/connection", auth.requireAuth, async (req, res) => {
+  try {
+    const u = auth.authedUser(req)!;
+    const p = await db.getParticipantByFirebaseUid(u.uid);
+    if (!p) return res.status(409).json({ error: "finish onboarding first" });
+    await db.deleteGithubIdentity(p.id);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: String((e as Error).message ?? e) });
+  }
+});
+
 // Connection status for a participant (used by the UI to show connected/not).
 app.get("/api/participants/:id/github", async (req, res) => {
   try {

@@ -228,6 +228,14 @@ export function githubConnectUrl(): Promise<{ url: string }> {
   }).then((r) => json<{ url: string }>(r, "failed to start GitHub connect"));
 }
 
+// Disconnect the current user's GitHub account (removes stored tokens).
+export function disconnectGithub(): Promise<{ ok: boolean }> {
+  return fetch(`${BASE}/api/github/connection`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  }).then((r) => json<{ ok: boolean }>(r, "failed to disconnect GitHub"));
+}
+
 export interface Repo {
   full_name: string;
   private: boolean;

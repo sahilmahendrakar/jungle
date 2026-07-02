@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { githubConnectUrl, type Participant } from "./api";
+import { githubConnectUrl, disconnectGithub, type Participant } from "./api";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import { avatarClass, initials } from "@/lib/people";
 import { cn } from "@/lib/utils";
-import { Check, LogOut, Mail } from "lucide-react";
+import { Check, LogOut, Mail, Unlink } from "lucide-react";
 
 // lucide dropped its brand icons, so render the GitHub mark inline.
 function GithubMark({ className }: { className?: string }) {
@@ -41,7 +41,9 @@ export function ProfileDialog({
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const connected = !!github?.connected;
+  // Track connection locally so a disconnect updates the UI without a reload.
+  const [connected, setConnected] = useState(!!github?.connected);
+  const [login, setLogin] = useState(github?.login);
 
   async function connectGithub() {
     setError("");
@@ -51,6 +53,20 @@ export function ProfileDialog({
       window.location.href = url; // full-page redirect to GitHub; callback returns to the app
     } catch (e) {
       setError(String((e as Error).message ?? e));
+      setBusy(false);
+    }
+  }
+
+  async function unlinkGithub() {
+    setError("");
+    setBusy(true);
+    try {
+      await disconnectGithub();
+      setConnected(false);
+      setLogin(undefined);
+    } catch (e) {
+      setError(String((e as Error).message ?? e));
+    } finally {
       setBusy(false);
     }
   }
@@ -92,9 +108,9 @@ export function ProfileDialog({
             <div className="min-w-0 flex-1">
               <div className="text-sm font-medium">GitHub</div>
               {connected ? (
-                <div className="flex items-center gap-1 truncate text-xs text-emerald-600">
+                <div className="flex items-center gap-1 text-xs text-emerald-600">
                   <Check className="size-3 shrink-0" />
-                  Connected{github?.login ? ` as @${github.login}` : ""}
+                  <span className="truncate">Connected{login ? ` as @${login}` : ""}</span>
                 </div>
               ) : (
                 <div className="truncate text-xs text-muted-foreground">
@@ -102,17 +118,31 @@ export function ProfileDialog({
                 </div>
               )}
             </div>
-            <Button
-              data-testid="profile-connect-github"
-              onClick={connectGithub}
-              disabled={busy}
-              size="sm"
-              variant={connected ? "outline" : "default"}
-              className={cn("gap-1.5", !connected && "bg-foreground text-background hover:bg-foreground/90")}
-            >
-              <GithubMark className="size-3.5" />
-              {busy ? "Redirecting…" : connected ? "Reconnect" : "Connect"}
-            </Button>
+            {connected ? (
+              <Button
+                data-testid="profile-disconnect-github"
+                onClick={unlinkGithub}
+                disabled={busy}
+                size="icon"
+                variant="ghost"
+                title="Disconnect GitHub"
+                aria-label="Disconnect GitHub"
+                className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
+              >
+                <Unlink className="size-4" />
+              </Button>
+            ) : (
+              <Button
+                data-testid="profile-connect-github"
+                onClick={connectGithub}
+                disabled={busy}
+                size="sm"
+                className="shrink-0 gap-1.5 bg-foreground text-background hover:bg-foreground/90"
+              >
+                <GithubMark className="size-3.5" />
+                {busy ? "Redirecting…" : "Connect"}
+              </Button>
+            )}
           </div>
           {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
         </div>
