@@ -8,6 +8,16 @@ import * as ma from "./ma";
 import * as gh from "./github";
 import * as auth from "./auth";
 
+// Safety net: this backend is a shared relay for every user, so a stray rejection from one
+// agent turn (e.g. a wedged session's "waiting on responses" 400) must not terminate the
+// process. Log and keep serving instead of the Node default (crash on unhandled rejection).
+process.on("unhandledRejection", (reason) => {
+  console.error("unhandledRejection:", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("uncaughtException:", err);
+});
+
 // Where the SPA is served — GitHub OAuth callback redirects back here after connecting.
 const FRONTEND_URL = process.env.FRONTEND_URL ?? "http://localhost:5173";
 
@@ -20,7 +30,7 @@ app.use(auth.attachAuth); // populates req.auth when a valid Firebase token is p
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Headers", "content-type, authorization");
-  res.header("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
+  res.header("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
   if (req.method === "OPTIONS") {
     res.sendStatus(204);
     return;

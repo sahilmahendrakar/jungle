@@ -192,9 +192,14 @@ export function runAgentTurn(
   const prev = sessionQueues.get(sessionId) ?? Promise.resolve();
   const next = prev.catch(() => {}).then(() => runAgentTurnInner(sessionId, inputText, cbs));
   sessionQueues.set(sessionId, next);
-  void next.finally(() => {
+  // Cleanup on both settle paths. Using `.then(cleanup, cleanup)` (not `.finally`) attaches a
+  // rejection handler, so a turn that rejects (e.g. a wedged session's "waiting on responses"
+  // 400) does NOT surface as an unhandled rejection that crashes the process. The caller still
+  // gets the rejection via the returned `next` (runAgentReply catches + logs it).
+  const cleanup = () => {
     if (sessionQueues.get(sessionId) === next) sessionQueues.delete(sessionId);
-  });
+  };
+  next.then(cleanup, cleanup);
   return next;
 }
 
