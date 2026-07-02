@@ -42,6 +42,8 @@ export interface Channel {
   name: string;
   kind: string;
   dm_with?: string | null; // for dm channels: the other member's handle
+  unread_count?: number; // messages after my last_read_seq, excluding my own
+  has_mention?: boolean; // any unread message @mentions me
 }
 
 export interface Message {
@@ -52,6 +54,7 @@ export interface Message {
   sender_handle: string;
   body: string;
   created_at: string;
+  mentions?: { id: string; handle: string }[]; // present on WS message frames
 }
 
 export interface Participant {
@@ -156,6 +159,20 @@ export function interruptAgent(id: string): Promise<{ ok: boolean; error?: strin
 
 export function listChannels(participantId: string): Promise<Channel[]> {
   return fetch(`${BASE}/api/channels?participantId=${participantId}`).then((r) => r.json());
+}
+
+// Mark a channel read for the current user: advances my last_read_seq to the channel's max
+// message seq (or the supplied `seq`). Requester-gated; uses withDevAuth so the ?participantId=
+// dev path resolves an identity when there's no Firebase token.
+export function markChannelRead(
+  channelId: string,
+  seq?: number,
+): Promise<{ ok: boolean; lastReadSeq: number }> {
+  return fetch(withDevAuth(`${BASE}/api/channels/${channelId}/read`), {
+    method: "POST",
+    headers: authHeaders({ "content-type": "application/json" }),
+    body: JSON.stringify(seq != null ? { seq } : {}),
+  }).then((r) => json<{ ok: boolean; lastReadSeq: number }>(r, "failed to mark read"));
 }
 
 // Create a channel (kind "channel") or DM (kind "dm") with the given member handles.
