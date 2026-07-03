@@ -14,6 +14,7 @@ import {
   confirmToolCall,
   updateAgent,
   deleteAgent,
+  compactAgent,
   setDevParticipantId,
   uploadAttachment,
   attachmentUrl,
@@ -67,6 +68,7 @@ import {
   Check,
   ChevronDown,
   FileText,
+  FoldVertical,
   GitBranch,
   Hash,
   Loader2,
@@ -492,6 +494,22 @@ export function App({
         if (evt.type === "participant_updated" && evt.participant) {
           setPeople((ps) =>
             ps.map((p) => (p.id === evt.participant.id ? { ...p, ...evt.participant } : p)),
+          );
+          return;
+        }
+        if (evt.type === "agent_context") {
+          // Per-turn context-window occupancy; keeps an open profile's meter live.
+          setPeople((ps) =>
+            ps.map((p) =>
+              p.id === evt.agentId
+                ? {
+                    ...p,
+                    context_tokens: evt.tokens,
+                    context_max_tokens: evt.maxTokens,
+                    context_updated_at: new Date().toISOString(),
+                  }
+                : p,
+            ),
           );
           return;
         }
@@ -2370,6 +2388,7 @@ function ParticipantProfileDialog({
                 </a>
               </div>
             )}
+            <ContextUsageCard person={person} />
             <Button
               variant="outline"
               data-testid="activity-open"
@@ -2452,6 +2471,114 @@ function ParticipantProfileDialog({
         )}
       </DialogContent>
     </Dialog>
+  );
+}
+
+// Compact token counts for the context meter: 76200 -> "76.2k", 1000000 -> "1M".
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(n < 10_000 ? 1 : 0).replace(/\.0$/, "")}k`;
+  return String(n);
+}
+
+// Context-window occupancy + compaction control in an agent's profile. `person` is the live
+// row from `people`, so the meter updates in place whenever an `agent_context` broadcast
+// lands — including the one the runner sends after a requested compaction finishes.
+function ContextUsageCard({ person }: { person: Participant }) {
+  const [requesting, setRequesting] = useState(false);
+  const [requested, setRequested] = useState(false);
+  const [err, setErr] = useState("");
+
+  const tokens = person.context_tokens ?? null;
+  const max = person.context_max_tokens ?? null;
+  const pct =
+    tokens != null && max != null && max > 0
+      ? Math.min(100, Math.max(0, (tokens / max) * 100))
+      : null;
+
+  // Green until the window starts getting tight, then amber, then red — the same read as a
+  // fuel gauge. Compaction is most useful in the amber/red range.
+  const tone =
+    pct == null ? null : pct >= 90 ? "critical" : pct >= 70 ? "warn" : "ok";
+  const barColor =
+    tone === "critical" ? "bg-red-500" : tone === "warn" ? "bg-amber-500" : "bg-emerald-500";
+  const pctColor =
+    tone === "critical"
+      ? "text-red-600 dark:text-red-400"
+      : tone === "warn"
+        ? "text-amber-600 dark:text-amber-400"
+        : "text-muted-foreground";
+
+  // A fresh usage report (e.g. the compaction turn finishing) supersedes the queued note.
+  const updatedAt = person.context_updated_at ?? null;
+  const requestedAtRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (requested && updatedAt !== requestedAtRef.current) setRequested(false);
+  }, [updatedAt, requested]);
+
+  async function compact() {
+    if (requesting || requested) return;
+    setRequesting(true);
+    setErr("");
+    try {
+      const r = await compactAgent(person.id);
+      if (!r.ok) throw new Error(r.error === "runner not connected" ? "Agent is offline." : (r.error ?? "compact failed"));
+      requestedAtRef.current = updatedAt;
+      setRequested(true);
+    } catch (e) {
+      setErr(String((e as Error).message ?? e));
+    } finally {
+      setRequesting(false);
+    }
+  }
+
+  return (
+    <div data-testid="context-usage" className="space-y-2 rounded-lg border bg-muted/30 p-3">
+      <div className="flex items-baseline justify-between gap-2">
+        <div className="text-xs font-medium text-muted-foreground">Context window</div>
+        {pct != null && (
+          <span className={cn("text-xs font-semibold tabular-nums", pctColor)}>
+            {Math.round(pct)}% full
+          </span>
+        )}
+      </div>
+      {pct != null ? (
+        <>
+          <div className="h-1.5 overflow-hidden rounded-full bg-border/60">
+            <div
+              className={cn("h-full rounded-full transition-[width] duration-500", barColor)}
+              // Keep a sliver visible at very low usage so the meter reads as "working".
+              style={{ width: `${Math.max(2, pct)}%` }}
+            />
+          </div>
+          <div className="text-[11px] tabular-nums text-muted-foreground">
+            {fmtTokens(tokens!)} of {fmtTokens(max!)} tokens
+          </div>
+        </>
+      ) : (
+        <p className="text-[11px] leading-tight text-muted-foreground">
+          No usage reported yet — updates after the agent's next turn.
+        </p>
+      )}
+      <Button
+        variant="outline"
+        size="sm"
+        data-testid="agent-compact"
+        onClick={compact}
+        disabled={requesting || requested}
+        className="w-full gap-2 text-muted-foreground"
+      >
+        <FoldVertical className="size-3.5" />
+        {requesting ? "Requesting…" : requested ? "Compaction queued" : "Compact context"}
+      </Button>
+      {requested && (
+        <p className="text-[11px] leading-tight text-muted-foreground">
+          The agent will summarize its older conversation when it's next idle; the meter
+          updates when it finishes.
+        </p>
+      )}
+      {err && <p className="text-[11px] text-destructive">{err}</p>}
+    </div>
   );
 }
 

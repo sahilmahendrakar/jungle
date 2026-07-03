@@ -75,6 +75,17 @@ export interface TurnDoneFrame {
   error?: string;
 }
 
+// Context-window occupancy after a turn: how full the session's context is.
+// `tokens`/`maxTokens` come from the SDK's getContextUsage() when available,
+// else a fallback computed from the result message's usage. Sent once per turn.
+export interface ContextUsageFrame {
+  type: "context_usage";
+  tokens: number;
+  maxTokens: number;
+  // 0–100, rounded; convenience so the backend/UI don't recompute.
+  percent: number;
+}
+
 export interface FatalFrame {
   type: "fatal";
   error: string;
@@ -89,6 +100,7 @@ export type RunnerToBackend =
   | SendMessageFrame
   | ConfirmRequestFrame
   | TurnDoneFrame
+  | ContextUsageFrame
   | FatalFrame;
 
 // ---- Backend -> runner ----
@@ -118,6 +130,12 @@ export interface EnqueueFrame {
 
 export interface InterruptFrame {
   type: "interrupt";
+}
+
+// Ask the agent to compact/summarize its session context (the `/compact`
+// slash command). Runs as its own turn when the agent next goes idle.
+export interface CompactFrame {
+  type: "compact";
 }
 
 export interface SetPermissionModeFrame {
@@ -154,6 +172,7 @@ export type BackendToRunner =
   | ConfigureFrame
   | EnqueueFrame
   | InterruptFrame
+  | CompactFrame
   | SetPermissionModeFrame
   | SetModelFrame
   | SendMessageResultFrame

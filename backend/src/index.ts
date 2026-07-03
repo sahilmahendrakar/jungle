@@ -282,6 +282,22 @@ app.post("/api/agents/:id/interrupt", async (req, res) => {
   }
 });
 
+// Ask an sdk agent to compact/summarize its session context (the profile's Compact button).
+// The runner runs a dedicated `/compact` turn when the agent is next idle; the resulting
+// context_usage report updates the profile meter via the agent_context broadcast.
+app.post("/api/agents/:id/compact", async (req, res) => {
+  try {
+    const me = await requester(req);
+    if (!me) return res.status(401).json({ error: "auth required" });
+    const agent = await db.getParticipant(req.params.id);
+    if (!agent || agent.kind !== "agent") return res.status(404).json({ error: "agent not found" });
+    const delivered = runners.compact(agent.id);
+    res.json({ ok: delivered, ...(delivered ? {} : { error: "runner not connected" }) });
+  } catch (e) {
+    res.status(500).json({ error: String((e as Error).message ?? e) });
+  }
+});
+
 // Approve/deny a pending tool confirmation card. Resolving here fulfils the promise runners.ts
 // is awaiting for that confirm, which then relays the decision to the runner as a
 // `confirm_result` frame.
@@ -1076,6 +1092,14 @@ runners.init(server, {
   onAgentEvent: (agentId, turnId, event) => {
     void db.insertAgentEvent(agentId, turnId, event).catch((e) => console.error("insertAgentEvent:", e));
     broadcastAll({ type: "agent_event", agentId, turnId, event });
+  },
+  // Per-turn context-window occupancy -> persist on the participant row (so profiles show it
+  // after a reload) + broadcast so an open profile dialog's meter live-updates.
+  onContextUsage: (agentId, usage) => {
+    void db
+      .updateAgentContextUsage(agentId, usage.tokens, usage.maxTokens)
+      .catch((e) => console.error("updateAgentContextUsage:", e));
+    broadcastAll({ type: "agent_context", agentId, tokens: usage.tokens, maxTokens: usage.maxTokens });
   },
   // A turn crashed (e.g. OOM-killed SDK process). Post a notice from the agent into the
   // channel that triggered it so the humans waiting aren't ghosted. cascadeBudget 0: a

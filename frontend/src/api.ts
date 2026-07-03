@@ -113,6 +113,11 @@ export interface Participant {
   model?: string | null; // agent model (null = agent-config default)
   mode?: string; // SDK permission mode: 'default'|'acceptEdits'|'plan'|'bypassPermissions'|'dontAsk'
   runtime?: string; // 'sdk' (per-agent runner)
+  // Context-window occupancy the agent's runner reported after its last turn (agents only;
+  // null/absent until the first report). Live-updated via the `agent_context` WS broadcast.
+  context_tokens?: number | null;
+  context_max_tokens?: number | null;
+  context_updated_at?: string | null;
 }
 
 export function listParticipants(): Promise<Participant[]> {
@@ -211,6 +216,15 @@ export function interruptAgent(id: string): Promise<{ ok: boolean; error?: strin
     method: "POST",
     headers: authHeaders(),
   }).then((r) => json<{ ok: boolean; error?: string }>(r, "failed to stop agent"));
+}
+
+// Ask an sdk agent to compact/summarize its session context. Runs when the agent is next
+// idle; the profile meter updates when the runner reports the post-compaction usage.
+export function compactAgent(id: string): Promise<{ ok: boolean; error?: string }> {
+  return fetch(withDevAuth(`${BASE}/api/agents/${id}/compact`), {
+    method: "POST",
+    headers: authHeaders(),
+  }).then((r) => json<{ ok: boolean; error?: string }>(r, "failed to compact context"));
 }
 
 export function listChannels(participantId: string): Promise<Channel[]> {

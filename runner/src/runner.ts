@@ -53,6 +53,38 @@ const SAFE_TOOLS = new Set([
   "ListMcpResources", "ReadMcpResource",
 ]);
 
+// Fallback context reading derived from a `result` SDK message when the
+// getContextUsage() control request is unavailable. The turn's final input
+// token count (fresh + cache-read + cache-write) approximates current context
+// occupancy; modelUsage carries the model's context window when present.
+function contextFromResult(
+  msg: unknown,
+): { tokens: number; maxTokens: number } | null {
+  const m = msg as {
+    usage?: {
+      input_tokens?: number;
+      cache_read_input_tokens?: number;
+      cache_creation_input_tokens?: number;
+    };
+    modelUsage?: Record<string, { contextWindow?: number }>;
+  };
+  const u = m?.usage;
+  if (!u) return null;
+  const tokens =
+    (u.input_tokens ?? 0) +
+    (u.cache_read_input_tokens ?? 0) +
+    (u.cache_creation_input_tokens ?? 0);
+  if (tokens <= 0) return null;
+  let maxTokens = 0;
+  for (const mu of Object.values(m.modelUsage ?? {})) {
+    if (typeof mu?.contextWindow === "number" && mu.contextWindow > maxTokens) {
+      maxTokens = mu.contextWindow;
+    }
+  }
+  if (maxTokens <= 0) maxTokens = 200_000; // conservative default when unknown
+  return { tokens, maxTokens };
+}
+
 export class Runner {
   private conn: Connection;
 
@@ -74,6 +106,10 @@ export class Runner {
   private running = false;
   private activeQuery: Query | null = null;
   private pendingModel: string | null = null;
+  // Set by a `compact` frame; consumed at the next idle boundary by running a
+  // dedicated `/compact` turn. A flag (not a queue item) so it can't interleave
+  // with real messages and is naturally coalesced if pressed repeatedly.
+  private compactRequested = false;
 
   // Streaming-input generator plumbing: the running query's generator awaits
   // `nextBatch`; we resolve it with a batch (follow-up turn) or null (end query).
@@ -161,6 +197,9 @@ export class Runner {
       case "interrupt":
         void this.handleInterrupt();
         break;
+      case "compact":
+        this.handleCompact();
+        break;
       case "set_permission_mode":
         void this.handleSetPermissionMode(frame.mode);
         break;
@@ -240,6 +279,15 @@ export class Runner {
     }
   }
 
+  // Compaction request: remember it and run a dedicated `/compact` turn at the
+  // next idle boundary. If a turn is already running we don't interrupt it —
+  // the flag is picked up when it finishes (see the tail of runTurn).
+  private handleCompact(): void {
+    this.compactRequested = true;
+    log.info("compact requested");
+    this.maybeStartTurn();
+  }
+
   private async handleSetPermissionMode(mode: PermissionMode): Promise<void> {
     this.permissionMode = mode;
     log.info("set permission mode", { mode });
@@ -275,25 +323,33 @@ export class Runner {
   // ---- turn loop ----
 
   private maybeStartTurn(): void {
-    if (this.running || !this.configured || this.queue.length === 0) return;
+    if (this.running || !this.configured) return;
+    if (this.queue.length === 0 && !this.compactRequested) return;
     void this.runTurn();
   }
 
   private async runTurn(): Promise<void> {
     this.running = true;
 
-    // Drain the whole queue as the first batch.
+    // A compact turn runs only when there's no real work queued, so `/compact`
+    // operates on a settled context and never mixes with user messages.
+    const compacting = this.queue.length === 0 && this.compactRequested;
+    if (compacting) this.compactRequested = false;
+
+    // Drain the whole queue as the first batch (empty for a compact turn).
     const firstBatch = this.queue;
     this.queue = [];
     const turnId = randomUUID();
 
-    this.conn.send({ type: "turn_started", turnId, inboxIds: firstBatch.map((i) => i.inboxId) });
-    this.conn.send({ type: "consumed", inboxIds: firstBatch.map((i) => i.inboxId) });
+    const inboxIds = firstBatch.map((i) => i.inboxId);
+    this.conn.send({ type: "turn_started", turnId, inboxIds });
+    // No inbox rows back a compact turn, so nothing to ack as consumed.
+    if (inboxIds.length) this.conn.send({ type: "consumed", inboxIds });
     this.sendState();
 
     const resumeId = await this.resumableSessionId();
     const q = query({
-      prompt: this.makeInputGenerator(firstBatch, turnId),
+      prompt: this.makeInputGenerator(firstBatch, turnId, compacting),
       options: {
         cwd: this.workspace,
         model: this.model ?? undefined,
@@ -339,6 +395,9 @@ export class Runner {
             ok = false;
             error = subtype;
           }
+          // Report context occupancy while the query is still alive (a control
+          // request needs the subprocess up — it exits once this loop ends).
+          await this.reportContextUsage(q, message);
         }
       }
     } catch (err) {
@@ -366,13 +425,49 @@ export class Runner {
     this.maybeStartTurn();
   }
 
+  // After a turn's result, tell the backend how full the context window is.
+  // Prefer the SDK's getContextUsage() (counts system prompt, tools, MCP, memory,
+  // and messages); fall back to the result message's own usage if that control
+  // request fails. Best-effort — never let it break the turn.
+  private async reportContextUsage(q: Query, resultMessage: unknown): Promise<void> {
+    let tokens = 0;
+    let maxTokens = 0;
+    try {
+      const u = await q.getContextUsage();
+      if (u && typeof u.totalTokens === "number" && typeof u.maxTokens === "number") {
+        tokens = u.totalTokens;
+        maxTokens = u.maxTokens;
+      }
+    } catch (err) {
+      log.warn("getContextUsage failed; using result usage", { err: String(err) });
+    }
+    if (tokens <= 0 || maxTokens <= 0) {
+      const fb = contextFromResult(resultMessage);
+      if (!fb) return;
+      tokens = fb.tokens;
+      maxTokens = fb.maxTokens;
+    }
+    if (maxTokens <= 0) return;
+    const percent = Math.min(100, Math.max(0, Math.round((tokens / maxTokens) * 100)));
+    this.conn.send({ type: "context_usage", tokens, maxTokens, percent });
+  }
+
   // Streaming-input generator. Yields the first batch, then awaits follow-up
   // batches at each turn boundary until told to stop (null).
   private async *makeInputGenerator(
     firstBatch: QueueItem[],
     turnId: string,
+    compacting = false,
   ): AsyncGenerator<SDKUserMessage> {
-    yield await this.toUserMessage(firstBatch);
+    // A compact turn's only input is the `/compact` slash command; the CLI runs
+    // compaction, emits a compact_boundary + result, and the query ends.
+    yield compacting
+      ? ({
+          type: "user",
+          message: { role: "user", content: "/compact" },
+          parent_tool_use_id: null,
+        } as SDKUserMessage)
+      : await this.toUserMessage(firstBatch);
 
     while (true) {
       // If a model change is pending, end the query so it can restart with the new model.

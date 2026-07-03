@@ -32,6 +32,13 @@ alter table participants add column if not exists runner_token  text;
 create unique index if not exists participants_runner_token_idx
   on participants (runner_token) where runner_token is not null;
 
+-- Context-window occupancy for sdk agents, reported by the runner after each turn
+-- (`context_usage` frame). Surfaced in the agent profile; null until the first report.
+-- See migrations/006_context_usage.sql.
+alter table participants add column if not exists context_tokens     integer;
+alter table participants add column if not exists context_max_tokens integer;
+alter table participants add column if not exists context_updated_at timestamptz;
+
 -- Durable per-agent work queue for sdk runners. A dispatch inserts a row; the runner pulls it
 -- (`enqueue`) and acks it (`consumed`) -> delivered_at set. Undelivered rows survive the runner
 -- being offline and are re-sent on reconnect.

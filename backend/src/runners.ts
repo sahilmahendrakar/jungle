@@ -52,6 +52,9 @@ export interface RunnerHooks {
   ) => Promise<ConfirmDecision>;
   // Persist an SDK stream event and broadcast it to app websockets.
   onAgentEvent: (agentId: string, turnId: string | null, event: unknown) => void;
+  // The runner reported how full the agent's context window is (once per turn).
+  // Persist + broadcast so open profile dialogs live-update.
+  onContextUsage: (agentId: string, usage: { tokens: number; maxTokens: number }) => void;
   // A turn died (SDK crash, OOM kill, API error). Tell the humans who were waiting —
   // otherwise the agent just goes silent mid-task.
   onTurnFailed: (agent: { id: string; handle: string }, error: string) => void;
@@ -242,6 +245,16 @@ export function interrupt(agentId: string): boolean {
   return true;
 }
 
+// Ask the agent's runner to compact/summarize its session context. The runner runs a
+// dedicated `/compact` turn when the agent is next idle (repeated requests coalesce).
+// Returns false if no runner is connected.
+export function compact(agentId: string): boolean {
+  const conn = conns.get(agentId);
+  if (!conn) return false;
+  send(conn, { type: "compact" });
+  return true;
+}
+
 // Runner liveness/state for the UI (Activity header, profile status dot).
 export function runnerState(agentId: string): { connected: boolean; state: "idle" | "running" } {
   const conn = conns.get(agentId);
@@ -373,6 +386,14 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
       }
       case "event": {
         hooks?.onAgentEvent(agentId, frame.turnId ?? null, frame.event);
+        break;
+      }
+      case "context_usage": {
+        const tokens = Number(frame.tokens);
+        const maxTokens = Number(frame.maxTokens);
+        if (Number.isFinite(tokens) && Number.isFinite(maxTokens) && tokens > 0 && maxTokens > 0) {
+          hooks?.onContextUsage(agentId, { tokens: Math.round(tokens), maxTokens: Math.round(maxTokens) });
+        }
         break;
       }
       case "send_message": {

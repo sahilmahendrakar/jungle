@@ -19,6 +19,10 @@ export interface Participant {
   mode: string; // an SDK permission mode: default|acceptEdits|plan|bypassPermissions|dontAsk
   runtime: string; // 'sdk' (all agents; legacy 'ma' rows may exist on old databases)
   runner_token: string | null; // per-agent runner secret
+  // Context-window occupancy reported by the runner after each turn (null = no report yet).
+  context_tokens: number | null;
+  context_max_tokens: number | null;
+  context_updated_at: string | null;
 }
 
 export interface PersistedMessage {
@@ -111,6 +115,20 @@ export async function updateAgentConfig(
     vals,
   );
   return rows[0] ?? null;
+}
+
+// Record the context-window occupancy an agent's runner reported after a turn.
+export async function updateAgentContextUsage(
+  id: string,
+  tokens: number,
+  maxTokens: number,
+): Promise<void> {
+  await pool.query(
+    `update participants
+        set context_tokens = $1, context_max_tokens = $2, context_updated_at = now()
+      where id = $3 and kind = 'agent'`,
+    [tokens, maxTokens, id],
+  );
 }
 
 // Look up the human participant linked to a Firebase Auth uid (null if not onboarded yet).
