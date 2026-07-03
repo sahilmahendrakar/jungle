@@ -24,6 +24,12 @@ export interface SendMessageInput {
   // Ids the runner got back from POST /api/attachments (it uploads the agent's workspace
   // files itself, then references them here).
   attachmentIds?: string[];
+  // Threads: reply into a thread by root message id. Omitted → the backend defaults it to the
+  // thread the agent was triggered in (sdkContext), so agents reply in-thread without effort.
+  // Pass threadRootId: null to force a top-level post even when triggered inside a thread.
+  threadRootId?: string | null;
+  // Echo a thread reply into the main channel timeline too ("also send to channel").
+  alsoToChannel?: boolean;
 }
 export interface SendMessageResult {
   ok: boolean;

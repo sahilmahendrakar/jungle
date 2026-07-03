@@ -48,8 +48,16 @@ export interface SendMessageFrame {
   type: "send_message";
   id: string;
   // attachmentIds reference uploads the runner already made via POST /api/attachments
-  // (authenticated with its runner token).
-  input: { to: string; body: string; attachmentIds?: string[] };
+  // (authenticated with its runner token). threadRootId replies into a thread (omitted →
+  // the backend defaults to the thread the agent was triggered in); alsoToChannel echoes a
+  // thread reply into the main channel timeline.
+  input: {
+    to: string;
+    body: string;
+    attachmentIds?: string[];
+    threadRootId?: string | null;
+    alsoToChannel?: boolean;
+  };
 }
 
 export interface ConfirmRequestFrame {

@@ -528,7 +528,13 @@ export class Runner {
 
   private bridgeSendMessage(
     id: string,
-    input: { to: string; body: string },
+    input: {
+      to: string;
+      body: string;
+      attachmentIds?: string[];
+      threadRootId?: string | null;
+      alsoToChannel?: boolean;
+    },
   ): Promise<SendMessageResult> {
     return new Promise((resolve) => {
       this.pendingSendMessages.set(id, resolve);

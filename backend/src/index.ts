@@ -450,6 +450,57 @@ app.post("/api/channels/:id/read", async (req, res) => {
   }
 });
 
+// --- Threads ---
+
+// Thread transcript (root + replies, seq order) for lazy-loading a thread the client doesn't
+// already hold locally. Membership-gated; the root must live in the named channel.
+app.get("/api/channels/:id/threads/:rootId", async (req, res) => {
+  try {
+    const ctx = await requireChannelMember(req, res);
+    if (!ctx) return;
+    const rootChannel = await db.getMessageChannelId(req.params.rootId);
+    if (rootChannel !== ctx.channel.id) {
+      return res.status(404).json({ error: "thread not found in this channel" });
+    }
+    res.json((await db.getThreadMessages(req.params.rootId)).map(att.withUrls));
+  } catch (e) {
+    res.status(500).json({ error: String((e as Error).message ?? e) });
+  }
+});
+
+// Mark a thread read for the requester (participation-gated thread unreads): advance their
+// per-thread last_read_seq to the thread's max seq, or a client-supplied `seq`. Requester-gated
+// + membership-gated (of the thread's channel). Returns the resulting last_read_seq.
+app.post("/api/threads/:rootId/read", async (req, res) => {
+  try {
+    const me = await requester(req);
+    if (!me) return res.status(401).json({ error: "auth required" });
+    const channelId = await db.getMessageChannelId(req.params.rootId);
+    if (!channelId) return res.status(404).json({ error: "thread not found" });
+    if (!(await db.isMember(channelId, me.id))) {
+      return res.status(403).json({ error: "not a member of this channel" });
+    }
+    const rawSeq = req.body?.seq;
+    const seq = rawSeq != null && Number.isFinite(Number(rawSeq)) ? Number(rawSeq) : undefined;
+    const lastReadSeq = await db.markThreadRead(req.params.rootId, me.id, seq);
+    res.json({ ok: true, lastReadSeq });
+  } catch (e) {
+    res.status(500).json({ error: String((e as Error).message ?? e) });
+  }
+});
+
+// The requester's followed threads (authored root / replied / @mentioned) that have unread
+// replies — the "Threads" sidebar view. Member-scoping is enforced inside the query.
+app.get("/api/threads/unread", async (req, res) => {
+  try {
+    const me = await requester(req);
+    if (!me) return res.status(401).json({ error: "auth required" });
+    res.json(await db.listUnreadThreads(me.id));
+  } catch (e) {
+    res.status(500).json({ error: String((e as Error).message ?? e) });
+  }
+});
+
 // --- Channel membership: view / add / remove, and delete a channel ---
 
 // Resolve the requester's participant: from a verified Firebase token, or (only under dev
@@ -777,23 +828,43 @@ const DEFAULT_CASCADE_BUDGET = 3;
 // If a message addresses an agent (via @mention, or by being the other member of a DM),
 // run that agent's turn and post its reply back. Async / fire-and-forget so posting stays
 // fast. The reply itself re-enters this function (agent->agent), gated by cascade_budget.
-async function triggerMentionedAgents(channelId: string, message: db.PersistedMessage) {
+async function triggerMentionedAgents(
+  channelId: string,
+  message: db.PersistedMessage,
+  senderKind: "human" | "agent",
+) {
   try {
     const budget = message.cascade_budget ?? 0;
     if (budget <= 0) return; // cascade exhausted — wait for a human to speak again
     const channel = await db.getChannel(channelId);
     if (!channel) return;
-    let candidateIds = message.mentions.map((m) => m.id);
+    const rootId = message.thread_root_id ?? null;
+
+    // Explicit @mentions always route — in channels, DMs, and threads, agent→agent included
+    // (cascade-bounded). Never self-trigger.
+    let candidateIds = message.mentions.map((m) => m.id).filter((id) => id !== message.sender_id);
+
+    // DM with no @mention: the other member (existing behavior).
     if (channel.kind === "dm" && !candidateIds.length) {
-      candidateIds = await db.channelMemberIds(channelId);
+      candidateIds = (await db.channelMemberIds(channelId)).filter((id) => id !== message.sender_id);
     }
-    candidateIds = candidateIds.filter((id) => id !== message.sender_id); // never self-trigger
+
+    // "No @ needed to reply to an agent" — THREADS ONLY. A bare (no-@) reply auto-wakes the
+    // agent participating in the thread, but only when (a) the sender is HUMAN — otherwise two
+    // agents in a thread would ping-pong (cascade budget bounds it, but we don't lean on that)
+    // — and (b) EXACTLY ONE agent participates; 2+ is ambiguous, so require an @. The main
+    // timeline is unaffected: replying to an agent there still needs an @.
+    if (rootId && !candidateIds.length && senderKind === "human") {
+      const threadAgents = (await db.agentIdsInThread(rootId)).filter((id) => id !== message.sender_id);
+      if (threadAgents.length === 1) candidateIds = threadAgents;
+    }
+
     const agents = await db.agentsByIds(candidateIds);
     for (const agent of agents) {
       // Summon the @mentioned agent into the channel so its reply (to:"#channel") succeeds
       // — otherwise mentioning an agent that isn't a member triggers it but it can't respond.
       await db.addChannelMember(channelId, agent.id);
-      void runAgentReply(channelId, channel.name, agent, budget - 1, message.attachments);
+      void runAgentReply(channelId, channel.name, agent, budget - 1, message.attachments, rootId);
     }
   } catch (e) {
     console.error("triggerMentionedAgents:", e);
@@ -806,6 +877,7 @@ async function runAgentReply(
   agent: db.AgentRow,
   replyBudget: number,
   attachments: db.AttachmentMeta[] = [],
+  threadRootId: string | null = null,
 ) {
   // Let the channel show "@agent is working…" for the duration of the turn.
   const status = (state: "working" | "idle") =>
@@ -814,19 +886,26 @@ async function runAgentReply(
     });
   await status("working");
   try {
-    const context = await db.getRecentContext(triggerChannelId, 20);
-    const input =
-      `You are @${agent.handle} in Jungle. You were addressed in #${triggerChannelName}.\n\n` +
-      `Recent conversation:\n${context}\n\n` +
-      `Respond by calling send_message — to reply in this channel use to:"#${triggerChannelName}". ` +
-      `You may also DM someone with to:"@handle", or post in another channel you belong to.`;
+    // In a thread, give the agent the THREAD transcript (not the whole channel) and tell it its
+    // reply is auto-placed in the thread. Otherwise the usual recent-channel context.
+    const input = threadRootId
+      ? `You are @${agent.handle} in Jungle. You were addressed in a THREAD in #${triggerChannelName}.\n\n` +
+        `Thread so far:\n${await db.getThreadContext(threadRootId)}\n\n` +
+        `Reply by calling send_message with to:"#${triggerChannelName}" — your reply is automatically ` +
+        `placed in this thread. Set alsoToChannel:true if it should also appear in the main channel. ` +
+        `You may also DM someone with to:"@handle".`
+      : `You are @${agent.handle} in Jungle. You were addressed in #${triggerChannelName}.\n\n` +
+        `Recent conversation:\n${await db.getRecentContext(triggerChannelId, 20)}\n\n` +
+        `Respond by calling send_message — to reply in this channel use to:"#${triggerChannelName}". ` +
+        `You may also DM someone with to:"@handle", or post in another channel you belong to.`;
     // Repo-specific working instructions live in the runner's systemPromptAppend (runners.ts).
 
     // Delivery is durable + asynchronous. Remember the reply budget + the channel this dispatch
     // came from (so a send_message with no explicit destination, and the confirm card, land in
-    // the right place), enqueue the composed input, and push it to the runner if one is
-    // connected. If not, it waits in the inbox until the runner's next `hello`.
-    sdkContext.set(agent.id, { budget: replyBudget, channelId: triggerChannelId });
+    // the right place) + the thread it was triggered in (so the agent's reply defaults back into
+    // that thread), enqueue the composed input, and push it to the runner if one is connected.
+    // If not, it waits in the inbox until the runner's next `hello`.
+    sdkContext.set(agent.id, { budget: replyBudget, channelId: triggerChannelId, threadRootId });
     await db.enqueueInboxItem(agent.id, input, attachments);
     await runners.drain(agent.id);
     // The turn runs asynchronously on the runner; we don't hold "working" for its duration.
@@ -840,7 +919,7 @@ async function runAgentReply(
 // Per-agent context for the most recent sdk dispatch: the cascade budget its replies inherit,
 // and the channel it was triggered in (used to place a confirm card, and as a fallback
 // destination). Overwritten each dispatch; sdk turns are serialized per agent by the runner.
-const sdkContext = new Map<string, { budget: number; channelId: string }>();
+const sdkContext = new Map<string, { budget: number; channelId: string; threadRootId: string | null }>();
 
 // Execute one send_message tool call from an agent: resolve the destination (#channel or
 // @handle), post via the routing rule (persist + fan out + cascade), and report back.
@@ -848,6 +927,7 @@ async function deliverAgentMessage(
   agent: { id: string; handle: string },
   toolInput: runners.SendMessageInput,
   budget: number,
+  dispatch: { channelId?: string; threadRootId: string | null },
 ): Promise<runners.SendMessageResult> {
   const to = String(toolInput.to ?? "").trim();
   const body = String(toolInput.body ?? "").trim();
@@ -871,12 +951,28 @@ async function deliverAgentMessage(
     return { ok: false, error: `"to" must start with "#" (channel) or "@" (handle)` };
   }
 
-  const msg = await db.persistMessage({
-    channelId, senderId: agent.id, body, cascadeBudget: budget, attachmentIds,
-  });
-  await fanOut(channelId, { type: "message", message: att.withUrls(msg) });
-  void triggerMentionedAgents(channelId, msg);
-  return { ok: true, messageId: msg.id };
+  // Thread placement: honor an explicit threadRootId from the tool call; otherwise default to
+  // the thread this agent was triggered in — but ONLY when replying back into that same channel
+  // (a DM / different-channel send is never auto-threaded onto the trigger's root).
+  const threadRootId =
+    toolInput.threadRootId !== undefined
+      ? toolInput.threadRootId
+      : dispatch.channelId === channelId
+        ? dispatch.threadRootId
+        : null;
+
+  try {
+    const msg = await db.persistMessage({
+      channelId, senderId: agent.id, body, cascadeBudget: budget, attachmentIds,
+      threadRootId, alsoToChannel: !!toolInput.alsoToChannel,
+    });
+    await fanOut(channelId, { type: "message", message: att.withUrls(msg) });
+    void triggerMentionedAgents(channelId, msg, "agent");
+    return { ok: true, messageId: msg.id };
+  } catch (e) {
+    // e.g. a stale/foreign threadRootId — report back so the agent can retry top-level.
+    return { ok: false, error: String((e as Error).message ?? e) };
+  }
 }
 
 wss.on("connection", async (ws, req) => {
@@ -910,6 +1006,8 @@ wss.on("connection", async (ws, req) => {
       body?: string;
       clientMsgId?: string;
       attachmentIds?: string[];
+      threadRootId?: string | null;
+      alsoToChannel?: boolean;
     };
     try {
       evt = JSON.parse(raw.toString());
@@ -917,7 +1015,8 @@ wss.on("connection", async (ws, req) => {
       return;
     }
     // The one routing rule (human-only for now): persist -> fan out. A post needs a body
-    // and/or pre-uploaded attachments (POST /api/attachments).
+    // and/or pre-uploaded attachments (POST /api/attachments). A post carrying threadRootId is
+    // a thread reply (alsoToChannel echoes it into the main timeline too).
     const attachmentIds = (Array.isArray(evt.attachmentIds) ? evt.attachmentIds : [])
       .map(String)
       .slice(0, att.MAX_ATTACHMENTS_PER_MESSAGE);
@@ -934,9 +1033,11 @@ wss.on("connection", async (ws, req) => {
           clientMsgId: evt.clientMsgId ?? null,
           cascadeBudget: DEFAULT_CASCADE_BUDGET, // human messages start a fresh cascade
           attachmentIds,
+          threadRootId: evt.threadRootId ?? null,
+          alsoToChannel: !!evt.alsoToChannel,
         });
         await fanOut(evt.channelId, { type: "message", message: att.withUrls(message) });
-        void triggerMentionedAgents(evt.channelId, message);
+        void triggerMentionedAgents(evt.channelId, message, "human");
       } catch (e) {
         ws.send(JSON.stringify({ type: "error", error: String((e as Error).message ?? e) }));
       }
@@ -954,8 +1055,11 @@ runners.init(server, {
   // that triggered this agent (looked up from sdkContext). If the destination is missing we
   // let deliverAgentMessage report the error back to the tool call.
   deliverAgentMessage: (agent, input) => {
-    const budget = sdkContext.get(agent.id)?.budget ?? 0;
-    return deliverAgentMessage(agent, input, budget);
+    const ctx = sdkContext.get(agent.id);
+    return deliverAgentMessage(agent, input, ctx?.budget ?? 0, {
+      channelId: ctx?.channelId,
+      threadRootId: ctx?.threadRootId ?? null,
+    });
   },
   // A runner's confirm_request -> surface a confirmation card in the channel that triggered
   // this agent. Resolving the card (via /api/agents/confirm) resolves this promise; runners.ts
