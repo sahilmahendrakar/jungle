@@ -973,8 +973,36 @@ export async function deleteAgent(agentId: string): Promise<void> {
           and id in (select channel_id from channel_members where participant_id = $1)`,
       [agentId],
     );
+    // Threads bookkeeping BEFORE deleting the agent's remaining (group-channel) messages:
+    // 1. Roots the agent replied to — their denormed reply_count/last_reply_at must be
+    //    recomputed after its replies are gone (persistMessage only ever increments).
+    const { rows: affectedRoots } = await client.query<{ id: string }>(
+      `select distinct thread_root_id as id from messages
+        where sender_id = $1 and thread_root_id is not null`,
+      [agentId],
+    );
+    // 2. Threads the agent ROOTED — thread_root_id is ON DELETE CASCADE, so deleting the root
+    //    would silently take other participants' replies with it. Detach those replies into
+    //    top-level messages instead (their content/order survive via the channel seq stream).
+    await client.query(
+      `update messages
+          set thread_root_id = null, also_to_channel = false
+        where sender_id <> $1
+          and thread_root_id in (select id from messages where sender_id = $1)`,
+      [agentId],
+    );
     // Remaining messages the agent sent in group channels (sender_id is RESTRICT, no cascade).
+    // Its own replies to its own roots go via the root's cascade or this delete — either is fine.
     await client.query(`delete from messages where sender_id = $1`, [agentId]);
+    // Recompute the denormed thread summary on surviving roots (deleted roots simply no longer
+    // match). count(*)=0 also nulls last_reply_at, matching a never-replied message.
+    await client.query(
+      `update messages r
+          set reply_count   = (select count(*) from messages m where m.thread_root_id = r.id),
+              last_reply_at = (select max(m.created_at) from messages m where m.thread_root_id = r.id)
+        where r.id = any($1::uuid[])`,
+      [affectedRoots.map((r) => r.id)],
+    );
     // The participant row — cascades agent_inbox, agent_events, channel_members, channel_reads,
     // and the github identity row.
     await client.query(`delete from participants where id = $1`, [agentId]);

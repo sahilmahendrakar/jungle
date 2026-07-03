@@ -248,6 +248,10 @@ export function App({
   useEffect(() => {
     threadRootIdRef.current = threadRootId;
   }, [threadRootId]);
+  // Which channel the open thread belongs to (set by openThread). Lets the [selected] effect
+  // close a stale panel when navigating AWAY from the thread's channel, without closing it
+  // during openThreadFromList's select-then-open flow (where the target channel matches).
+  const threadChannelRef = useRef<string | null>(null);
   // Channel members panel + delete
   const [members, setMembers] = useState<Participant[]>([]);
   const [showMembers, setShowMembers] = useState(false);
@@ -382,6 +386,14 @@ export function App({
   // Load history when the selected channel changes, and mark it read (Slack: opening a
   // channel clears its unread state).
   useEffect(() => {
+    // Navigating away from the open thread's channel closes the thread panel — left open it
+    // goes stale: header shows the new conversation, body never loads, and the reply composer
+    // silently no-ops (sendThreadReply guards on the derived root). Covers channel/DM clicks,
+    // channel deletion (selected -> null), and the WS channel_deleted/participant_deleted paths.
+    if (threadRootIdRef.current && threadChannelRef.current !== selected) {
+      setThreadRootId(null);
+      setThreadsListOpen(false);
+    }
     if (!selected) return;
     getMessages(selected).then(setMessages);
     markRead(selected);
@@ -709,8 +721,11 @@ export function App({
   // Open a thread in the right panel (root + replies derive from loaded messages — safe today
   // because getMessages returns the whole channel with no pagination; if that ever changes,
   // route this through getThread like openThreadFromList does for a not-yet-loaded channel).
-  // Opening marks it read, which clears its per-thread unread everywhere.
-  function openThread(rootId: string) {
+  // Opening marks it read, which clears its per-thread unread everywhere. `channelId` is the
+  // thread's home channel (defaults to the open one); the [selected] effect uses it to close
+  // the panel only when navigating somewhere else.
+  function openThread(rootId: string, channelId: string | null = selectedRef.current) {
+    threadChannelRef.current = channelId;
     setThreadsListOpen(false);
     setThreadRootId(rootId);
     setThreadDraft("");
@@ -731,7 +746,7 @@ export function App({
         .then((msgs) => setMessages((prev) => mergeById(prev, msgs)))
         .catch(() => {});
     }
-    openThread(t.root_id);
+    openThread(t.root_id, t.channel_id);
   }
 
   // Post a reply into the open thread. Round-trips over WS like send(); it reappears in
