@@ -51,6 +51,7 @@ import {
 } from "@/components/ui/tooltip";
 import { avatarClass, initials } from "@/lib/people";
 import { cn } from "@/lib/utils";
+import { PASTE_LINE_THRESHOLD, appendPasteBlock, countLines, pasteLabel } from "@/lib/pastedText";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -217,6 +218,8 @@ export function App({
   const [selected, setSelected] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
+  const [pastes, setPastes] = useState<{ id: number; lines: number; text: string }[]>([]); // abbreviated pastes in the composer, keyed by placeholder id
+  const pasteIdRef = useRef(0);
   const [pending, setPending] = useState<PendingAttachment[]>([]); // composer attachments
   const [notice, setNotice] = useState("");
   const [working, setWorking] = useState<Record<string, string[]>>({}); // channelId -> agent handles
@@ -683,11 +686,18 @@ export function App({
   }
 
   function send() {
-    const body = draft.trim();
+    let body = draft.trim();
+    // Expand each still-present placeholder back into the full pasted text, carried in a
+    // hidden trailer block so the recipient can render it collapsed (see lib/pastedText.ts).
+    for (const p of pastes) {
+      if (body.includes(pasteLabel(p.id, p.lines))) {
+        body = appendPasteBlock(body, p.id, p.text);
+      }
+    }
     const readyIds = pending
       .filter((p) => p.status === "ready" && p.att)
       .map((p) => p.att!.id);
-    if (!body && readyIds.length === 0) return;
+    if (!draft.trim() && readyIds.length === 0) return;
     if (!selected) {
       setNotice("Pick or create a channel first.");
       return;
@@ -712,6 +722,8 @@ export function App({
       }),
     );
     setDraft("");
+    setPastes([]);
+    pasteIdRef.current = 0;
     for (const p of pending) if (p.previewUrl) URL.revokeObjectURL(p.previewUrl);
     setPending([]);
     setMention(null);
@@ -1639,13 +1651,34 @@ export function App({
               data-testid="composer-input"
               value={draft}
               onChange={(e) => {
-                setDraft(e.target.value);
-                syncMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
+                const value = e.target.value;
+                setDraft(value);
+                // Drop any paste whose placeholder the user has since edited/deleted.
+                setPastes((ps) => ps.filter((p) => value.includes(pasteLabel(p.id, p.lines))));
+                syncMention(value, e.target.selectionStart ?? value.length);
               }}
               onPaste={(e) => {
                 if (e.clipboardData.files.length) {
                   e.preventDefault();
                   addFiles(e.clipboardData.files);
+                  return;
+                }
+                const text = e.clipboardData.getData("text/plain");
+                const lines = text ? countLines(text) : 0;
+                if (text && lines > PASTE_LINE_THRESHOLD) {
+                  e.preventDefault();
+                  const id = ++pasteIdRef.current;
+                  const label = pasteLabel(id, lines);
+                  const ta = taRef.current;
+                  const start = ta?.selectionStart ?? draft.length;
+                  const end = ta?.selectionEnd ?? draft.length;
+                  setPastes((ps) => [...ps, { id, lines, text }]);
+                  setDraft((d) => d.slice(0, start) + label + d.slice(end));
+                  requestAnimationFrame(() => {
+                    const pos = start + label.length;
+                    ta?.setSelectionRange(pos, pos);
+                    ta?.focus();
+                  });
                 }
               }}
               onSelect={(e) => {
