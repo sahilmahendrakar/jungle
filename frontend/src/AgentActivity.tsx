@@ -14,13 +14,28 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Markdown } from "./Markdown";
 import { avatarClass, initials } from "@/lib/people";
 import { cn } from "@/lib/utils";
 import {
   Activity as ActivityIcon,
+  Bot,
+  Check,
   ChevronRight,
+  FilePen,
+  FilePlus2,
+  FileText,
+  Globe,
+  Loader2,
+  MessageSquare,
+  Search,
   SendHorizonal,
+  Sparkles,
   Square,
+  Terminal,
+  Wrench,
+  X,
+  type LucideIcon,
 } from "lucide-react";
 
 type RunnerState = "idle" | "running";
@@ -87,185 +102,457 @@ function StatusDot({
   );
 }
 
-// A collapsible disclosure row for JSON-ish detail (tool input, tool result, unknown events).
-function Collapsible({
-  summary,
-  children,
-  defaultOpen = false,
-  testId,
-}: {
-  summary: React.ReactNode;
-  children: React.ReactNode;
-  defaultOpen?: boolean;
-  testId?: string;
-}) {
-  const [open, setOpen] = useState(defaultOpen);
-  return (
-    <div className="min-w-0">
-      <button
-        type="button"
-        data-testid={testId}
-        onClick={() => setOpen((o) => !o)}
-        className="flex w-full min-w-0 items-center gap-1 rounded text-left text-muted-foreground transition-colors hover:text-foreground"
-      >
-        <ChevronRight
-          className={cn("size-3.5 shrink-0 transition-transform", open && "rotate-90")}
-        />
-        <span className="min-w-0 flex-1 truncate">{summary}</span>
-      </button>
-      {open && <div className="ml-4.5 mt-1">{children}</div>}
-    </div>
-  );
+// ---------------------------------------------------------------------------
+// Item model: a turn's raw SDK events flattened into renderable items.
+// Tool calls are paired with their tool_result (by tool_use_id) so each call
+// renders as a single row with a live status, Claude Code style.
+// ---------------------------------------------------------------------------
+
+interface ToolResultInfo {
+  text: string;
+  isError: boolean;
+}
+interface ToolItem {
+  kind: "tool";
+  key: string;
+  name: string;
+  input: any;
+  result: ToolResultInfo | null;
+}
+interface TextItem {
+  kind: "text";
+  key: string;
+  text: string;
+}
+interface ThinkingItem {
+  kind: "thinking";
+  key: string;
+  text: string;
+}
+interface NoteItem {
+  kind: "note";
+  key: string;
+  text: string;
+}
+interface ResultItem {
+  kind: "result";
+  key: string;
+  ok: boolean;
+  text?: string;
+  durationMs?: number;
+  cost?: number;
+}
+interface RawItem {
+  kind: "raw";
+  key: string;
+  value: unknown;
+}
+type Item = ToolItem | TextItem | ThinkingItem | NoteItem | ResultItem | RawItem;
+
+function resultText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content))
+    return content
+      .map((c: any) => (typeof c === "string" ? c : (c?.text ?? pretty(c))))
+      .join("\n");
+  return pretty(content);
 }
 
-function JsonBlock({ value }: { value: unknown }) {
+// System subtypes that are pure noise in a human transcript.
+const HIDDEN_SYSTEM = new Set(["thinking_tokens", "task_progress", "task_updated"]);
+
+function buildItems(events: AgentEvent[]): Item[] {
+  const items: Item[] = [];
+  const byToolUseId = new Map<string, ToolItem>();
+  for (const e of events) {
+    const ev = e.event as any;
+    const type = ev?.type;
+
+    if (type === "system") {
+      const st = String(ev?.subtype ?? "");
+      if (HIDDEN_SYSTEM.has(st)) continue;
+      if (st === "init") items.push({ kind: "note", key: `${e.id}`, text: "Session started" });
+      else if (st === "task_started")
+        items.push({
+          kind: "note",
+          key: `${e.id}`,
+          text: `Background task started${ev?.description ? ` — ${ev.description}` : ""}`,
+        });
+      else if (st === "task_notification")
+        items.push({
+          kind: "note",
+          key: `${e.id}`,
+          text: `Background task ${ev?.status ?? "update"}${ev?.summary ? ` — ${ev.summary}` : ""}`,
+        });
+      else items.push({ kind: "note", key: `${e.id}`, text: st || "system" });
+      continue;
+    }
+
+    if (type === "assistant") {
+      const blocks = ev?.message?.content;
+      if (!Array.isArray(blocks)) {
+        items.push({ kind: "raw", key: `${e.id}`, value: ev });
+        continue;
+      }
+      blocks.forEach((b: any, i: number) => {
+        const key = `${e.id}:${i}`;
+        if (b?.type === "text") {
+          const text = String(b.text ?? "");
+          if (text.trim()) items.push({ kind: "text", key, text });
+        } else if (b?.type === "thinking") {
+          const text = String(b.thinking ?? "");
+          if (text.trim()) items.push({ kind: "thinking", key, text });
+        } else if (b?.type === "tool_use") {
+          const t: ToolItem = {
+            kind: "tool",
+            key,
+            name: String(b.name ?? "tool"),
+            input: b.input ?? {},
+            result: null,
+          };
+          items.push(t);
+          if (b.id) byToolUseId.set(String(b.id), t);
+        } else {
+          items.push({ kind: "raw", key, value: b });
+        }
+      });
+      continue;
+    }
+
+    if (type === "user") {
+      const blocks = ev?.message?.content;
+      if (Array.isArray(blocks)) {
+        blocks.forEach((b: any, i: number) => {
+          if (b?.type !== "tool_result") return;
+          const res: ToolResultInfo = {
+            text: resultText(b.content),
+            isError: b.is_error === true,
+          };
+          const t = b.tool_use_id ? byToolUseId.get(String(b.tool_use_id)) : undefined;
+          if (t) t.result = res;
+          else
+            items.push({
+              kind: "tool",
+              key: `${e.id}:${i}`,
+              name: "tool",
+              input: null,
+              result: res,
+            });
+        });
+      }
+      continue;
+    }
+
+    if (type === "result") {
+      items.push({
+        kind: "result",
+        key: `${e.id}`,
+        ok: ev?.is_error !== true && (ev?.subtype ?? "success") === "success",
+        text: typeof ev?.result === "string" ? ev.result : undefined,
+        durationMs: typeof ev?.duration_ms === "number" ? ev.duration_ms : undefined,
+        cost: typeof ev?.total_cost_usd === "number" ? ev.total_cost_usd : undefined,
+      });
+      continue;
+    }
+
+    items.push({ kind: "raw", key: `${e.id}`, value: ev });
+  }
+  return items;
+}
+
+// ---------------------------------------------------------------------------
+// Tool call presentation: human verb + target per tool, Claude Code style.
+// ---------------------------------------------------------------------------
+
+interface ToolMeta {
+  icon: LucideIcon;
+  verb: string;
+  target?: string;
+  mono?: boolean; // render target in monospace
+}
+
+function baseName(p: unknown): string {
+  const s = String(p ?? "");
+  const ix = s.lastIndexOf("/");
+  return ix >= 0 ? s.slice(ix + 1) : s;
+}
+
+function firstString(input: any): string | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  for (const v of Object.values(input)) if (typeof v === "string" && v.trim()) return v;
+  return undefined;
+}
+
+function toolMeta(name: string, input: any): ToolMeta {
+  switch (name) {
+    case "Bash":
+      return {
+        icon: Terminal,
+        verb: "Ran",
+        target: String(input?.description ?? input?.command ?? ""),
+        mono: !input?.description,
+      };
+    case "Read":
+      return { icon: FileText, verb: "Read", target: baseName(input?.file_path), mono: true };
+    case "Edit":
+      return { icon: FilePen, verb: "Edited", target: baseName(input?.file_path), mono: true };
+    case "Write":
+      return { icon: FilePlus2, verb: "Wrote", target: baseName(input?.file_path), mono: true };
+    case "Grep":
+      return { icon: Search, verb: "Searched", target: String(input?.pattern ?? ""), mono: true };
+    case "Glob":
+      return { icon: Search, verb: "Found files", target: String(input?.pattern ?? ""), mono: true };
+    case "ToolSearch":
+      return { icon: Search, verb: "Searched tools", target: String(input?.query ?? "") };
+    case "WebFetch":
+      return { icon: Globe, verb: "Fetched", target: String(input?.url ?? ""), mono: true };
+    case "WebSearch":
+      return { icon: Globe, verb: "Searched web", target: String(input?.query ?? "") };
+    case "Task":
+    case "Agent":
+      return { icon: Bot, verb: "Ran subagent", target: String(input?.description ?? "") };
+    case "TodoWrite":
+      return { icon: Check, verb: "Updated to-dos" };
+  }
+  // MCP tools look like mcp__server__tool_name.
+  const mcp = name.match(/^mcp__([^_].*?)__(.+)$/);
+  if (mcp) {
+    const label = mcp[2].replace(/_/g, " ");
+    const verb = label.charAt(0).toUpperCase() + label.slice(1);
+    if (mcp[2] === "send_message")
+      return { icon: MessageSquare, verb: "Sent message", target: firstString(input) };
+    return { icon: Wrench, verb, target: firstString(input) };
+  }
+  return { icon: Wrench, verb: name, target: firstString(input) };
+}
+
+const CLIP = 96;
+function clip(s: string | undefined): string {
+  if (!s) return "";
+  const line = s.split("\n")[0];
+  return line.length > CLIP ? `${line.slice(0, CLIP)}…` : line;
+}
+
+function OutputBlock({ text, isError }: { text: string; isError: boolean }) {
   return (
-    <pre className="max-h-72 overflow-auto rounded-lg border bg-muted/40 p-2 text-[11px] leading-relaxed">
-      {pretty(value)}
+    <pre
+      className={cn(
+        "max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/40 px-2.5 py-2 font-mono text-[11px] leading-relaxed",
+        isError && "border-destructive/40 bg-destructive/5 text-destructive",
+      )}
+    >
+      {text}
     </pre>
   );
 }
 
-// Render one SDK content block from an assistant message.
-function AssistantBlock({ block }: { block: any }) {
-  if (block?.type === "text") {
-    return (
-      <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">
-        {String(block.text ?? "")}
-      </p>
-    );
-  }
-  if (block?.type === "thinking") {
-    return (
-      <Collapsible summary={<span className="italic">Thinking</span>}>
-        <p className="whitespace-pre-wrap break-words text-xs italic leading-relaxed text-muted-foreground">
-          {String(block.thinking ?? "")}
-        </p>
-      </Collapsible>
-    );
-  }
-  if (block?.type === "tool_use") {
-    return (
-      <Collapsible
-        testId="activity-tool-use"
-        summary={
-          <span className="inline-flex items-center gap-1.5">
-            <span aria-hidden>⚙</span>
-            <span className="font-medium text-foreground">{String(block.name ?? "tool")}</span>
-          </span>
-        }
-      >
-        <JsonBlock value={block.input ?? {}} />
-      </Collapsible>
-    );
-  }
-  return <JsonBlock value={block} />;
+// Expanded detail for one tool call: tool-specific input rendering + output.
+function ToolDetail({ item }: { item: ToolItem }) {
+  const { name, input, result } = item;
+  return (
+    <div className="mt-1 space-y-1.5">
+      {name === "Bash" && typeof input?.command === "string" ? (
+        <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-zinc-950 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-zinc-100">
+          <span className="select-none text-zinc-500">$ </span>
+          {input.command}
+        </pre>
+      ) : name === "Edit" &&
+        typeof input?.old_string === "string" &&
+        typeof input?.new_string === "string" ? (
+        <div className="overflow-hidden rounded-md border font-mono text-[11px] leading-relaxed">
+          <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words border-b bg-red-500/10 px-2.5 py-1.5 text-red-700 dark:text-red-400">
+            {input.old_string}
+          </pre>
+          <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words bg-emerald-500/10 px-2.5 py-1.5 text-emerald-700 dark:text-emerald-400">
+            {input.new_string}
+          </pre>
+        </div>
+      ) : name === "Write" && typeof input?.content === "string" ? (
+        <OutputBlock text={input.content} isError={false} />
+      ) : input && Object.keys(input).length > 0 ? (
+        <OutputBlock text={pretty(input)} isError={false} />
+      ) : null}
+      {result && result.text.trim() && (
+        <OutputBlock text={result.text} isError={result.isError} />
+      )}
+    </div>
+  );
 }
 
-// Render a tool_result block from a user message.
-function ToolResultBlock({ block }: { block: any }) {
-  const content = block?.content;
-  const text =
-    typeof content === "string"
-      ? content
-      : Array.isArray(content)
-        ? content
-            .map((c: any) => (typeof c === "string" ? c : c?.text ?? pretty(c)))
-            .join("\n")
-        : pretty(content);
-  const isError = block?.is_error === true;
-  const oneLine = text.split("\n")[0]?.slice(0, 80) ?? "result";
+// One tool call as a compact row: icon + verb + target + status; click to expand.
+function ToolRow({ item, turnDone }: { item: ToolItem; turnDone: boolean }) {
+  const [open, setOpen] = useState(false);
+  const meta = toolMeta(item.name, item.input);
+  const Icon = meta.icon;
+  const pending = !item.result && !turnDone;
   return (
-    <Collapsible
-      summary={
-        <span className={cn("truncate", isError && "text-destructive")}>
-          ↳ {isError ? "error" : "result"}: {oneLine}
+    <div className="min-w-0">
+      <button
+        type="button"
+        data-testid="activity-tool-use"
+        onClick={() => setOpen((o) => !o)}
+        className="group flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left transition-colors hover:bg-muted/60"
+      >
+        <Icon className="size-3.5 shrink-0 text-muted-foreground" />
+        <span className="min-w-0 flex-1 truncate text-[13px]">
+          <span className="font-medium text-foreground/90">{meta.verb}</span>
+          {meta.target && (
+            <span
+              className={cn(
+                "ml-1.5 text-muted-foreground",
+                meta.mono && "font-mono text-xs",
+              )}
+            >
+              {clip(meta.target)}
+            </span>
+          )}
         </span>
-      }
-    >
-      <pre
-        className={cn(
-          "max-h-72 overflow-auto rounded-lg border bg-muted/40 p-2 text-[11px] leading-relaxed",
-          isError && "border-destructive/40 text-destructive",
-        )}
-      >
-        {text}
-      </pre>
-    </Collapsible>
+        <span className="ml-2 flex shrink-0 items-center">
+          {pending ? (
+            <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+          ) : item.result?.isError ? (
+            <X className="size-3.5 text-destructive" />
+          ) : item.result ? (
+            <Check className="size-3.5 text-emerald-600" />
+          ) : (
+            <span className="text-[10px] text-muted-foreground/60">—</span>
+          )}
+        </span>
+        <ChevronRight
+          className={cn(
+            "size-3.5 shrink-0 text-muted-foreground/50 transition-transform group-hover:text-muted-foreground",
+            open && "rotate-90",
+          )}
+        />
+      </button>
+      {open && (
+        <div className="ml-7 min-w-0">
+          <ToolDetail item={item} />
+        </div>
+      )}
+    </div>
   );
 }
 
-// Render a single persisted event by its SDK message type. Defensive: unknown -> JSON row.
-function EventRow({ event }: { event: unknown }) {
-  const ev = event as any;
-  const type = ev?.type;
-
-  if (type === "system") {
-    return (
-      <div className="text-xs text-muted-foreground">
-        Session started{ev?.subtype ? ` · ${ev.subtype}` : ""}
-      </div>
-    );
-  }
-
-  if (type === "assistant") {
-    const blocks: any[] = ev?.message?.content ?? [];
-    if (!Array.isArray(blocks) || blocks.length === 0) {
-      return <JsonBlock value={event} />;
-    }
-    return (
-      <div className="space-y-1.5">
-        {blocks.map((b, i) => (
-          <AssistantBlock key={i} block={b} />
-        ))}
-      </div>
-    );
-  }
-
-  if (type === "user") {
-    const blocks: any[] = ev?.message?.content ?? [];
-    const results = Array.isArray(blocks)
-      ? blocks.filter((b) => b?.type === "tool_result")
-      : [];
-    if (results.length === 0) return <JsonBlock value={event} />;
-    return (
-      <div className="space-y-1.5">
-        {results.map((b, i) => (
-          <ToolResultBlock key={i} block={b} />
-        ))}
-      </div>
-    );
-  }
-
-  if (type === "result") {
-    const bits: string[] = [];
-    if (typeof ev?.duration_ms === "number") bits.push(`${(ev.duration_ms / 1000).toFixed(1)}s`);
-    if (typeof ev?.total_cost_usd === "number") bits.push(`$${ev.total_cost_usd.toFixed(4)}`);
-    if (ev?.subtype && ev.subtype !== "success") bits.push(String(ev.subtype));
-    return (
-      <div className="text-xs text-muted-foreground">
-        Turn complete{bits.length ? ` · ${bits.join(" · ")}` : ""}
-      </div>
-    );
-  }
-
-  // Unknown shape — render collapsed.
+// Collapsed-by-default reasoning row.
+function ThinkingRow({ item }: { item: ThinkingItem }) {
+  const [open, setOpen] = useState(false);
   return (
-    <Collapsible summary={<span className="font-mono text-xs">{String(type ?? "event")}</span>}>
-      <JsonBlock value={event} />
-    </Collapsible>
+    <div className="min-w-0">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="group flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left transition-colors hover:bg-muted/60"
+      >
+        <Sparkles className="size-3.5 shrink-0 text-muted-foreground" />
+        <span className="min-w-0 flex-1 truncate text-[13px] italic text-muted-foreground">
+          Thought{open ? "" : ` — ${clip(item.text)}`}
+        </span>
+        <ChevronRight
+          className={cn(
+            "size-3.5 shrink-0 text-muted-foreground/50 transition-transform group-hover:text-muted-foreground",
+            open && "rotate-90",
+          )}
+        />
+      </button>
+      {open && (
+        <p className="ml-7 mt-1 whitespace-pre-wrap break-words border-l-2 border-border pl-3 text-xs italic leading-relaxed text-muted-foreground">
+          {item.text}
+        </p>
+      )}
+    </div>
   );
+}
+
+function RawRow({ item }: { item: RawItem }) {
+  const [open, setOpen] = useState(false);
+  const label = String((item.value as any)?.type ?? "event");
+  return (
+    <div className="min-w-0">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left text-muted-foreground transition-colors hover:bg-muted/60"
+      >
+        <ChevronRight className={cn("size-3.5 shrink-0 transition-transform", open && "rotate-90")} />
+        <span className="min-w-0 flex-1 truncate font-mono text-xs">{label}</span>
+      </button>
+      {open && (
+        <div className="ml-7 mt-1">
+          <OutputBlock text={pretty(item.value)} isError={false} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ItemRow({ item, turnDone }: { item: Item; turnDone: boolean }) {
+  switch (item.kind) {
+    case "text":
+      return (
+        <div className="px-2 py-1">
+          <Markdown>{item.text}</Markdown>
+        </div>
+      );
+    case "thinking":
+      return <ThinkingRow item={item} />;
+    case "tool":
+      return <ToolRow item={item} turnDone={turnDone} />;
+    case "note":
+      return (
+        <div className="px-2 py-0.5 text-xs text-muted-foreground/80">{item.text}</div>
+      );
+    case "result":
+      return (
+        <div
+          className={cn(
+            "flex items-center gap-1.5 px-2 py-0.5 text-xs",
+            item.ok ? "text-muted-foreground" : "text-destructive",
+          )}
+        >
+          {item.ok ? <Check className="size-3" /> : <X className="size-3" />}
+          <span>
+            {item.ok ? "Done" : (clip(item.text) || "Failed")}
+            {item.durationMs != null && ` · ${(item.durationMs / 1000).toFixed(1)}s`}
+            {item.cost != null && ` · $${item.cost.toFixed(item.cost >= 1 ? 2 : 4)}`}
+          </span>
+        </div>
+      );
+    case "raw":
+      return <RawRow item={item} />;
+  }
+}
+
+// Short scannable summary for a collapsed turn header.
+function turnSummary(items: Item[]): string {
+  const lastText = [...items].reverse().find((i) => i.kind === "text") as TextItem | undefined;
+  if (lastText) return clip(lastText.text.replace(/[#*`>]/g, "").trim());
+  const tools = items.filter((i) => i.kind === "tool").length;
+  if (tools > 0) return `${tools} action${tools === 1 ? "" : "s"}`;
+  const note = items.find((i) => i.kind === "note") as NoteItem | undefined;
+  return note?.text ?? "";
 }
 
 // A collapsible turn section. Newest turn defaults to expanded.
-function TurnSection({ turn, defaultOpen }: { turn: Turn; defaultOpen: boolean }) {
+function TurnSection({
+  turn,
+  defaultOpen,
+  running,
+}: {
+  turn: Turn;
+  defaultOpen: boolean;
+  running: boolean;
+}) {
   const [open, setOpen] = useState(defaultOpen);
   // Keep the newest turn expanding as new events stream in.
   useEffect(() => {
     if (defaultOpen) setOpen(true);
   }, [defaultOpen]);
 
-  const result = turn.events.find((e) => (e.event as any)?.type === "result");
+  const items = useMemo(() => buildItems(turn.events), [turn.events]);
+  const result = items.find((i) => i.kind === "result") as ResultItem | undefined;
+  const turnDone = result != null;
+  const active = !turnDone && running;
   const startedAt = turn.events[0]?.created_at;
 
   return (
@@ -273,28 +560,44 @@ function TurnSection({ turn, defaultOpen }: { turn: Turn; defaultOpen: boolean }
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left"
+        className="flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left"
       >
         <ChevronRight
-          className={cn("size-4 shrink-0 text-muted-foreground transition-transform", open && "rotate-90")}
+          className={cn(
+            "size-4 shrink-0 text-muted-foreground transition-transform",
+            open && "rotate-90",
+          )}
         />
-        <span className="text-xs font-semibold text-muted-foreground">
-          Turn
+        <span className="shrink-0 text-xs tabular-nums text-muted-foreground">
+          {startedAt
+            ? new Date(startedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+            : ""}
         </span>
-        <span className="text-xs text-muted-foreground">
-          {startedAt ? new Date(startedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : ""}
+        <span className="min-w-0 flex-1 truncate text-xs text-foreground/80">
+          {turnSummary(items)}
         </span>
-        {!result && (
-          <span className="ml-auto flex items-center gap-1 text-[11px] font-medium text-emerald-600">
+        {active ? (
+          <span className="ml-2 flex shrink-0 items-center gap-1 text-[11px] font-medium text-emerald-600">
             <span className="size-1.5 animate-pulse rounded-full bg-emerald-500" /> running
           </span>
-        )}
+        ) : result && !result.ok ? (
+          <X className="ml-2 size-3.5 shrink-0 text-destructive" />
+        ) : result?.durationMs != null ? (
+          <span className="ml-2 shrink-0 text-[11px] tabular-nums text-muted-foreground">
+            {(result.durationMs / 1000).toFixed(1)}s
+          </span>
+        ) : null}
       </button>
       {open && (
-        <div className="space-y-2.5 border-t px-3 py-2.5">
-          {turn.events.map((e) => (
-            <EventRow key={e.id} event={e.event} />
+        <div className="space-y-0.5 border-t px-2 py-2">
+          {items.map((it) => (
+            <ItemRow key={it.key} item={it} turnDone={turnDone} />
           ))}
+          {active && (
+            <div className="flex items-center gap-2 px-2 py-1 text-[13px] text-muted-foreground">
+              <Loader2 className="size-3.5 animate-spin" /> Working…
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -511,7 +814,12 @@ export function AgentActivity({
                 <div className="py-6 text-center text-sm text-muted-foreground">Loading…</div>
               )}
               {turns.map((t, i) => (
-                <TurnSection key={t.turnId} turn={t} defaultOpen={i === turns.length - 1} />
+                <TurnSection
+                  key={t.turnId}
+                  turn={t}
+                  defaultOpen={i === turns.length - 1}
+                  running={running && i === turns.length - 1}
+                />
               ))}
             </div>
           )}
