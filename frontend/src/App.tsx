@@ -14,15 +14,20 @@ import {
   confirmToolCall,
   updateAgent,
   deleteAgent,
+  compactAgent,
   setDevParticipantId,
   uploadAttachment,
   attachmentUrl,
+  getThread,
+  markThreadRead,
+  listUnreadThreads,
   WS_BASE,
   type AgentEvent,
   type Attachment,
   type Channel,
   type Message,
   type Participant,
+  type UnreadThread,
 } from "./api";
 import { SignIn } from "./SignIn";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -63,10 +68,12 @@ import {
   Check,
   ChevronDown,
   FileText,
+  FoldVertical,
   GitBranch,
   Hash,
   Loader2,
   LogOut,
+  MessageSquare,
   MessagesSquare,
   MoreVertical,
   PanelLeft,
@@ -228,6 +235,23 @@ export function App({
   const [addingAgent, setAddingAgent] = useState(false);
   // Pending tool-confirmation cards (always_ask agents), keyed by confirmId.
   const [confirms, setConfirms] = useState<ToolConfirm[]>([]);
+
+  // Threads. The right-side panel is open when a thread is open (threadRootId) or the Threads
+  // list is showing (threadsListOpen). Replies + the root are DERIVED from `messages` (the
+  // client already holds the whole open channel), so there's no separate thread cache.
+  const [threadRootId, setThreadRootId] = useState<string | null>(null);
+  const [threadsListOpen, setThreadsListOpen] = useState(false);
+  const [threadDraft, setThreadDraft] = useState("");
+  const [alsoToChannel, setAlsoToChannel] = useState(false);
+  const [unreadThreads, setUnreadThreads] = useState<UnreadThread[]>([]);
+  const threadRootIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    threadRootIdRef.current = threadRootId;
+  }, [threadRootId]);
+  // Which channel the open thread belongs to (set by openThread). Lets the [selected] effect
+  // close a stale panel when navigating AWAY from the thread's channel, without closing it
+  // during openThreadFromList's select-then-open flow (where the target channel matches).
+  const threadChannelRef = useRef<string | null>(null);
   // Channel members panel + delete
   const [members, setMembers] = useState<Participant[]>([]);
   const [showMembers, setShowMembers] = useState(false);
@@ -287,6 +311,11 @@ export function App({
       ),
     );
     markChannelRead(channelId).catch(() => {});
+  }
+
+  // Reload my followed-threads-with-unread list (drives the Threads nav badge + list view).
+  function refreshThreads() {
+    listUnreadThreads().then(setUnreadThreads).catch(() => {});
   }
 
   function refreshMembers() {
@@ -350,11 +379,21 @@ export function App({
     if (!participantId) return;
     reloadChannels();
     listParticipants().then(setPeople).catch(() => {});
+    refreshThreads();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [participantId]);
 
   // Load history when the selected channel changes, and mark it read (Slack: opening a
   // channel clears its unread state).
   useEffect(() => {
+    // Navigating away from the open thread's channel closes the thread panel — left open it
+    // goes stale: header shows the new conversation, body never loads, and the reply composer
+    // silently no-ops (sendThreadReply guards on the derived root). Covers channel/DM clicks,
+    // channel deletion (selected -> null), and the WS channel_deleted/participant_deleted paths.
+    if (threadRootIdRef.current && threadChannelRef.current !== selected) {
+      setThreadRootId(null);
+      setThreadsListOpen(false);
+    }
     if (!selected) return;
     getMessages(selected).then(setMessages);
     markRead(selected);
@@ -470,6 +509,22 @@ export function App({
           );
           return;
         }
+        if (evt.type === "agent_context") {
+          // Per-turn context-window occupancy; keeps an open profile's meter live.
+          setPeople((ps) =>
+            ps.map((p) =>
+              p.id === evt.agentId
+                ? {
+                    ...p,
+                    context_tokens: evt.tokens,
+                    context_max_tokens: evt.maxTokens,
+                    context_updated_at: new Date().toISOString(),
+                  }
+                : p,
+            ),
+          );
+          return;
+        }
         if (evt.type === "participant_deleted") {
           // Resolve the deleted agent's handle so we can drop its DM channel (DMs are keyed
           // by the other member's handle via dm_with), then remove the participant itself.
@@ -531,6 +586,10 @@ export function App({
         const m: Message = evt.message;
         const isOpen = m.channel_id === selectedRef.current;
         const isMine = m.sender_id === participantId;
+        // An incoming thread reply (not mine) may change my followed-threads-with-unread —
+        // refresh the Threads badge/list regardless of which channel is open. (When the thread
+        // is open, the reply also flows into `messages` below and the pane re-derives from it.)
+        if (m.thread_root_id && !isMine) refreshThreads();
         if (isOpen && focusedRef.current) {
           // Looking right at this channel — render it and keep the read marker current so it
           // never shows as unread.
@@ -544,7 +603,11 @@ export function App({
         }
         // Bump the unread state of any channel that isn't being actively read. Skip my own
         // messages (Slack never marks your own message unread). Mentions of me flip has_mention.
-        if (isMine) return;
+        // A pure thread reply does NOT count toward the channel badge (it has its own per-thread
+        // unread); only top-level messages and replies echoed to the channel do. This is the
+        // client twin of the listChannels SQL filter + the timeline bucketing — keep all three
+        // in sync (see the `timeline` memo below).
+        if (isMine || !(!m.thread_root_id || m.also_to_channel)) return;
         const mentionsMe = (m.mentions ?? []).some((x) => x.id === participantId);
         setChannels((cs) =>
           cs.map((c) =>
@@ -653,6 +716,61 @@ export function App({
     setPending([]);
     setMention(null);
     setNotice("");
+  }
+
+  // Open a thread in the right panel (root + replies derive from loaded messages — safe today
+  // because getMessages returns the whole channel with no pagination; if that ever changes,
+  // route this through getThread like openThreadFromList does for a not-yet-loaded channel).
+  // Opening marks it read, which clears its per-thread unread everywhere. `channelId` is the
+  // thread's home channel (defaults to the open one); the [selected] effect uses it to close
+  // the panel only when navigating somewhere else.
+  function openThread(rootId: string, channelId: string | null = selectedRef.current) {
+    threadChannelRef.current = channelId;
+    setThreadsListOpen(false);
+    setThreadRootId(rootId);
+    setThreadDraft("");
+    setAlsoToChannel(false);
+    markThreadRead(rootId)
+      .then(() => refreshThreads())
+      .catch(() => {});
+  }
+
+  // Open a thread from the Threads list — it may live in a channel that isn't currently open, so
+  // select that channel first (its history load brings in the thread's messages to derive from).
+  function openThreadFromList(t: UnreadThread) {
+    if (t.channel_id !== selectedRef.current) {
+      setSelected(t.channel_id);
+      // History for the new channel loads via the [selected] effect; the panel derives once it
+      // arrives. If it isn't loaded yet, seed the thread directly so the pane isn't blank.
+      getThread(t.channel_id, t.root_id)
+        .then((msgs) => setMessages((prev) => mergeById(prev, msgs)))
+        .catch(() => {});
+    }
+    openThread(t.root_id, t.channel_id);
+  }
+
+  // Post a reply into the open thread. Round-trips over WS like send(); it reappears in
+  // `messages` (thread_root_id set) and the pane re-derives. alsoToChannel echoes it to the
+  // main timeline too.
+  function sendThreadReply() {
+    const body = threadDraft.trim();
+    if (!body || !threadRootId || !threadRoot) return;
+    if (wsRef.current?.readyState !== WebSocket.OPEN) {
+      setNotice("Connecting to the server… try again in a moment.");
+      return;
+    }
+    wsRef.current.send(
+      JSON.stringify({
+        type: "post",
+        channelId: threadRoot.channel_id,
+        body,
+        clientMsgId: newId(),
+        threadRootId,
+        ...(alsoToChannel ? { alsoToChannel: true } : {}),
+      }),
+    );
+    setThreadDraft("");
+    setAlsoToChannel(false);
   }
 
   // Candidates for the @-mention popup: everyone but me, matching the typed query, with
@@ -819,15 +937,55 @@ export function App({
   }
 
   // Group consecutive messages by the same sender for a cleaner, Slack-like feed.
+  // Main-timeline messages: top-level messages, plus thread replies explicitly echoed to the
+  // channel ("also send to channel"). Pure thread replies live only in the thread pane. This is
+  // the same predicate as the WS channel-unread guard + the listChannels SQL filter.
+  const timeline = useMemo(
+    () => messages.filter((m) => !m.thread_root_id || m.also_to_channel),
+    [messages],
+  );
+
+  // Reply count per root, derived from the loaded channel messages (always consistent with what
+  // the client holds — no reliance on the denormed root.reply_count for rendering).
+  const replyCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const m of messages) {
+      if (m.thread_root_id) counts.set(m.thread_root_id, (counts.get(m.thread_root_id) ?? 0) + 1);
+    }
+    return counts;
+  }, [messages]);
+
+  // Unread replies per followed thread (from the Threads endpoint), for the reply-footer badge.
+  const unreadByRoot = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const t of unreadThreads) m.set(t.root_id, t.unread_count);
+    return m;
+  }, [unreadThreads]);
+
+  // The open thread, derived from loaded messages: its root and its replies (seq order).
+  const threadRoot = useMemo(
+    () => (threadRootId ? messages.find((m) => m.id === threadRootId) ?? null : null),
+    [messages, threadRootId],
+  );
+  const threadReplies = useMemo(
+    () =>
+      threadRootId
+        ? messages
+            .filter((m) => m.thread_root_id === threadRootId)
+            .sort((a, b) => Number(a.seq) - Number(b.seq))
+        : [],
+    [messages, threadRootId],
+  );
+
   const grouped = useMemo(() => {
     const out: { lead: Message; rest: Message[] }[] = [];
-    for (const m of messages) {
+    for (const m of timeline) {
       const last = out[out.length - 1];
       if (last && last.lead.sender_id === m.sender_id) last.rest.push(m);
       else out.push({ lead: m, rest: [] });
     }
     return out;
-  }, [messages]);
+  }, [timeline]);
 
   if (!participantId) return <SignIn />;
 
@@ -849,6 +1007,102 @@ export function App({
       ? `@${sel.dm_with ?? "dm"}`
       : sel.name
     : null;
+
+  const totalThreadUnread = unreadThreads.reduce((n, t) => n + t.unread_count, 0);
+
+  // The per-message thread affordance: a persistent "N replies" chip on a root that has replies
+  // (bold + "N new" when I follow it and have unread), a "View thread" link on an also-to-channel
+  // reply shown in the timeline, or an on-hover "Reply in thread" on everything else.
+  const ThreadFooter = ({ m }: { m: Message }) => {
+    const rootId = m.thread_root_id ?? m.id;
+    const isRoot = !m.thread_root_id;
+    const count = isRoot ? replyCounts.get(m.id) ?? 0 : 0;
+    const unread = unreadByRoot.get(rootId) ?? 0;
+    if (isRoot && count > 0) {
+      return (
+        <button
+          data-testid="thread-replies"
+          onClick={() => openThread(rootId)}
+          className={cn(
+            "mt-1 inline-flex items-center gap-1.5 rounded-md border border-transparent px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:border-border hover:bg-accent",
+            unread > 0 && "font-semibold text-primary",
+          )}
+        >
+          <MessageSquare className="size-3.5" />
+          {count} {count === 1 ? "reply" : "replies"}
+          {unread > 0 && (
+            <span className="rounded-full bg-primary px-1.5 text-[10px] font-semibold text-primary-foreground">
+              {unread} new
+            </span>
+          )}
+        </button>
+      );
+    }
+    if (!isRoot) {
+      return (
+        <button
+          data-testid="view-thread"
+          onClick={() => openThread(rootId)}
+          className="mt-0.5 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent"
+        >
+          <MessageSquare className="size-3.5" /> In thread
+        </button>
+      );
+    }
+    return (
+      <button
+        data-testid="reply-in-thread"
+        onClick={() => openThread(rootId)}
+        className="mt-0.5 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground opacity-0 transition-opacity hover:bg-accent focus:opacity-100 group-hover/msg:opacity-100"
+      >
+        <MessageSquare className="size-3.5" /> Reply in thread
+      </button>
+    );
+  };
+
+  // Compact message row for the thread panel (root + replies), not sender-grouped.
+  const ThreadMessageRow = ({ m }: { m: Message }) => {
+    const sender = personByHandle(m.sender_handle);
+    const isAgent = sender?.kind === "agent";
+    return (
+      <div className="flex gap-2.5">
+        <button
+          onClick={() => sender && setProfileId(sender.id)}
+          disabled={!sender}
+          className="h-fit shrink-0 rounded-md transition-opacity hover:opacity-80 disabled:cursor-default"
+        >
+          <PersonAvatar
+            name={sender?.display_name ?? m.sender_handle}
+            handle={m.sender_handle}
+            size="sm"
+          />
+        </button>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-baseline gap-2">
+            <span className="text-sm font-semibold">
+              {sender?.display_name ?? m.sender_handle}
+            </span>
+            {isAgent && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                <Sparkles className="size-2.5" /> agent
+              </span>
+            )}
+            <span className="text-xs text-muted-foreground">{fmtTime(m.created_at)}</span>
+          </div>
+          <div className="break-words text-sm">
+            {m.body && <Markdown>{m.body}</Markdown>}
+            {(m.attachments?.length ?? 0) > 0 && <AttachmentList attachments={m.attachments!} />}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const threadPanelOpen = !!threadRootId || threadsListOpen;
+  const closeThreadPanel = () => {
+    setThreadRootId(null);
+    setThreadsListOpen(false);
+  };
 
   return (
     <div className="relative flex h-screen-dvh w-full overflow-hidden bg-background text-foreground">
@@ -902,6 +1156,24 @@ export function App({
 
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div className="px-2 py-3">
+            {/* Threads: my followed threads with unread replies (participation-gated). */}
+            <NavItem
+              testId="threads-nav"
+              active={threadsListOpen}
+              onClick={() => {
+                setThreadRootId(null);
+                setThreadsListOpen(true);
+                refreshThreads();
+                setDrawerOpen(false);
+              }}
+              icon={<MessagesSquare className="size-4 opacity-70" />}
+              label="Threads"
+              unread={totalThreadUnread > 0}
+              badgeCount={totalThreadUnread}
+              badgeMention={totalThreadUnread > 0}
+            />
+
+            <div className="h-3" />
             {/* Channels */}
             <SectionHeader
               label="Channels"
@@ -1199,18 +1471,20 @@ export function App({
                         {fmtTime(lead.created_at)}
                       </span>
                     </div>
-                    <div data-testid="message" className="break-words">
+                    <div data-testid="message" className="group/msg break-words">
                       {lead.body && <Markdown>{lead.body}</Markdown>}
                       {(lead.attachments?.length ?? 0) > 0 && (
                         <AttachmentList attachments={lead.attachments!} />
                       )}
+                      <ThreadFooter m={lead} />
                     </div>
                     {rest.map((m) => (
-                      <div key={m.id} data-testid="message" className="mt-1 break-words">
+                      <div key={m.id} data-testid="message" className="group/msg mt-1 break-words">
                         {m.body && <Markdown>{m.body}</Markdown>}
                         {(m.attachments?.length ?? 0) > 0 && (
                           <AttachmentList attachments={m.attachments!} />
                         )}
+                        <ThreadFooter m={m} />
                       </div>
                     ))}
                   </div>
@@ -1429,6 +1703,160 @@ export function App({
           </div>
         </div>
       </main>
+
+      {/* ---------- Thread panel (right sidebar) ----------
+          Desktop (md+): in-flow third column. Mobile: fixed right overlay. Two modes: the
+          Threads list (my followed threads with unread) or an open thread (root + replies +
+          its own composer). */}
+      {threadPanelOpen && (
+        <aside
+          data-testid="thread-panel"
+          className="fixed inset-y-0 right-0 z-40 flex w-full max-w-[420px] flex-col border-l bg-background shadow-xl md:static md:z-auto md:w-[380px] md:shadow-none"
+        >
+          <header className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
+            <MessagesSquare className="size-4 text-muted-foreground" />
+            <h2 className="min-w-0 flex-1 truncate font-semibold">
+              {threadRootId ? "Thread" : "Threads"}
+              {threadRootId && sel && (
+                <span className="ml-1.5 font-normal text-muted-foreground">
+                  {sel.kind === "dm" ? `@${sel.dm_with}` : `#${sel.name}`}
+                </span>
+              )}
+            </h2>
+            <Button
+              variant="ghost"
+              size="icon"
+              data-testid="thread-close"
+              aria-label="Close thread panel"
+              onClick={closeThreadPanel}
+              className="size-8 shrink-0 text-muted-foreground"
+            >
+              <X className="size-4" />
+            </Button>
+          </header>
+
+          {/* Threads list mode */}
+          {!threadRootId && (
+            <div className="min-h-0 flex-1 overflow-y-auto p-2">
+              {unreadThreads.length === 0 ? (
+                <div className="flex flex-col items-center justify-center gap-2 px-6 pt-16 text-center">
+                  <div className="flex size-12 items-center justify-center rounded-2xl bg-muted">
+                    <MessagesSquare className="size-6 text-muted-foreground" />
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    No unread threads. Replies to threads you follow show up here.
+                  </p>
+                </div>
+              ) : (
+                unreadThreads.map((t) => (
+                  <button
+                    key={t.root_id}
+                    data-testid="thread-list-item"
+                    onClick={() => openThreadFromList(t)}
+                    className="flex w-full flex-col gap-1 rounded-lg border border-transparent px-2.5 py-2 text-left transition-colors hover:border-border hover:bg-accent"
+                  >
+                    <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                      <Hash className="size-3" />
+                      <span className="truncate">{t.channel_name}</span>
+                      <span className="ml-auto shrink-0 rounded-full bg-primary px-1.5 text-[10px] font-semibold text-primary-foreground">
+                        {t.unread_count} new
+                      </span>
+                    </div>
+                    <div className="line-clamp-2 text-sm">
+                      <span className="font-semibold">@{t.root_sender_handle}</span>{" "}
+                      <span className="text-muted-foreground">{t.root_body || "(no text)"}</span>
+                    </div>
+                    <div className="text-[11px] text-muted-foreground">
+                      {t.reply_count} {t.reply_count === 1 ? "reply" : "replies"}
+                    </div>
+                  </button>
+                ))
+              )}
+            </div>
+          )}
+
+          {/* Open-thread mode */}
+          {threadRootId && (
+            <>
+              <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+                {threadRoot ? (
+                  <div className="flex flex-col gap-4">
+                    <ThreadMessageRow m={threadRoot} />
+                    {threadReplies.length > 0 && (
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <span className="h-px flex-1 bg-border" />
+                        {threadReplies.length}{" "}
+                        {threadReplies.length === 1 ? "reply" : "replies"}
+                        <span className="h-px flex-1 bg-border" />
+                      </div>
+                    )}
+                    {threadReplies.map((m) => (
+                      <ThreadMessageRow key={m.id} m={m} />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="pt-10 text-center text-sm text-muted-foreground">
+                    Loading thread…
+                  </div>
+                )}
+              </div>
+
+              {/* Thread composer */}
+              <div className="shrink-0 px-3 pb-3 pt-1">
+                <div className="rounded-xl border bg-card p-2 shadow-sm focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/20">
+                  <div className="flex items-end gap-2">
+                    <Textarea
+                      data-testid="thread-composer-input"
+                      value={threadDraft}
+                      onChange={(e) => setThreadDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          sendThreadReply();
+                        }
+                      }}
+                      rows={1}
+                      placeholder="Reply in thread…"
+                      className="max-h-32 min-h-9 resize-none overflow-y-auto border-0 bg-transparent px-2 py-1.5 shadow-none focus-visible:ring-0"
+                    />
+                    <Button
+                      data-testid="thread-send-button"
+                      onClick={sendThreadReply}
+                      size="icon"
+                      className="shrink-0"
+                      aria-label="Send reply"
+                    >
+                      <SendHorizonal className="size-4" />
+                    </Button>
+                  </div>
+                  {/* Also send to channel (Slack) */}
+                  <label
+                    data-testid="also-to-channel"
+                    className="mt-1 flex cursor-pointer select-none items-center gap-2 px-2 py-1 text-xs text-muted-foreground"
+                  >
+                    <button
+                      type="button"
+                      role="checkbox"
+                      aria-checked={alsoToChannel}
+                      onClick={() => setAlsoToChannel((v) => !v)}
+                      className={cn(
+                        "flex size-4 shrink-0 items-center justify-center rounded border transition-colors",
+                        alsoToChannel
+                          ? "border-primary bg-primary text-primary-foreground"
+                          : "border-input bg-background",
+                      )}
+                    >
+                      {alsoToChannel && <Check className="size-3" />}
+                    </button>
+                    Also send to{" "}
+                    {sel ? (sel.kind === "dm" ? `@${sel.dm_with}` : `#${sel.name}`) : "channel"}
+                  </label>
+                </div>
+              </div>
+            </>
+          )}
+        </aside>
+      )}
 
       {/* ---------- New channel dialog ---------- */}
       <Dialog open={showNew} onOpenChange={setShowNew}>
@@ -1975,6 +2403,7 @@ function ParticipantProfileDialog({
                 </a>
               </div>
             )}
+            <ContextUsageCard person={person} />
             <Button
               variant="outline"
               data-testid="activity-open"
@@ -2057,6 +2486,114 @@ function ParticipantProfileDialog({
         )}
       </DialogContent>
     </Dialog>
+  );
+}
+
+// Compact token counts for the context meter: 76200 -> "76.2k", 1000000 -> "1M".
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(n < 10_000 ? 1 : 0).replace(/\.0$/, "")}k`;
+  return String(n);
+}
+
+// Context-window occupancy + compaction control in an agent's profile. `person` is the live
+// row from `people`, so the meter updates in place whenever an `agent_context` broadcast
+// lands — including the one the runner sends after a requested compaction finishes.
+function ContextUsageCard({ person }: { person: Participant }) {
+  const [requesting, setRequesting] = useState(false);
+  const [requested, setRequested] = useState(false);
+  const [err, setErr] = useState("");
+
+  const tokens = person.context_tokens ?? null;
+  const max = person.context_max_tokens ?? null;
+  const pct =
+    tokens != null && max != null && max > 0
+      ? Math.min(100, Math.max(0, (tokens / max) * 100))
+      : null;
+
+  // Green until the window starts getting tight, then amber, then red — the same read as a
+  // fuel gauge. Compaction is most useful in the amber/red range.
+  const tone =
+    pct == null ? null : pct >= 90 ? "critical" : pct >= 70 ? "warn" : "ok";
+  const barColor =
+    tone === "critical" ? "bg-red-500" : tone === "warn" ? "bg-amber-500" : "bg-emerald-500";
+  const pctColor =
+    tone === "critical"
+      ? "text-red-600 dark:text-red-400"
+      : tone === "warn"
+        ? "text-amber-600 dark:text-amber-400"
+        : "text-muted-foreground";
+
+  // A fresh usage report (e.g. the compaction turn finishing) supersedes the queued note.
+  const updatedAt = person.context_updated_at ?? null;
+  const requestedAtRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (requested && updatedAt !== requestedAtRef.current) setRequested(false);
+  }, [updatedAt, requested]);
+
+  async function compact() {
+    if (requesting || requested) return;
+    setRequesting(true);
+    setErr("");
+    try {
+      const r = await compactAgent(person.id);
+      if (!r.ok) throw new Error(r.error === "runner not connected" ? "Agent is offline." : (r.error ?? "compact failed"));
+      requestedAtRef.current = updatedAt;
+      setRequested(true);
+    } catch (e) {
+      setErr(String((e as Error).message ?? e));
+    } finally {
+      setRequesting(false);
+    }
+  }
+
+  return (
+    <div data-testid="context-usage" className="space-y-2 rounded-lg border bg-muted/30 p-3">
+      <div className="flex items-baseline justify-between gap-2">
+        <div className="text-xs font-medium text-muted-foreground">Context window</div>
+        {pct != null && (
+          <span className={cn("text-xs font-semibold tabular-nums", pctColor)}>
+            {Math.round(pct)}% full
+          </span>
+        )}
+      </div>
+      {pct != null ? (
+        <>
+          <div className="h-1.5 overflow-hidden rounded-full bg-border/60">
+            <div
+              className={cn("h-full rounded-full transition-[width] duration-500", barColor)}
+              // Keep a sliver visible at very low usage so the meter reads as "working".
+              style={{ width: `${Math.max(2, pct)}%` }}
+            />
+          </div>
+          <div className="text-[11px] tabular-nums text-muted-foreground">
+            {fmtTokens(tokens!)} of {fmtTokens(max!)} tokens
+          </div>
+        </>
+      ) : (
+        <p className="text-[11px] leading-tight text-muted-foreground">
+          No usage reported yet — updates after the agent's next turn.
+        </p>
+      )}
+      <Button
+        variant="outline"
+        size="sm"
+        data-testid="agent-compact"
+        onClick={compact}
+        disabled={requesting || requested}
+        className="w-full gap-2 text-muted-foreground"
+      >
+        <FoldVertical className="size-3.5" />
+        {requesting ? "Requesting…" : requested ? "Compaction queued" : "Compact context"}
+      </Button>
+      {requested && (
+        <p className="text-[11px] leading-tight text-muted-foreground">
+          The agent will summarize its older conversation when it's next idle; the meter
+          updates when it finishes.
+        </p>
+      )}
+      {err && <p className="text-[11px] text-destructive">{err}</p>}
+    </div>
   );
 }
 

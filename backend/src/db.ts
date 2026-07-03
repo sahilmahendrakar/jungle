@@ -19,6 +19,10 @@ export interface Participant {
   mode: string; // an SDK permission mode: default|acceptEdits|plan|bypassPermissions|dontAsk
   runtime: string; // 'sdk' (all agents; legacy 'ma' rows may exist on old databases)
   runner_token: string | null; // per-agent runner secret
+  // Context-window occupancy reported by the runner after each turn (null = no report yet).
+  context_tokens: number | null;
+  context_max_tokens: number | null;
+  context_updated_at: string | null;
 }
 
 export interface PersistedMessage {
@@ -30,6 +34,13 @@ export interface PersistedMessage {
   body: string;
   created_at: string;
   cascade_budget: number | null;
+  // Threads: null on top-level messages; the root message's id on replies. also_to_channel
+  // marks a reply that was also echoed into the main timeline. reply_count/last_reply_at are
+  // denormed on the ROOT (0/null elsewhere) and drive the "N replies" footer + Threads view.
+  thread_root_id: string | null;
+  also_to_channel: boolean;
+  reply_count: number;
+  last_reply_at: string | null;
   mentions: { id: string; handle: string }[];
   attachments: AttachmentMeta[];
 }
@@ -104,6 +115,20 @@ export async function updateAgentConfig(
     vals,
   );
   return rows[0] ?? null;
+}
+
+// Record the context-window occupancy an agent's runner reported after a turn.
+export async function updateAgentContextUsage(
+  id: string,
+  tokens: number,
+  maxTokens: number,
+): Promise<void> {
+  await pool.query(
+    `update participants
+        set context_tokens = $1, context_max_tokens = $2, context_updated_at = now()
+      where id = $3 and kind = 'agent'`,
+    [tokens, maxTokens, id],
+  );
 }
 
 // Look up the human participant linked to a Firebase Auth uid (null if not onboarded yet).
@@ -204,6 +229,26 @@ export async function getParticipant(id: string): Promise<Participant | null> {
 // The persistence half of the routing rule: store the message (assign seq), record
 // mentions, link any pre-uploaded attachments. Idempotent on (sender_id, client_msg_id)
 // for optimistic-send dedupe.
+// Resolve a thread reply's root. Returns the id to store in thread_root_id, or throws if the
+// target doesn't exist / is in another channel. Guarantees replies never nest: if the target
+// is itself a reply, we thread onto ITS root (a reply's thread_root_id always points at a
+// top-level message). Runs inside the caller's transaction.
+async function resolveThreadRoot(
+  client: pg.PoolClient,
+  channelId: string,
+  threadRootId: string,
+): Promise<string> {
+  const { rows } = await client.query<{ id: string; channel_id: string; thread_root_id: string | null }>(
+    `select id, channel_id, thread_root_id from messages where id = $1`,
+    [threadRootId],
+  );
+  const target = rows[0];
+  if (!target) throw new Error("thread root message not found");
+  if (target.channel_id !== channelId) throw new Error("thread root is in a different channel");
+  // Flatten: if the target is itself a reply, use its root so threads stay one level deep.
+  return target.thread_root_id ?? target.id;
+}
+
 export async function persistMessage(args: {
   channelId: string;
   senderId: string;
@@ -211,21 +256,43 @@ export async function persistMessage(args: {
   clientMsgId?: string | null;
   cascadeBudget?: number | null;
   attachmentIds?: string[];
+  // Threads: set to reply into a thread. also_to_channel additionally echoes the reply into
+  // the main timeline (ignored when threadRootId is absent).
+  threadRootId?: string | null;
+  alsoToChannel?: boolean;
 }): Promise<PersistedMessage> {
   const mentions = await resolveMentions(args.body);
   const client = await pool.connect();
   try {
     await client.query("begin");
+    const rootId = args.threadRootId
+      ? await resolveThreadRoot(client, args.channelId, args.threadRootId)
+      : null;
+    const alsoToChannel = !!rootId && !!args.alsoToChannel;
     const ins = await client.query(
-      `insert into messages (channel_id, sender_id, body, client_msg_id, cascade_budget)
-       values ($1, $2, $3, $4, $5)
+      `insert into messages
+         (channel_id, sender_id, body, client_msg_id, cascade_budget, thread_root_id, also_to_channel)
+       values ($1, $2, $3, $4, $5, $6, $7)
        on conflict (sender_id, client_msg_id) where client_msg_id is not null do nothing
        returning *`,
-      [args.channelId, args.senderId, args.body, args.clientMsgId ?? null, args.cascadeBudget ?? null],
+      [
+        args.channelId, args.senderId, args.body, args.clientMsgId ?? null,
+        args.cascadeBudget ?? null, rootId, alsoToChannel,
+      ],
     );
     let msg = ins.rows[0];
     let attachments: AttachmentMeta[] = [];
     if (msg) {
+      // Bump the root's denormed thread summary in the same txn (O(1), no drift — there's no
+      // single-message delete anywhere in the app).
+      if (rootId) {
+        await client.query(
+          `update messages
+             set reply_count = reply_count + 1, last_reply_at = $2
+           where id = $1`,
+          [rootId, msg.created_at],
+        );
+      }
       if (mentions.length) {
         await client.query(
           `insert into mentions (message_id, participant_id) select $1, unnest($2::uuid[])`,
@@ -263,6 +330,10 @@ export async function persistMessage(args: {
       body: msg.body,
       created_at: msg.created_at,
       cascade_budget: msg.cascade_budget ?? null,
+      thread_root_id: msg.thread_root_id ?? null,
+      also_to_channel: msg.also_to_channel ?? false,
+      reply_count: msg.reply_count ?? 0,
+      last_reply_at: msg.last_reply_at ?? null,
       mentions,
       attachments,
     };
@@ -274,6 +345,32 @@ export async function persistMessage(args: {
   }
 }
 
+// Row -> PersistedMessage. `mentions` isn't loaded here (history render doesn't need them —
+// they're only carried on live WS frames, matching the pre-threads behavior).
+function rowToMessage(r: any, attachments: AttachmentMeta[]): PersistedMessage {
+  return {
+    id: r.id,
+    channel_id: r.channel_id,
+    seq: String(r.seq),
+    sender_id: r.sender_id,
+    sender_handle: r.sender_handle,
+    body: r.body,
+    created_at: r.created_at,
+    cascade_budget: r.cascade_budget ?? null,
+    thread_root_id: r.thread_root_id ?? null,
+    also_to_channel: r.also_to_channel ?? false,
+    reply_count: r.reply_count ?? 0,
+    last_reply_at: r.last_reply_at ?? null,
+    mentions: [],
+    attachments,
+  };
+}
+
+// Backfill/reconnect path: return EVERYTHING in the channel after afterSeq — roots AND thread
+// replies. The client buckets roots→timeline and replies→thread pane. Deliberately NOT
+// filtered by thread_root_id: filtering here would leave an open thread pane with a gap after
+// reconnect and force a second sync path. (The channel-unread aggregate in listChannels is a
+// different story — that one DOES filter; see the comment there.)
 export async function getMessages(channelId: string, afterSeq = 0): Promise<PersistedMessage[]> {
   const { rows } = await pool.query(
     `select m.*, p.handle as sender_handle
@@ -283,18 +380,21 @@ export async function getMessages(channelId: string, afterSeq = 0): Promise<Pers
     [channelId, afterSeq],
   );
   const atts = await attachmentsForMessages(rows.map((r) => r.id));
-  return rows.map((r) => ({
-    id: r.id,
-    channel_id: r.channel_id,
-    seq: String(r.seq),
-    sender_id: r.sender_id,
-    sender_handle: r.sender_handle,
-    body: r.body,
-    created_at: r.created_at,
-    cascade_budget: r.cascade_budget ?? null,
-    mentions: [],
-    attachments: atts.get(r.id) ?? [],
-  }));
+  return rows.map((r) => rowToMessage(r, atts.get(r.id) ?? []));
+}
+
+// A single thread: the root message followed by its replies, in seq order. Used to lazy-load a
+// thread the client doesn't already have locally (and by the thread-open path).
+export async function getThreadMessages(rootId: string): Promise<PersistedMessage[]> {
+  const { rows } = await pool.query(
+    `select m.*, p.handle as sender_handle
+     from messages m join participants p on p.id = m.sender_id
+     where m.id = $1 or m.thread_root_id = $1
+     order by m.seq`,
+    [rootId],
+  );
+  const atts = await attachmentsForMessages(rows.map((r) => r.id));
+  return rows.map((r) => rowToMessage(r, atts.get(r.id) ?? []));
 }
 
 // --- Attachments ---
@@ -551,6 +651,12 @@ export async function listChannels(participantId?: string): Promise<ChannelListI
               on msg.channel_id = c.id
              and msg.seq > coalesce(cr.last_read_seq, 0)
              and msg.sender_id <> $1
+             -- Thread replies don't count toward the CHANNEL badge (they have their own
+             -- per-thread unread state, see listUnreadThreads). Only top-level messages and
+             -- replies explicitly echoed to the channel do. This is the same predicate the
+             -- client uses to decide timeline vs. thread-pane placement — keep them in sync;
+             -- dropping it here silently re-inflates the channel badge with thread chatter.
+             and (msg.thread_root_id is null or msg.also_to_channel)
        left join mentions mention
               on mention.message_id = msg.id and mention.participant_id = $1
        where cm.participant_id = $1
@@ -594,6 +700,139 @@ export async function markChannelRead(
     [channelId, participantId, target],
   );
   return Number(rows[0]?.last_read_seq ?? 0);
+}
+
+// --- Threads ---
+
+// The channel a message belongs to (for membership checks on thread endpoints). Null if gone.
+export async function getMessageChannelId(messageId: string): Promise<string | null> {
+  const { rows } = await pool.query<{ channel_id: string }>(
+    `select channel_id from messages where id = $1`,
+    [messageId],
+  );
+  return rows[0]?.channel_id ?? null;
+}
+
+// Participation predicate (DERIVED, no thread_participants table): a participant "follows" a
+// thread iff they authored the root, replied in it, or were @mentioned on any of its messages.
+// Reading a thread does NOT subscribe you (matches Slack). This SQL fragment is reused by the
+// unread query and the read gate; $1 = participant id, root = the outer `messages` row aliased
+// as `root`.
+const FOLLOWS_THREAD_SQL = `(
+  root.sender_id = $1
+  or exists (select 1 from messages r where r.thread_root_id = root.id and r.sender_id = $1)
+  or exists (
+    select 1 from mentions mn join messages tm on tm.id = mn.message_id
+    where mn.participant_id = $1 and (tm.id = root.id or tm.thread_root_id = root.id)
+  )
+)`;
+
+// True if `participantId` follows the thread rooted at `rootId` (see FOLLOWS_THREAD_SQL).
+export async function followsThread(rootId: string, participantId: string): Promise<boolean> {
+  const { rows } = await pool.query<{ ok: boolean }>(
+    `select ${FOLLOWS_THREAD_SQL} as ok from messages root where root.id = $2`,
+    [participantId, rootId],
+  );
+  return !!rows[0]?.ok;
+}
+
+export interface UnreadThread {
+  root_id: string;
+  channel_id: string;
+  channel_name: string;
+  root_sender_handle: string;
+  root_body: string;
+  reply_count: number;
+  last_reply_at: string | null;
+  unread_count: number; // replies after my thread last_read_seq, excluding my own
+}
+
+// The requester's followed threads that have unread replies, newest activity first. Scoped to
+// channels they're a member of. Unread = replies with seq > their thread_reads.last_read_seq
+// (0 if never opened), excluding their own — the exact live aggregate-join pattern listChannels
+// uses against channel_reads, just keyed on the thread root.
+export async function listUnreadThreads(participantId: string): Promise<UnreadThread[]> {
+  const { rows } = await pool.query<UnreadThread>(
+    `select root.id as root_id, root.channel_id, c.name as channel_name,
+            rp.handle as root_sender_handle, root.body as root_body,
+            root.reply_count, root.last_reply_at,
+            count(reply.id)::int as unread_count
+     from messages root
+     join channels c on c.id = root.channel_id
+     join channel_members cm on cm.channel_id = c.id and cm.participant_id = $1
+     join participants rp on rp.id = root.sender_id
+     left join thread_reads tr on tr.root_id = root.id and tr.participant_id = $1
+     left join messages reply
+            on reply.thread_root_id = root.id
+           and reply.seq > coalesce(tr.last_read_seq, 0)
+           and reply.sender_id <> $1
+     where root.thread_root_id is null
+       and root.reply_count > 0
+       and ${FOLLOWS_THREAD_SQL}
+     group by root.id, root.channel_id, c.name, rp.handle, root.body, root.reply_count, root.last_reply_at
+     having count(reply.id) > 0
+     order by root.last_reply_at desc nulls last`,
+    [participantId],
+  );
+  return rows;
+}
+
+// Mark a thread read for a participant: set thread_reads.last_read_seq to `seq` (default: the
+// thread's current max seq). Never lowers an existing marker. Mirrors markChannelRead.
+export async function markThreadRead(
+  rootId: string,
+  participantId: string,
+  seq?: number | null,
+): Promise<number> {
+  const target =
+    seq != null && Number.isFinite(seq)
+      ? String(seq)
+      : (
+          await pool.query<{ max: string | null }>(
+            `select max(seq)::text as max from messages where id = $1 or thread_root_id = $1`,
+            [rootId],
+          )
+        ).rows[0]?.max ?? "0";
+  const { rows } = await pool.query<{ last_read_seq: string }>(
+    `insert into thread_reads (root_id, participant_id, last_read_seq, updated_at)
+     values ($1, $2, $3, now())
+     on conflict (root_id, participant_id) do update
+       set last_read_seq = greatest(thread_reads.last_read_seq, excluded.last_read_seq),
+           updated_at = now()
+     returning last_read_seq::text`,
+    [rootId, participantId, target],
+  );
+  return Number(rows[0]?.last_read_seq ?? 0);
+}
+
+// Agents that participate in a thread (authored the root or replied in it). Drives the "no @
+// needed to reply to an agent" auto-trigger: a bare human reply wakes these agents.
+export async function agentIdsInThread(rootId: string): Promise<string[]> {
+  const { rows } = await pool.query<{ id: string }>(
+    `select distinct p.id
+     from messages m join participants p on p.id = m.sender_id
+     where p.kind = 'agent' and (m.id = $1 or m.thread_root_id = $1)`,
+    [rootId],
+  );
+  return rows.map((r) => r.id);
+}
+
+// Thread transcript for an agent's turn input (root + replies, oldest-first). Same line format
+// as getRecentContext so the agent sees the thread it's replying in, not the whole channel.
+export async function getThreadContext(rootId: string, limit = 40): Promise<string> {
+  const { rows } = await pool.query<{ handle: string; body: string; att: string[] | null }>(
+    `select p.handle, m.body,
+            (select array_agg(a.filename order by a.created_at)
+             from attachments a where a.message_id = m.id) as att
+     from messages m join participants p on p.id = m.sender_id
+     where m.id = $1 or m.thread_root_id = $1
+     order by m.seq desc limit $2`,
+    [rootId, limit],
+  );
+  return rows
+    .reverse()
+    .map((r) => `@${r.handle}: ${r.body}${r.att?.length ? ` [attached: ${r.att.join(", ")}]` : ""}`)
+    .join("\n");
 }
 
 export async function getChannelByNameForMember(
@@ -734,8 +973,36 @@ export async function deleteAgent(agentId: string): Promise<void> {
           and id in (select channel_id from channel_members where participant_id = $1)`,
       [agentId],
     );
+    // Threads bookkeeping BEFORE deleting the agent's remaining (group-channel) messages:
+    // 1. Roots the agent replied to — their denormed reply_count/last_reply_at must be
+    //    recomputed after its replies are gone (persistMessage only ever increments).
+    const { rows: affectedRoots } = await client.query<{ id: string }>(
+      `select distinct thread_root_id as id from messages
+        where sender_id = $1 and thread_root_id is not null`,
+      [agentId],
+    );
+    // 2. Threads the agent ROOTED — thread_root_id is ON DELETE CASCADE, so deleting the root
+    //    would silently take other participants' replies with it. Detach those replies into
+    //    top-level messages instead (their content/order survive via the channel seq stream).
+    await client.query(
+      `update messages
+          set thread_root_id = null, also_to_channel = false
+        where sender_id <> $1
+          and thread_root_id in (select id from messages where sender_id = $1)`,
+      [agentId],
+    );
     // Remaining messages the agent sent in group channels (sender_id is RESTRICT, no cascade).
+    // Its own replies to its own roots go via the root's cascade or this delete — either is fine.
     await client.query(`delete from messages where sender_id = $1`, [agentId]);
+    // Recompute the denormed thread summary on surviving roots (deleted roots simply no longer
+    // match). count(*)=0 also nulls last_reply_at, matching a never-replied message.
+    await client.query(
+      `update messages r
+          set reply_count   = (select count(*) from messages m where m.thread_root_id = r.id),
+              last_reply_at = (select max(m.created_at) from messages m where m.thread_root_id = r.id)
+        where r.id = any($1::uuid[])`,
+      [affectedRoots.map((r) => r.id)],
+    );
     // The participant row — cascades agent_inbox, agent_events, channel_members, channel_reads,
     // and the github identity row.
     await client.query(`delete from participants where id = $1`, [agentId]);

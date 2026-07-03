@@ -19,7 +19,13 @@ export interface SendMessageResult {
 // the backend replies with send_message_result (or rejected/timed out).
 export type SendMessageBridge = (
   id: string,
-  input: { to: string; body: string; attachmentIds?: string[] },
+  input: {
+    to: string;
+    body: string;
+    attachmentIds?: string[];
+    threadRootId?: string | null;
+    alsoToChannel?: boolean;
+  },
 ) => Promise<SendMessageResult>;
 
 // Injected by the runner: uploads one workspace file to the backend, returning its
@@ -44,6 +50,23 @@ export function createJungleMcpServer(bridge: SendMessageBridge, uploadFile: Fil
         .max(MAX_FILES_PER_MESSAGE)
         .optional()
         .describe("Workspace file paths to attach (images render inline in the chat)"),
+      threadRootId: z
+        .string()
+        .nullable()
+        .optional()
+        .describe(
+          "Reply inside a thread, by the root message's id. Usually omit this: when you were " +
+            "addressed in a thread your reply is placed there automatically. Set it explicitly " +
+            "to start/continue a specific thread you know the root id of, or pass null to force " +
+            "a top-level post even when you were addressed inside a thread.",
+        ),
+      alsoToChannel: z
+        .boolean()
+        .optional()
+        .describe(
+          "When replying in a thread, also post the reply to the main channel timeline " +
+            "(Slack's 'also send to channel'). Ignored for non-thread messages.",
+        ),
     },
     async (args) => {
       const id = randomUUID();
@@ -60,6 +83,10 @@ export function createJungleMcpServer(bridge: SendMessageBridge, uploadFile: Fil
             to: args.to,
             body: args.body,
             ...(attachmentIds.length ? { attachmentIds } : {}),
+            // Forward an explicit null (force top-level) too — only a truly omitted field
+            // should fall through to the backend's "default to the triggering thread" behavior.
+            ...(args.threadRootId !== undefined ? { threadRootId: args.threadRootId } : {}),
+            ...(args.alsoToChannel ? { alsoToChannel: true } : {}),
           }),
           SEND_TIMEOUT_MS,
         );

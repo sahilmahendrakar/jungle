@@ -48,8 +48,16 @@ export interface SendMessageFrame {
   type: "send_message";
   id: string;
   // attachmentIds reference uploads the runner already made via POST /api/attachments
-  // (authenticated with its runner token).
-  input: { to: string; body: string; attachmentIds?: string[] };
+  // (authenticated with its runner token). threadRootId replies into a thread (omitted →
+  // the backend defaults to the thread the agent was triggered in); alsoToChannel echoes a
+  // thread reply into the main channel timeline.
+  input: {
+    to: string;
+    body: string;
+    attachmentIds?: string[];
+    threadRootId?: string | null;
+    alsoToChannel?: boolean;
+  };
 }
 
 export interface ConfirmRequestFrame {
@@ -67,6 +75,17 @@ export interface TurnDoneFrame {
   error?: string;
 }
 
+// Context-window occupancy after a turn: how full the session's context is.
+// `tokens`/`maxTokens` come from the SDK's getContextUsage() when available,
+// else a fallback computed from the result message's usage. Sent once per turn.
+export interface ContextUsageFrame {
+  type: "context_usage";
+  tokens: number;
+  maxTokens: number;
+  // 0–100, rounded; convenience so the backend/UI don't recompute.
+  percent: number;
+}
+
 export interface FatalFrame {
   type: "fatal";
   error: string;
@@ -81,6 +100,7 @@ export type RunnerToBackend =
   | SendMessageFrame
   | ConfirmRequestFrame
   | TurnDoneFrame
+  | ContextUsageFrame
   | FatalFrame;
 
 // ---- Backend -> runner ----
@@ -110,6 +130,12 @@ export interface EnqueueFrame {
 
 export interface InterruptFrame {
   type: "interrupt";
+}
+
+// Ask the agent to compact/summarize its session context (the `/compact`
+// slash command). Runs as its own turn when the agent next goes idle.
+export interface CompactFrame {
+  type: "compact";
 }
 
 export interface SetPermissionModeFrame {
@@ -146,6 +172,7 @@ export type BackendToRunner =
   | ConfigureFrame
   | EnqueueFrame
   | InterruptFrame
+  | CompactFrame
   | SetPermissionModeFrame
   | SetModelFrame
   | SendMessageResultFrame

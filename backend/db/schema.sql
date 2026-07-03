@@ -32,6 +32,13 @@ alter table participants add column if not exists runner_token  text;
 create unique index if not exists participants_runner_token_idx
   on participants (runner_token) where runner_token is not null;
 
+-- Context-window occupancy for sdk agents, reported by the runner after each turn
+-- (`context_usage` frame). Surfaced in the agent profile; null until the first report.
+-- See migrations/006_context_usage.sql.
+alter table participants add column if not exists context_tokens     integer;
+alter table participants add column if not exists context_max_tokens integer;
+alter table participants add column if not exists context_updated_at timestamptz;
+
 -- Durable per-agent work queue for sdk runners. A dispatch inserts a row; the runner pulls it
 -- (`enqueue`) and acks it (`consumed`) -> delivered_at set. Undelivered rows survive the runner
 -- being offline and are re-sent on reconnect.
@@ -80,7 +87,17 @@ create table if not exists messages (
   cascade_budget int,                                  -- remaining agent->agent hops; null for human msgs
   created_at     timestamptz not null default now()
 );
+-- Threads (see migrations/005_threads.sql). A reply's thread_root_id points at its thread's
+-- root message (null = top-level). also_to_channel echoes a reply into the main timeline.
+-- reply_count/last_reply_at are denormed on the ROOT only. Thread participation is DERIVED
+-- (root author ∪ repliers ∪ mentioned) — there is no thread_participants table.
+alter table messages add column if not exists thread_root_id uuid references messages(id) on delete cascade;
+alter table messages add column if not exists also_to_channel boolean not null default false;
+alter table messages add column if not exists reply_count int not null default 0;
+alter table messages add column if not exists last_reply_at timestamptz;
 create index if not exists messages_channel_seq_idx on messages (channel_id, seq);
+create index if not exists messages_thread_idx on messages (thread_root_id, seq)
+  where thread_root_id is not null;
 create unique index if not exists messages_sender_client_msg_idx
   on messages (sender_id, client_msg_id) where client_msg_id is not null;
 
@@ -100,6 +117,17 @@ create table if not exists channel_reads (
   last_read_seq  bigint not null default 0,
   updated_at     timestamptz not null default now(),
   primary key (channel_id, participant_id)
+);
+
+-- Slack-style per-participant read state for THREADS — the same shape as channel_reads but
+-- keyed on the thread's root message. Powers participation-gated thread unreads. See
+-- migrations/005_threads.sql.
+create table if not exists thread_reads (
+  root_id        uuid not null references messages(id) on delete cascade,
+  participant_id uuid not null references participants(id) on delete cascade,
+  last_read_seq  bigint not null default 0,
+  updated_at     timestamptz not null default now(),
+  primary key (root_id, participant_id)
 );
 
 -- A participant's connected GitHub account (via our GitHub App user-OAuth flow).
