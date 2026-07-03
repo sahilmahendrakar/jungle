@@ -7,7 +7,7 @@ import {
   type ReactNode,
 } from "react";
 import { auth, onIdTokenChanged, signInWithGoogle, signOutUser, type User } from "./firebase";
-import { getMe, setAuthToken, type Me } from "./api";
+import { getMe, setAuthToken, setTokenProvider, type Me } from "./api";
 
 interface AuthCtx {
   user: User | null;
@@ -38,13 +38,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  // Fires on sign-in, sign-out, and hourly token refresh — keeps the API bearer token current.
+  // Registers a just-in-time token getter for api.ts's authFetch: Firebase's getIdToken()
+  // checks the cached JWT's exp locally and silently re-mints if it's stale, so REST calls
+  // never rely on onIdTokenChanged's last push, which can lag real expiry across a
+  // backgrounded/suspended tab (that lag was surfacing as "auth required" 401s).
   useEffect(() => {
     if (!auth) {
       setReady(true);
       return;
     }
-    return onIdTokenChanged(auth, async (u) => {
+    const fbAuth = auth;
+    setTokenProvider(() => (fbAuth.currentUser ? fbAuth.currentUser.getIdToken() : Promise.resolve(null)));
+    // Fires on sign-in, sign-out, and hourly token refresh — keeps setAuthToken current too
+    // (only used by withDevAuth to detect Firebase mode, not as the bearer token itself).
+    const unsubscribe = onIdTokenChanged(fbAuth, async (u) => {
       setUser(u);
       setAuthToken(u ? await u.getIdToken() : null);
       if (u) {
@@ -58,6 +65,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
       setReady(true);
     });
+    return () => {
+      unsubscribe();
+      setTokenProvider(null);
+    };
   }, []);
 
   const getToken = useCallback(
