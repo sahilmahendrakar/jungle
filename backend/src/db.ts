@@ -23,6 +23,8 @@ export interface Participant {
   context_tokens: number | null;
   context_max_tokens: number | null;
   context_updated_at: string | null;
+  runner_provider: string; // 'docker' | 'fly' — which Provisioner impl owns this agent's runner
+  runner_meta: Record<string, unknown> | null; // provider handles (Fly: {machineId, volumeId})
 }
 
 export interface PersistedMessage {
@@ -68,18 +70,20 @@ export async function createParticipant(p: {
   mode?: string | null;
   runtime?: string | null;
   runnerToken?: string | null;
+  runnerProvider?: string | null;
 }): Promise<Participant> {
   const { rows } = await pool.query<Participant>(
     `insert into participants
        (kind, handle, display_name, repo, firebase_uid, email, avatar_url,
-        model, mode, runtime, runner_token)
+        model, mode, runtime, runner_token, runner_provider)
      values ($1, $2, $3, $4, $5, $6, $7, $8, coalesce($9, 'default'),
-             coalesce($10, 'sdk'), $11)
+             coalesce($10, 'sdk'), $11, coalesce($12, 'docker'))
      returning *`,
     [
       p.kind, p.handle, p.displayName, p.repo ?? null,
       p.firebaseUid ?? null, p.email ?? null, p.avatarUrl ?? null,
       p.model ?? null, p.mode ?? null, p.runtime ?? null, p.runnerToken ?? null,
+      p.runnerProvider ?? null,
     ],
   );
   return rows[0];
@@ -507,13 +511,16 @@ export interface AgentRow {
   mode: string;
   runtime: string; // 'sdk'
   runner_token: string | null;
+  runner_provider: string;
+  runner_meta: Record<string, unknown> | null;
 }
 
 // Of the given participant ids, the ones that are agents.
 export async function agentsByIds(ids: string[]): Promise<AgentRow[]> {
   if (!ids.length) return [];
   const { rows } = await pool.query<AgentRow>(
-    `select id, handle, display_name, repo, model, mode, runtime, runner_token
+    `select id, handle, display_name, repo, model, mode, runtime, runner_token,
+            runner_provider, runner_meta
      from participants
      where kind = 'agent' and id = any($1)`,
     [ids],
@@ -526,7 +533,8 @@ export async function agentsByIds(ids: string[]): Promise<AgentRow[]> {
 export async function agentByRunnerToken(token: string): Promise<AgentRow | null> {
   if (!token) return null;
   const { rows } = await pool.query<AgentRow>(
-    `select id, handle, display_name, repo, model, mode, runtime, runner_token
+    `select id, handle, display_name, repo, model, mode, runtime, runner_token,
+            runner_provider, runner_meta
      from participants
      where kind = 'agent' and runner_token = $1`,
     [token],
@@ -537,12 +545,49 @@ export async function agentByRunnerToken(token: string): Promise<AgentRow | null
 // Fetch a single agent by id, for the runner registry / lifecycle.
 export async function getAgentRow(id: string): Promise<AgentRow | null> {
   const { rows } = await pool.query<AgentRow>(
-    `select id, handle, display_name, repo, model, mode, runtime, runner_token
+    `select id, handle, display_name, repo, model, mode, runtime, runner_token,
+            runner_provider, runner_meta
      from participants
      where kind = 'agent' and id = $1`,
     [id],
   );
   return rows[0] ?? null;
+}
+
+// All sdk agents, for the idle-stop sweeper and boot reconciliation (they iterate every agent
+// regardless of connection state).
+export async function listSdkAgents(): Promise<AgentRow[]> {
+  const { rows } = await pool.query<AgentRow>(
+    `select id, handle, display_name, repo, model, mode, runtime, runner_token,
+            runner_provider, runner_meta
+     from participants where kind = 'agent' and runtime = 'sdk'`,
+  );
+  return rows;
+}
+
+export interface RunnerMeta {
+  machineId?: string;
+  volumeId?: string;
+}
+
+// Provider handle for an agent's runner (Fly: {machineId, volumeId}; null for docker/unprovisioned).
+export async function getRunnerMeta(agentId: string): Promise<RunnerMeta | null> {
+  const { rows } = await pool.query<{ runner_meta: RunnerMeta | null }>(
+    `select runner_meta from participants where id = $1`,
+    [agentId],
+  );
+  return rows[0]?.runner_meta ?? null;
+}
+
+export async function setRunnerMeta(agentId: string, meta: RunnerMeta): Promise<void> {
+  await pool.query(`update participants set runner_meta = $2 where id = $1`, [
+    agentId,
+    JSON.stringify(meta),
+  ]);
+}
+
+export async function clearRunnerMeta(agentId: string): Promise<void> {
+  await pool.query(`update participants set runner_meta = null where id = $1`, [agentId]);
 }
 
 // --- SDK runner: durable inbox + event log ---

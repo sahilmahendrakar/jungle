@@ -10,7 +10,8 @@ import * as auth from "./auth";
 import * as runners from "./runners";
 import * as att from "./attachments";
 import { storage } from "./storage";
-import { provisioner } from "./provisioner";
+import { provisionerFor, setProvisioner } from "./provisioner";
+import { FlyProvisioner } from "./provisioner-fly";
 
 // Safety net: this backend is a shared relay for every user, so a stray rejection from one
 // agent turn (e.g. a wedged session's "waiting on responses" 400) must not terminate the
@@ -24,6 +25,13 @@ process.on("uncaughtException", (err) => {
 
 // Where the SPA is served — GitHub OAuth callback redirects back here after connecting.
 const FRONTEND_URL = process.env.FRONTEND_URL ?? "http://localhost:5173";
+
+// Register the Fly provisioner alongside the always-present 'docker' one (provisioner.ts).
+// RUNNER_PROVIDER picks the default for newly-created agents until the Fly cutover
+// (item 6 of the migration rollout); a per-request override lets a single test agent opt in
+// early (see POST /api/agents below).
+setProvisioner("fly", new FlyProvisioner());
+const RUNNER_PROVIDER_DEFAULT = process.env.RUNNER_PROVIDER === "fly" ? "fly" : "docker";
 
 const app = express();
 app.use(express.json());
@@ -173,20 +181,28 @@ app.post("/api/agents", async (req, res) => {
       return res.status(400).json({ error: `unsupported mode: ${mode}` });
     }
     const runnerToken = randomBytes(32).toString("hex");
+    // Per-request override so a single throwaway agent can opt into Fly before the app-wide
+    // RUNNER_PROVIDER default flips (migration rollout step 4).
+    const runnerProvider = req.body?.runnerProvider === "fly" ? "fly" : RUNNER_PROVIDER_DEFAULT;
     const participant = await db.createParticipant({
       kind: "agent", handle, displayName, runtime: "sdk", runnerToken, repo: repo ?? null, model, mode,
+      runnerProvider,
     });
-    // Provision + start the container. Best-effort: if docker isn't available the agent row
-    // still exists and a runner can be started later; surface the error but don't 500 away
-    // the created agent.
-    try {
-      await provisioner.create({ id: participant.id, handle, runnerToken });
-      await provisioner.start(participant.id);
-      runners.noteProvisionerStart(participant.id); // show "waking" until the runner connects
-    } catch (e) {
-      console.error("provisioner create/start:", e);
-    }
-    return res.status(201).json(publicParticipant(participant));
+    // Respond immediately — provisioning (esp. a Fly machine's first boot / image pull) can
+    // take up to ~1min, and the row + status UI ("waking") already give the client everything
+    // it needs to show progress without blocking the response on it.
+    res.status(201).json(publicParticipant(participant));
+    // Provision + start in the background. Best-effort: if the provisioner isn't available the
+    // agent row still exists and a runner can be started later; just log the failure.
+    void (async () => {
+      try {
+        await provisionerFor(participant).create({ id: participant.id, handle, runnerToken });
+        await provisionerFor(participant).start(participant.id);
+        runners.noteProvisionerStart(participant.id); // show "waking" until the runner connects
+      } catch (e) {
+        console.error("provisioner create/start:", e);
+      }
+    })();
   } catch (e) {
     res.status(500).json({ error: String((e as Error).message ?? e) });
   }
@@ -243,7 +259,7 @@ app.delete("/api/agents/:id", async (req, res) => {
     runners.disconnect(agent.id);
     // Remove the container + its workspace volume. Best-effort: log but don't fail the request.
     try {
-      await provisioner.destroy(agent.id);
+      await provisionerFor(agent).destroy(agent.id);
     } catch (e) {
       console.error("provisioner destroy:", e);
     }
@@ -281,7 +297,7 @@ app.post("/api/agents/:id/_test/sleep", async (req, res) => {
   if (!auth.DEV_BYPASS) return res.status(404).end();
   const agent = await db.getParticipant(req.params.id);
   if (!agent || agent.kind !== "agent") return res.status(404).json({ error: "agent not found" });
-  await provisioner.stop(agent.id);
+  await provisionerFor(agent).stop(agent.id);
   runners.noteProvisionerStop(agent.id);
   res.json({ ok: true, status: runners.agentStatus(agent.id) });
 });
@@ -289,7 +305,7 @@ app.post("/api/agents/:id/_test/wake", async (req, res) => {
   if (!auth.DEV_BYPASS) return res.status(404).end();
   const agent = await db.getParticipant(req.params.id);
   if (!agent || agent.kind !== "agent") return res.status(404).json({ error: "agent not found" });
-  await provisioner.start(agent.id);
+  await provisionerFor(agent).start(agent.id);
   runners.noteProvisionerStart(agent.id);
   res.json({ ok: true, status: runners.agentStatus(agent.id) });
 });
@@ -947,6 +963,17 @@ async function runAgentReply(
     sdkContext.set(agent.id, { budget: replyBudget, channelId: triggerChannelId, threadRootId });
     await db.enqueueInboxItem(agent.id, input, attachments);
     await runners.drain(agent.id);
+    // Wake-on-message: if the agent's machine is stopped/absent (idle-stop, or just never
+    // started), a disconnected runner won't have received the drain above — kick the
+    // provisioner so it comes up and connects, at which point `hello` drains the real inbox.
+    if (!runners.isConnected(agent.id)) {
+      try {
+        await provisionerFor(agent).start(agent.id);
+        runners.noteProvisionerStart(agent.id);
+      } catch (e) {
+        console.error(`runAgentReply: wake failed for ${agent.id}:`, e);
+      }
+    }
     // The turn runs asynchronously on the runner; its status is reported by the runner itself.
   } catch (e) {
     console.error("runAgentReply:", e);
@@ -1148,6 +1175,34 @@ runners.init(server, {
 // Hourly attachment GC: abandoned composer uploads (never linked to a message) and blobs
 // whose rows were removed by FK cascades (deleted messages/channels/agents).
 setInterval(() => void att.gcOrphans().catch((e) => console.error("attachment gc:", e)), 60 * 60 * 1000).unref();
+
+// Boot reconciliation: seed each sdk agent's at-rest machine state (so the status dot doesn't
+// default to "idle" for a machine the sweeper stopped before the last restart) and recreate
+// any agent whose machine has vanished entirely (e.g. a Fly host reclaim). Fire-and-forget —
+// the server shouldn't block startup on every agent's provider round-trip.
+async function reconcileMachinesAtBoot(): Promise<void> {
+  const agents = await db.listSdkAgents();
+  for (const agent of agents) {
+    try {
+      const status = await provisionerFor(agent).status(agent.id);
+      runners.reseedMachineState(agent.id, status);
+      if (status === "absent") {
+        if (!agent.runner_token) {
+          console.error(`agent ${agent.id} missing runner_token — skip recreate`);
+          continue;
+        }
+        console.error(`agent @${agent.handle} has no machine at boot — recreating`);
+        await provisionerFor(agent).create({ id: agent.id, handle: agent.handle, runnerToken: agent.runner_token });
+        await provisionerFor(agent).start(agent.id);
+        runners.noteProvisionerStart(agent.id);
+      }
+    } catch (e) {
+      console.error(`boot reconciliation failed for ${agent.id}:`, e);
+    }
+  }
+}
+void reconcileMachinesAtBoot();
+runners.startIdleSweeper();
 
 const PORT = Number(process.env.PORT ?? 3001);
 server.listen(PORT, () => console.log(`jungle-backend on http://localhost:${PORT}`));

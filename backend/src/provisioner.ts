@@ -99,9 +99,18 @@ export class DockerProvisioner implements Provisioner {
   }
 }
 
-// The process-wide provisioner. Kept as a mutable export so tests / a future Cloudflare
-// backend can swap in a different implementation.
-export let provisioner: Provisioner = new DockerProvisioner();
-export function setProvisioner(p: Provisioner): void {
-  provisioner = p;
+// The process-wide provisioner registry, keyed by participants.runner_provider. 'docker' is
+// always registered; index.ts registers 'fly' at boot. provisionerFor() is the seam every
+// caller (index.ts, runners.ts) should use instead of reaching for a single global.
+const registry: Record<string, Provisioner> = { docker: new DockerProvisioner() };
+
+export function setProvisioner(kind: string, impl: Provisioner): void {
+  registry[kind] = impl;
+}
+
+export function provisionerFor(agent: { runner_provider?: string | null }): Provisioner {
+  const kind = agent.runner_provider || "docker";
+  const p = registry[kind];
+  if (!p) throw new Error(`no provisioner registered for runner_provider "${kind}"`);
+  return p;
 }

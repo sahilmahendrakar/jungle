@@ -47,7 +47,7 @@ of the request; responses echo them.
 | `confirm_request` | `id`, `toolName`, `input`, `suggestions?` | `canUseTool` fired; backend surfaces the confirmation card and replies `confirm_result` |
 | `turn_done` | `turnId`, `ok: boolean`, `error?` | turn finished; backend may immediately `enqueue` more. On `ok: false` the backend posts a crash notice from the agent into its last dispatch channel |
 | `context_usage` | `tokens`, `maxTokens`, `percent` | context-window occupancy after a turn (SDK `getContextUsage()`, falling back to the result message's usage). Backend persists it on the participant row and broadcasts `agent_context` to app sockets |
-| `fatal` | `error` | unrecoverable runner error (backend should surface + restart container) |
+| `fatal` | `error` | unrecoverable runner error. Backend notifies the triggering channel, then restarts the machine (provisioner `stop` + `start`), bounded by a loop guard (max 3 restarts / 10min per agent — past that it logs and leaves the machine stopped rather than crash-loop). A crash with **no** `fatal` frame (bare socket drop — OOM kill, host reclaim) isn't restarted directly here; it's recovered by the idle-stop sweeper's reverse path (disconnected + non-empty pending inbox → start) or the next wake-on-message, whichever comes first |
 
 ## Backend → runner frames
 
@@ -110,5 +110,14 @@ interface Provisioner {
 }
 ```
 
-The Docker implementation shells out to `docker`. A future Cloudflare implementation
-talks to a thin Worker that boots the same image; the runner protocol is unchanged.
+Implementations are kept in a small registry (`backend/src/provisioner.ts`), keyed by
+`participants.runner_provider` (`'docker'` | `'fly'`) and resolved per-agent via
+`provisionerFor(agent)` — there is no longer a single process-wide provisioner. `'docker'`
+(`DockerProvisioner`) shells out to `docker` on the EC2 box; `'fly'`
+(`backend/src/provisioner-fly.ts`, `FlyProvisioner`) talks directly to the Fly Machines REST
+API (`https://api.machines.dev/v1`) with a Bearer deploy token — no `flyctl` dependency.
+Per-agent Fly state (`{machineId, volumeId}`) is persisted on `participants.runner_meta` so a
+backend restart doesn't lose track of what it already provisioned. New agents default to
+whichever provider `RUNNER_PROVIDER` names (`docker` until the Fly cutover), with a
+per-request override (`runnerProvider: "fly"` on `POST /api/agents`) for opting a single test
+agent in early. A future non-Docker, non-Fly backend is just another registry entry.

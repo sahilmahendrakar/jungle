@@ -5,6 +5,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import * as db from "./db";
 import * as gh from "./github";
 import { signedPath } from "./attachments";
+import { provisionerFor } from "./provisioner";
 
 // The SDK-runner side of Jungle. A runner is a per-agent container that dials INTO the backend
 // at GET /api/runner?token=<runner_token> (WS upgrade) and speaks docs/runner-protocol.md.
@@ -95,6 +96,9 @@ interface RunnerConn {
   // Pending confirmations from this runner, keyed by the runner-chosen confirm id, so a
   // late/duplicate decision is a no-op.
   pendingConfirms: Set<string>;
+  // Timestamp this conn most recently entered "idle" (null while running or never yet idle
+  // on this socket). The idle-stop sweeper reads this to decide when to stop the machine.
+  idleSince: number | null;
 }
 
 // agentId -> the single live runner connection (a new connect replaces the old).
@@ -131,6 +135,15 @@ export function agentStatus(agentId: string): AgentStatus {
 
 function emitStatus(agentId: string): void {
   hooks?.onStatusChanged(agentId, agentStatus(agentId));
+}
+
+// Set a conn's turn state, tracking when it most recently entered idle (idleSince). Used by
+// the idle-stop sweeper to measure how long a connected-but-idle runner has been quiet.
+function setConnState(conn: RunnerConn, state: "idle" | "running"): void {
+  const enteringIdle = state === "idle" && (conn.state !== "idle" || conn.idleSince == null);
+  conn.state = state;
+  if (state === "running") conn.idleSince = null;
+  else if (enteringIdle) conn.idleSince = Date.now();
 }
 
 // Mark a machine as starting (call right after provisioner.start()). No-op if a socket is
@@ -300,6 +313,66 @@ export async function drain(agentId: string): Promise<void> {
   send(conn, { type: "enqueue", items });
 }
 
+// --- Idle-stop sweeper + fatal-restart ---
+
+// How long a connected-but-idle runner may sit with an empty inbox before its machine is
+// stopped (0 disables idle-stop entirely — e.g. for the Docker-on-EC2 dev box).
+const IDLE_STOP_MS = (() => {
+  const raw = Number(process.env.RUNNER_IDLE_STOP_SECONDS ?? 60);
+  return Number.isFinite(raw) && raw > 0 ? raw * 1000 : 0;
+})();
+const SWEEP_INTERVAL_MS = 15_000;
+let sweeping = false;
+
+// One sweep pass over every sdk agent: stop machines that have been idle too long with
+// nothing queued, and (reverse direction) start machines for a disconnected agent that has
+// pending inbox work — this heals the enqueue-vs-stop race and crashed runners with queued
+// work, uniformly for docker AND fly agents. Sequential (not Promise.all) so the pass itself
+// throttles calls to the Fly API (~1/s rate limit).
+async function sweepOnce(): Promise<void> {
+  if (sweeping) return;
+  sweeping = true;
+  try {
+    const agents = await db.listSdkAgents();
+    for (const agent of agents) {
+      const conn = conns.get(agent.id);
+      try {
+        if (conn) {
+          if (IDLE_STOP_MS === 0) continue;
+          if (conn.state !== "idle" || conn.idleSince == null) continue;
+          if (Date.now() - conn.idleSince < IDLE_STOP_MS) continue;
+          if ((await db.pendingInbox(agent.id)).length > 0) continue;
+          await provisionerFor(agent).stop(agent.id);
+          noteProvisionerStop(agent.id);
+        } else {
+          if (machine.get(agent.id)?.kind === "starting") continue;
+          if ((await db.pendingInbox(agent.id)).length === 0) continue;
+          await provisionerFor(agent).start(agent.id);
+          noteProvisionerStart(agent.id);
+        }
+      } catch (e) {
+        console.error(`idle-stop sweep: agent ${agent.id}:`, e);
+      }
+    }
+  } catch (e) {
+    console.error("idle-stop sweep:", e);
+  } finally {
+    sweeping = false;
+  }
+}
+
+// Start the recurring sweep. Call once at boot (index.ts, after runners.init).
+export function startIdleSweeper(): void {
+  setInterval(() => void sweepOnce(), SWEEP_INTERVAL_MS).unref();
+}
+
+// Loop guard for the fatal-restart path below: at most FATAL_RESTART_MAX restarts per agent
+// within FATAL_RESTART_WINDOW_MS, so a runner that fatals immediately on every boot doesn't
+// spin the machine forever.
+const fatalRestarts = new Map<string, number[]>();
+const FATAL_RESTART_WINDOW_MS = 10 * 60_000;
+const FATAL_RESTART_MAX = 3;
+
 // --- Live config pushes (called by the PATCH /api/agents/:id endpoint) ---
 
 export function setPermissionMode(agentId: string, mode: string): void {
@@ -408,6 +481,7 @@ async function accept(ws: WebSocket, token: string): Promise<void> {
     sessionId: null,
     sentInbox: new Set(),
     pendingConfirms: new Set(),
+    idleSince: null,
   };
   conns.set(agent.id, conn);
   console.log(`runner[${agent.id}] (@${agent.handle}) connected`);
@@ -445,7 +519,7 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
           return;
         }
         conn.sessionId = frame.sessionId ?? null;
-        conn.state = "idle";
+        setConnState(conn, "idle");
         conn.sentInbox.clear(); // reconnect: allow re-sending unacked inbox rows
         clearMachine(agentId); // a live hello always wins over stale starting/stopped state
         emitStatus(agentId);
@@ -455,7 +529,7 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         break;
       }
       case "state": {
-        conn.state = frame.state === "running" ? "running" : "idle";
+        setConnState(conn, frame.state === "running" ? "running" : "idle");
         if (frame.sessionId !== undefined) conn.sessionId = frame.sessionId;
         emitStatus(agentId);
         break;
@@ -537,7 +611,7 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         break;
       }
       case "turn_done": {
-        conn.state = "idle";
+        setConnState(conn, "idle");
         emitStatus(agentId);
         if (!frame.ok) {
           console.error(`runner[${agentId}] turn ${frame.turnId} failed:`, frame.error);
@@ -555,6 +629,25 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
       }
       case "fatal": {
         console.error(`runner[${agentId}] FATAL:`, frame.error);
+        const agent = await db.getAgentRow(agentId);
+        if (agent && hooks) hooks.onTurnFailed({ id: agent.id, handle: agent.handle }, `fatal: ${frame.error}`);
+        if (!agent) break;
+        const now = Date.now();
+        const hist = (fatalRestarts.get(agentId) ?? []).filter((t) => now - t < FATAL_RESTART_WINDOW_MS);
+        if (hist.length >= FATAL_RESTART_MAX) {
+          console.error(`runner[${agentId}] fatal-restart loop guard tripped — leaving stopped`);
+          fatalRestarts.set(agentId, hist);
+          break;
+        }
+        fatalRestarts.set(agentId, [...hist, now]);
+        try {
+          await provisionerFor(agent).stop(agentId);
+          noteProvisionerStop(agentId);
+          await provisionerFor(agent).start(agentId);
+          noteProvisionerStart(agentId);
+        } catch (e) {
+          console.error(`runner[${agentId}] fatal-restart failed:`, e);
+        }
         break;
       }
       default:

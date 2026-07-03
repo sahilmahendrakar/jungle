@@ -39,6 +39,12 @@ alter table participants add column if not exists context_tokens     integer;
 alter table participants add column if not exists context_max_tokens integer;
 alter table participants add column if not exists context_updated_at timestamptz;
 
+-- Per-agent runner provider (gradual Docker -> Fly rollout). 'docker' keeps today's behavior;
+-- 'fly' routes provisioner calls to FlyProvisioner. runner_meta holds provider handles
+-- (Fly: {machineId, volumeId}); null for docker. See migrations/007_fly_provisioner.sql.
+alter table participants add column if not exists runner_provider text not null default 'docker';
+alter table participants add column if not exists runner_meta jsonb;
+
 -- Durable per-agent work queue for sdk runners. A dispatch inserts a row; the runner pulls it
 -- (`enqueue`) and acks it (`consumed`) -> delivered_at set. Undelivered rows survive the runner
 -- being offline and are re-sent on reconnect.
