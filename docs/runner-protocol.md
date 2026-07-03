@@ -72,13 +72,14 @@ Wire values are the SDK's: `default`, `acceptEdits`, `plan`, `bypassPermissions`
 Registered in the runner as an in-process SDK MCP server (`createSdkMcpServer`),
 server name `jungle`, tool `send_message` — auto-allowed via
 `allowedTools: ["mcp__jungle__send_message"]`. Schema:
-`{to: "#channel"|"@handle", body: string, files?: string[], threadRootId?: string,
+`{to: "#channel"|"@handle", body: string, files?: string[], threadRootId?: string | null,
 alsoToChannel?: boolean}`. It is the agent's only way to speak; plain assistant text is
 never shown to users. `files` are workspace paths (max 10 × 25MB); the runner uploads
 each via `POST /api/attachments` before sending the frame with the resulting
 `attachmentIds`. `threadRootId`/`alsoToChannel` are the thread controls (see the
 `send_message` frame row above); agents normally omit them and let the backend thread
-replies automatically.
+replies automatically. Passing `threadRootId: null` explicitly (vs. omitting the field)
+forces a top-level post even when the agent was addressed inside a thread.
 
 ## Attachments (HTTP, not WS)
 

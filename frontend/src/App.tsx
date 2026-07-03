@@ -688,8 +688,10 @@ export function App({
     setNotice("");
   }
 
-  // Open a thread in the right panel (root + replies derive from loaded messages). Opening marks
-  // it read, which clears its per-thread unread everywhere.
+  // Open a thread in the right panel (root + replies derive from loaded messages — safe today
+  // because getMessages returns the whole channel with no pagination; if that ever changes,
+  // route this through getThread like openThreadFromList does for a not-yet-loaded channel).
+  // Opening marks it read, which clears its per-thread unread everywhere.
   function openThread(rootId: string) {
     setThreadsListOpen(false);
     setThreadRootId(rootId);

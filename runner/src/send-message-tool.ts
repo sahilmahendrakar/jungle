@@ -52,11 +52,13 @@ export function createJungleMcpServer(bridge: SendMessageBridge, uploadFile: Fil
         .describe("Workspace file paths to attach (images render inline in the chat)"),
       threadRootId: z
         .string()
+        .nullable()
         .optional()
         .describe(
           "Reply inside a thread, by the root message's id. Usually omit this: when you were " +
-            "addressed in a thread your reply is placed there automatically. Set it only to " +
-            "start/continue a specific thread you know the root id of.",
+            "addressed in a thread your reply is placed there automatically. Set it explicitly " +
+            "to start/continue a specific thread you know the root id of, or pass null to force " +
+            "a top-level post even when you were addressed inside a thread.",
         ),
       alsoToChannel: z
         .boolean()
@@ -81,7 +83,9 @@ export function createJungleMcpServer(bridge: SendMessageBridge, uploadFile: Fil
             to: args.to,
             body: args.body,
             ...(attachmentIds.length ? { attachmentIds } : {}),
-            ...(args.threadRootId ? { threadRootId: args.threadRootId } : {}),
+            // Forward an explicit null (force top-level) too — only a truly omitted field
+            // should fall through to the backend's "default to the triggering thread" behavior.
+            ...(args.threadRootId !== undefined ? { threadRootId: args.threadRootId } : {}),
             ...(args.alsoToChannel ? { alsoToChannel: true } : {}),
           }),
           SEND_TIMEOUT_MS,
