@@ -15,10 +15,21 @@ export const WS_BASE =
   env.VITE_WS_URL?.replace(/\/+$/, "") ??
   (apiUrl ? apiUrl.replace(/^http/, "ws") : `${secure ? "wss" : "ws"}://${host}:3001`);
 
-// Current Firebase ID token, set by the auth provider; attached to authed requests.
+// Last Firebase ID token pushed by the auth provider's onIdTokenChanged listener. Used only
+// to tell withDevAuth whether we're in Firebase mode at all — NOT as the bearer token itself,
+// since that listener can lag real token expiry (backgrounded/suspended tab), leaving this
+// stale for up to the token's remaining lifetime.
 let authToken: string | null = null;
 export function setAuthToken(t: string | null) {
   authToken = t;
+}
+// Fetches a token guaranteed fresh at call time: Firebase's getIdToken() checks the cached
+// JWT's exp locally and silently re-mints if it's stale, so calling this right before each
+// request (rather than trusting the last onIdTokenChanged push) avoids "auth required" 401s
+// from a technically-expired-but-not-yet-refreshed cached token.
+let tokenProvider: (() => Promise<string | null>) | null = null;
+export function setTokenProvider(fn: (() => Promise<string | null>) | null) {
+  tokenProvider = fn;
 }
 // Dev/test identity (?as=<id>): when Firebase isn't configured there's no token, so
 // requester-gated endpoints authenticate via a participantId the backend trusts under
@@ -27,8 +38,13 @@ let devParticipantId: string | null = null;
 export function setDevParticipantId(id: string | null) {
   devParticipantId = id;
 }
-function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
-  return authToken ? { authorization: `Bearer ${authToken}`, ...extra } : extra;
+// fetch wrapper that attaches a just-in-time bearer token to authed requests.
+async function authFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const token = tokenProvider ? await tokenProvider() : authToken;
+  const headers = token
+    ? { authorization: `Bearer ${token}`, ...(init.headers as Record<string, string> | undefined) }
+    : init.headers;
+  return fetch(url, { ...init, headers });
 }
 // Append the dev participantId to a URL's query when running without a token, so GET
 // endpoints gated by requester() resolve an identity under DEV_BYPASS. No-op in prod.
@@ -92,9 +108,9 @@ export interface UnreadThread {
 export function uploadAttachment(file: File): Promise<Attachment> {
   const mime = file.type || "application/octet-stream";
   const qs = `filename=${encodeURIComponent(file.name)}&mime=${encodeURIComponent(mime)}`;
-  return fetch(withDevAuth(`${BASE}/api/attachments?${qs}`), {
+  return authFetch(withDevAuth(`${BASE}/api/attachments?${qs}`), {
     method: "POST",
-    headers: authHeaders({ "content-type": "application/octet-stream" }),
+    headers: { "content-type": "application/octet-stream" },
     body: file,
   }).then((r) => json<Attachment>(r, "upload failed"));
 }
@@ -165,9 +181,9 @@ export function updateAgent(
   id: string,
   patch: { displayName?: string; mode?: string; model?: string },
 ): Promise<Participant> {
-  return fetch(`${BASE}/api/agents/${id}`, {
+  return authFetch(`${BASE}/api/agents/${id}`, {
     method: "PATCH",
-    headers: authHeaders({ "content-type": "application/json" }),
+    headers: { "content-type": "application/json" },
     body: JSON.stringify(patch),
   }).then((r) => json<Participant>(r, "failed to update agent"));
 }
@@ -175,9 +191,8 @@ export function updateAgent(
 // Permanently delete an agent: tears down its runner/container and removes all of its data
 // (its DMs and the messages it sent). Irreversible.
 export function deleteAgent(id: string): Promise<{ ok: boolean; error?: string }> {
-  return fetch(withDevAuth(`${BASE}/api/agents/${id}`), {
+  return authFetch(withDevAuth(`${BASE}/api/agents/${id}`), {
     method: "DELETE",
-    headers: authHeaders(),
   }).then((r) => json<{ ok: boolean; error?: string }>(r, "failed to delete agent"));
 }
 
@@ -205,25 +220,23 @@ export function fetchAgentEvents(
   if (opts.before != null) qs.set("before", String(opts.before));
   if (opts.limit != null) qs.set("limit", String(opts.limit));
   const q = qs.toString();
-  return fetch(withDevAuth(`${BASE}/api/agents/${id}/events${q ? `?${q}` : ""}`), {
-    headers: authHeaders(),
-  }).then((r) => json<AgentEventsPage>(r, "failed to load activity"));
+  return authFetch(withDevAuth(`${BASE}/api/agents/${id}/events${q ? `?${q}` : ""}`)).then((r) =>
+    json<AgentEventsPage>(r, "failed to load activity"),
+  );
 }
 
 // Stop an sdk agent's currently-running turn.
 export function interruptAgent(id: string): Promise<{ ok: boolean; error?: string }> {
-  return fetch(withDevAuth(`${BASE}/api/agents/${id}/interrupt`), {
+  return authFetch(withDevAuth(`${BASE}/api/agents/${id}/interrupt`), {
     method: "POST",
-    headers: authHeaders(),
   }).then((r) => json<{ ok: boolean; error?: string }>(r, "failed to stop agent"));
 }
 
 // Ask an sdk agent to compact/summarize its session context. Runs when the agent is next
 // idle; the profile meter updates when the runner reports the post-compaction usage.
 export function compactAgent(id: string): Promise<{ ok: boolean; error?: string }> {
-  return fetch(withDevAuth(`${BASE}/api/agents/${id}/compact`), {
+  return authFetch(withDevAuth(`${BASE}/api/agents/${id}/compact`), {
     method: "POST",
-    headers: authHeaders(),
   }).then((r) => json<{ ok: boolean; error?: string }>(r, "failed to compact context"));
 }
 
@@ -238,9 +251,9 @@ export function markChannelRead(
   channelId: string,
   seq?: number,
 ): Promise<{ ok: boolean; lastReadSeq: number }> {
-  return fetch(withDevAuth(`${BASE}/api/channels/${channelId}/read`), {
+  return authFetch(withDevAuth(`${BASE}/api/channels/${channelId}/read`), {
     method: "POST",
-    headers: authHeaders({ "content-type": "application/json" }),
+    headers: { "content-type": "application/json" },
     body: JSON.stringify(seq != null ? { seq } : {}),
   }).then((r) => json<{ ok: boolean; lastReadSeq: number }>(r, "failed to mark read"));
 }
@@ -271,9 +284,9 @@ export function getMessages(channelId: string): Promise<Message[]> {
 // Full transcript of one thread (root + replies, seq order). Used to lazy-load a thread the
 // client doesn't already hold locally (e.g. opened from the Threads view in another channel).
 export function getThread(channelId: string, rootId: string): Promise<Message[]> {
-  return fetch(withDevAuth(`${BASE}/api/channels/${channelId}/threads/${rootId}`), {
-    headers: authHeaders(),
-  }).then((r) => json<Message[]>(r, "failed to load thread"));
+  return authFetch(withDevAuth(`${BASE}/api/channels/${channelId}/threads/${rootId}`)).then((r) =>
+    json<Message[]>(r, "failed to load thread"),
+  );
 }
 
 // Mark a thread read for the current user (participation-gated thread unreads): advances my
@@ -282,16 +295,16 @@ export function markThreadRead(
   rootId: string,
   seq?: number,
 ): Promise<{ ok: boolean; lastReadSeq: number }> {
-  return fetch(withDevAuth(`${BASE}/api/threads/${rootId}/read`), {
+  return authFetch(withDevAuth(`${BASE}/api/threads/${rootId}/read`), {
     method: "POST",
-    headers: authHeaders({ "content-type": "application/json" }),
+    headers: { "content-type": "application/json" },
     body: JSON.stringify(seq != null ? { seq } : {}),
   }).then((r) => json<{ ok: boolean; lastReadSeq: number }>(r, "failed to mark thread read"));
 }
 
 // My followed threads (authored root / replied / @mentioned) that have unread replies.
 export function listUnreadThreads(): Promise<UnreadThread[]> {
-  return fetch(withDevAuth(`${BASE}/api/threads/unread`), { headers: authHeaders() }).then((r) =>
+  return authFetch(withDevAuth(`${BASE}/api/threads/unread`)).then((r) =>
     json<UnreadThread[]>(r, "failed to load threads"),
   );
 }
@@ -311,9 +324,9 @@ export function createDm(participantId: string, otherId: string): Promise<{ id: 
 
 // Approve or deny a pending tool confirmation from an always_ask agent.
 export function confirmToolCall(confirmId: string, decision: "allow" | "deny"): Promise<{ ok: boolean }> {
-  return fetch(`${BASE}/api/agents/confirm`, {
+  return authFetch(`${BASE}/api/agents/confirm`, {
     method: "POST",
-    headers: authHeaders({ "content-type": "application/json" }),
+    headers: { "content-type": "application/json" },
     body: JSON.stringify({ confirmId, decision }),
   }).then((r) => json<{ ok: boolean }>(r, "failed to submit decision"));
 }
@@ -321,31 +334,29 @@ export function confirmToolCall(confirmId: string, decision: "allow" | "deny"): 
 // --- Channel members + delete ---
 
 export function listChannelMembers(channelId: string): Promise<Participant[]> {
-  return fetch(`${BASE}/api/channels/${channelId}/members`, { headers: authHeaders() }).then((r) =>
+  return authFetch(`${BASE}/api/channels/${channelId}/members`).then((r) =>
     json<Participant[]>(r, "failed to load members"),
   );
 }
 
 // Add a participant (by handle) to a channel. Returns the added participant.
 export function addChannelMember(channelId: string, handle: string): Promise<Participant> {
-  return fetch(`${BASE}/api/channels/${channelId}/members`, {
+  return authFetch(`${BASE}/api/channels/${channelId}/members`, {
     method: "POST",
-    headers: authHeaders({ "content-type": "application/json" }),
+    headers: { "content-type": "application/json" },
     body: JSON.stringify({ handle }),
   }).then((r) => json<Participant>(r, "failed to add member"));
 }
 
 export function removeChannelMember(channelId: string, participantId: string): Promise<{ ok: boolean }> {
-  return fetch(`${BASE}/api/channels/${channelId}/members/${participantId}`, {
+  return authFetch(`${BASE}/api/channels/${channelId}/members/${participantId}`, {
     method: "DELETE",
-    headers: authHeaders(),
   }).then((r) => json<{ ok: boolean }>(r, "failed to remove member"));
 }
 
 export function deleteChannel(channelId: string): Promise<{ ok: boolean }> {
-  return fetch(`${BASE}/api/channels/${channelId}`, {
+  return authFetch(`${BASE}/api/channels/${channelId}`, {
     method: "DELETE",
-    headers: authHeaders(),
   }).then((r) => json<{ ok: boolean }>(r, "failed to delete channel"));
 }
 
@@ -373,7 +384,7 @@ async function json<T>(r: Response, fallbackErr: string): Promise<T> {
 }
 
 export function getMe(): Promise<Me> {
-  return fetch(`${BASE}/api/me`, { headers: authHeaders() }).then((r) => json<Me>(r, "failed to load profile"));
+  return authFetch(`${BASE}/api/me`).then((r) => json<Me>(r, "failed to load profile"));
 }
 
 export function checkHandle(handle: string): Promise<{ available: boolean; valid: boolean }> {
@@ -383,25 +394,23 @@ export function checkHandle(handle: string): Promise<{ available: boolean; valid
 }
 
 export function completeOnboarding(handle: string, displayName: string): Promise<Participant> {
-  return fetch(`${BASE}/api/onboarding`, {
+  return authFetch(`${BASE}/api/onboarding`, {
     method: "POST",
-    headers: authHeaders({ "content-type": "application/json" }),
+    headers: { "content-type": "application/json" },
     body: JSON.stringify({ handle, displayName }),
   }).then((r) => json<Participant>(r, "onboarding failed"));
 }
 
 export function githubConnectUrl(): Promise<{ url: string }> {
-  return fetch(`${BASE}/api/github/connect-url`, {
+  return authFetch(`${BASE}/api/github/connect-url`, {
     method: "POST",
-    headers: authHeaders(),
   }).then((r) => json<{ url: string }>(r, "failed to start GitHub connect"));
 }
 
 // Disconnect the current user's GitHub account (removes stored tokens).
 export function disconnectGithub(): Promise<{ ok: boolean }> {
-  return fetch(`${BASE}/api/github/connection`, {
+  return authFetch(`${BASE}/api/github/connection`, {
     method: "DELETE",
-    headers: authHeaders(),
   }).then((r) => json<{ ok: boolean }>(r, "failed to disconnect GitHub"));
 }
 
@@ -414,7 +423,7 @@ export interface GithubStatus {
 }
 
 export function getGithubStatus(): Promise<GithubStatus> {
-  return fetch(`${BASE}/api/github/status`, { headers: authHeaders() }).then((r) =>
+  return authFetch(`${BASE}/api/github/status`).then((r) =>
     json<GithubStatus>(r, "failed to load GitHub status"),
   );
 }
@@ -428,7 +437,7 @@ export interface Repo {
 // List the user's GitHub repos for the picker. A 409 (GitHub not connected) is returned as
 // { connected: false } rather than thrown, so the UI can fall back to manual entry.
 export function listGithubRepos(): Promise<{ connected: boolean; repos?: Repo[]; error?: string }> {
-  return fetch(`${BASE}/api/github/repos`, { headers: authHeaders() }).then(async (r) => {
+  return authFetch(`${BASE}/api/github/repos`).then(async (r) => {
     const j = await r.json().catch(() => ({}));
     if (r.status === 409) return { connected: false, error: (j as { error?: string }).error };
     if (!r.ok) throw new Error((j as { error?: string }).error ?? "failed to list repos");
