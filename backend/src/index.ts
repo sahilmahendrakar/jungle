@@ -57,7 +57,12 @@ function publicParticipant<T extends { runner_token?: unknown }>(p: T): Omit<T, 
 
 app.get("/api/participants", async (_req, res) => {
   try {
-    res.json((await db.listParticipants()).map(publicParticipant));
+    res.json(
+      (await db.listParticipants()).map((p) => ({
+        ...publicParticipant(p),
+        ...(p.kind === "agent" ? { status: runners.agentStatus(p.id) } : {}),
+      })),
+    );
   } catch (e) {
     res.status(500).json({ error: String((e as Error).message ?? e) });
   }
@@ -177,6 +182,7 @@ app.post("/api/agents", async (req, res) => {
     try {
       await provisioner.create({ id: participant.id, handle, runnerToken });
       await provisioner.start(participant.id);
+      runners.noteProvisionerStart(participant.id); // show "waking" until the runner connects
     } catch (e) {
       console.error("provisioner create/start:", e);
     }
@@ -265,6 +271,27 @@ app.get("/api/agents/:id/events", async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: String((e as Error).message ?? e) });
   }
+});
+
+// Dev-only: simulate the idle-stop sweeper / wake-on-message that the Fly provisioner will
+// drive, so the "sleeping"/"waking" statuses can be exercised end-to-end before that lands.
+// These mirror the exact provisioner + status calls the real sweeper/wake path will make.
+// 404 in production (DEV_BYPASS off) so they never exist on a real deployment.
+app.post("/api/agents/:id/_test/sleep", async (req, res) => {
+  if (!auth.DEV_BYPASS) return res.status(404).end();
+  const agent = await db.getParticipant(req.params.id);
+  if (!agent || agent.kind !== "agent") return res.status(404).json({ error: "agent not found" });
+  await provisioner.stop(agent.id);
+  runners.noteProvisionerStop(agent.id);
+  res.json({ ok: true, status: runners.agentStatus(agent.id) });
+});
+app.post("/api/agents/:id/_test/wake", async (req, res) => {
+  if (!auth.DEV_BYPASS) return res.status(404).end();
+  const agent = await db.getParticipant(req.params.id);
+  if (!agent || agent.kind !== "agent") return res.status(404).json({ error: "agent not found" });
+  await provisioner.start(agent.id);
+  runners.noteProvisionerStart(agent.id);
+  res.json({ ok: true, status: runners.agentStatus(agent.id) });
 });
 
 // Interrupt an sdk agent's running turn (the Activity pane's Stop button). Queued messages
@@ -895,12 +922,8 @@ async function runAgentReply(
   attachments: db.AttachmentMeta[] = [],
   threadRootId: string | null = null,
 ) {
-  // Let the channel show "@agent is working…" for the duration of the turn.
-  const status = (state: "working" | "idle") =>
-    fanOut(triggerChannelId, {
-      type: "agent_status", channelId: triggerChannelId, agentId: agent.id, handle: agent.handle, state,
-    });
-  await status("working");
+  // The agent's working/idle status is now tracked accurately from the runner's real turn
+  // lifecycle and broadcast as `agent_status_changed` (see runners.ts) — no per-dispatch flash.
   try {
     // In a thread, give the agent the THREAD transcript (not the whole channel) and tell it its
     // reply is auto-placed in the thread. Otherwise the usual recent-channel context.
@@ -924,11 +947,9 @@ async function runAgentReply(
     sdkContext.set(agent.id, { budget: replyBudget, channelId: triggerChannelId, threadRootId });
     await db.enqueueInboxItem(agent.id, input, attachments);
     await runners.drain(agent.id);
-    // The turn runs asynchronously on the runner; we don't hold "working" for its duration.
+    // The turn runs asynchronously on the runner; its status is reported by the runner itself.
   } catch (e) {
     console.error("runAgentReply:", e);
-  } finally {
-    await status("idle");
   }
 }
 
@@ -1116,6 +1137,11 @@ runners.init(server, {
       });
       await fanOut(channelId, { type: "message", message: att.withUrls(msg) });
     })().catch((e) => console.error("onTurnFailed:", e));
+  },
+  // The agent's live status changed -> broadcast workspace-wide (agent-level fact, not
+  // channel-scoped) so every client's presence dot updates.
+  onStatusChanged: (agentId, status) => {
+    broadcastAll({ type: "agent_status_changed", agentId, status });
   },
 });
 

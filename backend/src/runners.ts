@@ -58,6 +58,8 @@ export interface RunnerHooks {
   // A turn died (SDK crash, OOM kill, API error). Tell the humans who were waiting —
   // otherwise the agent just goes silent mid-task.
   onTurnFailed: (agent: { id: string; handle: string }, error: string) => void;
+  // The agent's live status changed (see AgentStatus). Backend broadcasts it to app sockets.
+  onStatusChanged: (agentId: string, status: AgentStatus) => void;
 }
 
 let hooks: RunnerHooks | null = null;
@@ -100,6 +102,79 @@ const conns = new Map<string, RunnerConn>();
 
 export function isConnected(agentId: string): boolean {
   return conns.has(agentId);
+}
+
+// --- Agent status (Working / Idle / Sleeping / Waking up) ---
+
+// The single user-facing status for an agent, derived from two independent facts: whether a
+// runner socket is currently connected (+ its turn state), and the machine's lifecycle when no
+// socket is connected. Connected always wins; sleeping is only ever set by an explicit
+// noteProvisionerStop (never inferred from a dropped socket).
+export type AgentStatus = "working" | "idle" | "sleeping" | "waking";
+
+// Machine lifecycle bookkeeping, tracked only while NO socket is connected. `starting` = a
+// provisioner.start() was issued and we're waiting for the runner's `hello`; `stopped` = the
+// machine was intentionally stopped (idle-stop sweeper). Cleared the instant `hello` arrives.
+const machine = new Map<string, { kind: "starting" | "stopped"; timer?: NodeJS.Timeout }>();
+
+// How long to show "waking" before giving up (a cold machine + image pull + runner boot).
+const WAKE_TIMEOUT_MS = 3 * 60_000;
+
+export function agentStatus(agentId: string): AgentStatus {
+  const conn = conns.get(agentId);
+  if (conn) return conn.state === "running" ? "working" : "idle"; // connected always wins
+  const m = machine.get(agentId);
+  if (m?.kind === "starting") return "waking";
+  if (m?.kind === "stopped") return "sleeping";
+  return "idle"; // no signal either way — the pre-idle-stop (Docker) baseline
+}
+
+function emitStatus(agentId: string): void {
+  hooks?.onStatusChanged(agentId, agentStatus(agentId));
+}
+
+// Mark a machine as starting (call right after provisioner.start()). No-op if a socket is
+// already connected. Starts a wake-timeout so a machine that never says `hello` falls back to
+// idle rather than showing "waking" forever.
+export function noteProvisionerStart(agentId: string): void {
+  if (conns.has(agentId)) return;
+  const prev = machine.get(agentId);
+  if (prev?.timer) clearTimeout(prev.timer);
+  const timer = setTimeout(() => {
+    if (!conns.has(agentId)) {
+      machine.delete(agentId);
+      console.error(`runner[${agentId}] never sent hello after start (wake timeout)`);
+      emitStatus(agentId);
+    }
+  }, WAKE_TIMEOUT_MS);
+  machine.set(agentId, { kind: "starting", timer });
+  emitStatus(agentId);
+}
+
+// Mark a machine as intentionally stopped (call right after provisioner.stop()). This is the
+// ONLY way an agent reaches "sleeping".
+export function noteProvisionerStop(agentId: string): void {
+  const prev = machine.get(agentId);
+  if (prev?.timer) clearTimeout(prev.timer);
+  machine.set(agentId, { kind: "stopped" });
+  emitStatus(agentId);
+}
+
+// Boot reconciliation: seed at-rest state from the real provisioner. Only "stopped" is
+// recorded; a running-but-not-yet-connected machine shows idle briefly until `hello` arrives.
+export function reseedMachineState(agentId: string, providerStatus: "running" | "stopped" | "absent"): void {
+  if (providerStatus === "stopped") {
+    machine.set(agentId, { kind: "stopped" });
+    emitStatus(agentId);
+  }
+}
+
+// Drop any machine bookkeeping (clearing a live timer). Called when a socket connects or the
+// agent is deleted.
+function clearMachine(agentId: string): void {
+  const m = machine.get(agentId);
+  if (m?.timer) clearTimeout(m.timer);
+  machine.delete(agentId);
 }
 
 function send(conn: RunnerConn, frame: Record<string, unknown>): void {
@@ -256,9 +331,11 @@ export function compact(agentId: string): boolean {
 }
 
 // Runner liveness/state for the UI (Activity header, profile status dot).
-export function runnerState(agentId: string): { connected: boolean; state: "idle" | "running" } {
+export function runnerState(
+  agentId: string,
+): { connected: boolean; state: "idle" | "running"; status: AgentStatus } {
   const conn = conns.get(agentId);
-  return { connected: !!conn, state: conn?.state ?? "idle" };
+  return { connected: !!conn, state: conn?.state ?? "idle", status: agentStatus(agentId) };
 }
 
 // Drop a runner connection (agent deletion). Closes the socket with 4003 so the runner
@@ -267,6 +344,7 @@ export function disconnect(agentId: string): void {
   const conn = conns.get(agentId);
   if (!conn) return;
   conns.delete(agentId);
+  clearMachine(agentId);
   try {
     conn.ws.close(4003, "agent deleted");
   } catch {
@@ -336,7 +414,12 @@ async function accept(ws: WebSocket, token: string): Promise<void> {
 
   ws.on("close", () => {
     // Only forget this socket if it's still the registered one (a replacement may own it now).
-    if (conns.get(agent.id) === conn) conns.delete(agent.id);
+    if (conns.get(agent.id) === conn) {
+      conns.delete(agent.id);
+      // No machine bookkeeping here: an unexpected drop (crash/blip) falls through to idle, not
+      // sleeping — sleeping is only ever set by an explicit noteProvisionerStop.
+      emitStatus(agent.id);
+    }
     console.log(`runner[${agent.id}] disconnected`);
   });
 
@@ -364,6 +447,8 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         conn.sessionId = frame.sessionId ?? null;
         conn.state = "idle";
         conn.sentInbox.clear(); // reconnect: allow re-sending unacked inbox rows
+        clearMachine(agentId); // a live hello always wins over stale starting/stopped state
+        emitStatus(agentId);
         send(conn, await buildConfigure(agent));
         // Runner is idle after configure — push any queued work.
         await drain(agentId);
@@ -372,6 +457,7 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
       case "state": {
         conn.state = frame.state === "running" ? "running" : "idle";
         if (frame.sessionId !== undefined) conn.sessionId = frame.sessionId;
+        emitStatus(agentId);
         break;
       }
       case "turn_started": {
@@ -452,6 +538,7 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
       }
       case "turn_done": {
         conn.state = "idle";
+        emitStatus(agentId);
         if (!frame.ok) {
           console.error(`runner[${agentId}] turn ${frame.turnId} failed:`, frame.error);
           const agent = await db.getAgentRow(agentId);

@@ -626,6 +626,7 @@ export interface ChannelListItem {
   dm_with: string | null;
   unread_count: number; // messages after the requester's last_read_seq, excluding their own
   has_mention: boolean; // any unread message @mentions the requester
+  member_agent_ids: string[]; // agent members of this channel (drives the row's status dot)
 }
 
 export async function listChannels(participantId?: string): Promise<ChannelListItem[]> {
@@ -643,7 +644,15 @@ export async function listChannels(participantId?: string): Promise<ChannelListI
                 where m.channel_id = c.id and m.participant_id <> $1 limit 1
               ) end as dm_with,
               count(msg.id)::int as unread_count,
-              coalesce(bool_or(mention.participant_id is not null), false) as has_mention
+              coalesce(bool_or(mention.participant_id is not null), false) as has_mention,
+              -- Agent members as a correlated subquery (not a join) so it can't fan out and
+              -- distort the unread_count above. Drives the row's live status dot in the UI.
+              coalesce((
+                select array_agg(ap.id)
+                from channel_members acm
+                join participants ap on ap.id = acm.participant_id and ap.kind = 'agent'
+                where acm.channel_id = c.id
+              ), '{}') as member_agent_ids
        from channels c
        join channel_members cm on cm.channel_id = c.id
        left join channel_reads cr on cr.channel_id = c.id and cr.participant_id = $1
@@ -667,8 +676,14 @@ export async function listChannels(participantId?: string): Promise<ChannelListI
     return rows;
   }
   const { rows } = await pool.query(
-    `select id, name, kind, null as dm_with, 0 as unread_count, false as has_mention
-     from channels order by created_at`,
+    `select c.id, c.name, c.kind, null as dm_with, 0 as unread_count, false as has_mention,
+            coalesce((
+              select array_agg(ap.id)
+              from channel_members acm
+              join participants ap on ap.id = acm.participant_id and ap.kind = 'agent'
+              where acm.channel_id = c.id
+            ), '{}') as member_agent_ids
+     from channels c order by c.created_at`,
   );
   return rows;
 }

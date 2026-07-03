@@ -23,6 +23,7 @@ import {
   listUnreadThreads,
   WS_BASE,
   type AgentEvent,
+  type AgentStatus,
   type Attachment,
   type Channel,
   type Message,
@@ -183,6 +184,25 @@ const newId = () =>
 const fmtTime = (iso: string) =>
   new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 
+// Status priority for a channel row with several agent members: the most noteworthy wins.
+const STATUS_RANK: Record<AgentStatus, number> = { working: 0, waking: 1, idle: 2, sleeping: 3 };
+
+// Tailwind classes for an agent's status dot. sleeping is slate (deliberately distinct from
+// the muted gray we'd use for a truly-offline participant).
+const STATUS_DOT: Record<AgentStatus, string> = {
+  working: "animate-pulse bg-emerald-400",
+  idle: "bg-emerald-500/60",
+  waking: "animate-pulse bg-amber-400",
+  sleeping: "bg-slate-400/70",
+};
+
+const STATUS_LABEL: Record<AgentStatus, string> = {
+  working: "Working",
+  idle: "Idle",
+  waking: "Waking up",
+  sleeping: "Sleeping",
+};
+
 // Animated "•••" used in the working indicator.
 function WorkingDots() {
   return (
@@ -219,7 +239,6 @@ export function App({
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState<PendingAttachment[]>([]); // composer attachments
   const [notice, setNotice] = useState("");
-  const [working, setWorking] = useState<Record<string, string[]>>({}); // channelId -> agent handles
   // New-channel form
   const [showNew, setShowNew] = useState(false);
   const [newName, setNewName] = useState("");
@@ -484,18 +503,15 @@ export function App({
       };
       ws.onmessage = (e) => {
         const evt = JSON.parse(e.data);
-        if (evt.type === "agent_status") {
-          setWorking((w) => {
-            const set = new Set(w[evt.channelId] ?? []);
-            if (evt.state === "working") set.add(evt.handle);
-            else set.delete(evt.handle);
-            return { ...w, [evt.channelId]: [...set] };
-          });
+        if (evt.type === "agent_status_changed") {
+          setPeople((ps) => ps.map((p) => (p.id === evt.agentId ? { ...p, status: evt.status } : p)));
           return;
         }
         if (evt.type === "members_changed") {
           if (evt.channelId === selectedRef.current)
             listChannelMembers(evt.channelId).then(setMembers).catch(() => {});
+          // Keep member_agent_ids fresh for the sidebar status dot even on non-open channels.
+          reloadChannels();
           return;
         }
         if (evt.type === "channel_deleted") {
@@ -996,7 +1012,22 @@ export function App({
   const dmChannelWith = (handle: string) => dms.find((c) => c.dm_with === handle);
   const personByHandle = (h?: string | null) =>
     h ? people.find((p) => p.handle === h) : undefined;
-  const workingHere = (selected && working[selected]) || [];
+  // Per-agent status lookup + the priority rule for a channel row with several agent members.
+  const peopleById = new Map(people.map((p) => [p.id, p]));
+  const rowAgentStatus = (agentIds?: string[]): AgentStatus | undefined => {
+    let best: AgentStatus | undefined;
+    for (const id of agentIds ?? []) {
+      const s = peopleById.get(id)?.status;
+      if (s && (!best || STATUS_RANK[s] < STATUS_RANK[best])) best = s;
+    }
+    return best;
+  };
+  // Agents working/waking in the currently-open channel (drives the header banner). Read status
+  // from the live `people` map rather than the `members` roster snapshot so it stays current.
+  const busyMembers = members
+    .filter((m) => m.kind === "agent")
+    .map((m) => peopleById.get(m.id) ?? m)
+    .filter((m) => m.status === "working" || m.status === "waking");
   const profilePerson = profileId
     ? people.find((p) => p.id === profileId) ?? (me?.id === profileId ? me : undefined)
     : undefined;
@@ -1191,7 +1222,7 @@ export function App({
                   onClick={() => selectAndClose(c.id)}
                   icon={<Hash className="size-4 opacity-70" />}
                   label={c.name}
-                  working={(working[c.id]?.length ?? 0) > 0}
+                  status={rowAgentStatus(c.member_agent_ids)}
                   unread={unread}
                   // Slack: regular channel unreads are bold-only; only a mention shows a count badge.
                   badgeCount={c.has_mention ? c.unread_count ?? 0 : 0}
@@ -1226,7 +1257,7 @@ export function App({
                       }
                       label={p?.display_name ?? c.dm_with ?? "dm"}
                       title={c.dm_with ? `@${c.dm_with}` : undefined}
-                      working={(working[c.id]?.length ?? 0) > 0}
+                      status={p?.kind === "agent" ? p.status : undefined}
                       unread={unread}
                       // Slack: every DM unread shows a count badge (all DM messages are "to you").
                       badgeCount={c.unread_count ?? 0}
@@ -1264,6 +1295,7 @@ export function App({
                 }
                 label={p.display_name}
                 title={`@${p.handle}`}
+                status={p.kind === "agent" ? p.status : undefined}
                 trailing={
                   p.kind === "agent" ? (
                     <Bot className="size-3.5 text-sidebar-foreground/50" />
@@ -1494,8 +1526,8 @@ export function App({
           </div>
         </div>
 
-        {/* Working indicator (conditionally rendered: absent when idle) */}
-        {workingHere.length > 0 && (
+        {/* Working / waking indicator (conditionally rendered: absent when everyone's idle) */}
+        {busyMembers.length > 0 && (
           <div
             data-testid="working-indicator"
             className="flex items-center gap-2 px-3 py-1.5 text-sm text-muted-foreground md:px-5"
@@ -1503,9 +1535,10 @@ export function App({
             <WorkingDots />
             <span>
               <span className="font-medium text-foreground">
-                {workingHere.map((h) => `@${h}`).join(", ")}
+                {busyMembers.map((m) => `@${m.handle}`).join(", ")}
               </span>{" "}
-              {workingHere.length > 1 ? "are" : "is"} working…
+              {busyMembers.length > 1 ? "are" : "is"}{" "}
+              {busyMembers.every((m) => m.status === "waking") ? "waking up…" : "working…"}
             </span>
           </div>
         )}
@@ -2690,7 +2723,7 @@ function NavItem({
   icon,
   label,
   trailing,
-  working,
+  status,
   title,
   unread,
   badgeCount,
@@ -2702,7 +2735,7 @@ function NavItem({
   icon: React.ReactNode;
   label: string;
   trailing?: React.ReactNode;
-  working?: boolean;
+  status?: AgentStatus; // agent presence dot (always shown for agents, incl. idle)
   title?: string;
   unread?: boolean; // has unread messages -> bold + brighter (Slack)
   badgeCount?: number; // when > 0, show a count pill (DMs + mention-containing unreads)
@@ -2726,8 +2759,13 @@ function NavItem({
         {icon}
       </span>
       <span className="min-w-0 flex-1 truncate">{label}</span>
-      {working && (
-        <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-emerald-400" />
+      {status && (
+        <span
+          data-testid="status-dot"
+          data-status={status}
+          title={STATUS_LABEL[status]}
+          className={cn("size-1.5 shrink-0 rounded-full", STATUS_DOT[status])}
+        />
       )}
       {(badgeCount ?? 0) > 0 && (
         <span

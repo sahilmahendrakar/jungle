@@ -3,6 +3,7 @@ import {
   fetchAgentEvents,
   interruptAgent,
   type AgentEvent,
+  type AgentStatus,
   type Participant,
 } from "./api";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -37,8 +38,6 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-
-type RunnerState = "idle" | "running";
 
 // Merge event pages / live frames by id, keeping ascending (oldest-first) order.
 function mergeEvents(a: AgentEvent[], b: AgentEvent[]): AgentEvent[] {
@@ -76,28 +75,24 @@ function pretty(v: unknown): string {
   }
 }
 
-// Live status dot: connected/running/idle. Muted when the runner is offline.
-function StatusDot({
-  connected,
-  state,
-}: {
-  connected: boolean;
-  state: RunnerState;
-}) {
-  const running = connected && state === "running";
+// Live status dot for the four agent statuses (mirrors the sidebar's colors/labels).
+const STATUS_DOT: Record<AgentStatus, string> = {
+  working: "animate-pulse bg-emerald-500",
+  idle: "bg-emerald-500/60",
+  waking: "animate-pulse bg-amber-400",
+  sleeping: "bg-slate-400/70",
+};
+const STATUS_LABEL: Record<AgentStatus, string> = {
+  working: "Working",
+  idle: "Idle",
+  waking: "Waking up",
+  sleeping: "Sleeping",
+};
+function StatusDot({ status }: { status: AgentStatus }) {
   return (
     <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-      <span
-        className={cn(
-          "size-2 rounded-full",
-          !connected
-            ? "bg-muted-foreground/40"
-            : running
-              ? "animate-pulse bg-emerald-500"
-              : "bg-emerald-500/60",
-        )}
-      />
-      {!connected ? "Offline" : running ? "Running" : "Idle"}
+      <span className={cn("size-2 rounded-full", STATUS_DOT[status])} />
+      {STATUS_LABEL[status]}
     </span>
   );
 }
@@ -619,8 +614,6 @@ export function AgentActivity({
 }) {
   const isSdk = agent.runtime === "sdk";
   const [history, setHistory] = useState<AgentEvent[]>([]);
-  const [connected, setConnected] = useState(false);
-  const [state, setState] = useState<RunnerState>("idle");
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(true);
@@ -647,8 +640,6 @@ export function AgentActivity({
       .then((page) => {
         if (cancelled) return;
         setHistory(page.events);
-        setConnected(page.runner.connected);
-        setState(page.runner.state);
         setHasMore(page.events.length >= 200);
       })
       .catch((e) => !cancelled && setErr(String((e as Error).message ?? e)))
@@ -657,15 +648,6 @@ export function AgentActivity({
       cancelled = true;
     };
   }, [agent.id, isSdk]);
-
-  // Live events flip the runner to "running"; a `result` event flips it back to "idle".
-  useEffect(() => {
-    if (events.length === 0) return;
-    setConnected(true);
-    const last = events[events.length - 1];
-    const type = (last.event as any)?.type;
-    setState(type === "result" ? "idle" : "running");
-  }, [events]);
 
   const loadEarlier = useCallback(async () => {
     if (loadingMore || !hasMore || all.length === 0) return;
@@ -708,7 +690,7 @@ export function AgentActivity({
     try {
       const r = await interruptAgent(agent.id);
       if (!r.ok) setErr(r.error ?? "failed to stop agent");
-      else setState("idle");
+      // On success the runner's turn_done/state broadcast flips agent.status back to idle.
     } catch (e) {
       setErr(String((e as Error).message ?? e));
     } finally {
@@ -727,7 +709,8 @@ export function AgentActivity({
     }
   }
 
-  const running = connected && state === "running";
+  const status: AgentStatus = agent.status ?? "idle";
+  const running = status === "working";
   const empty = !loading && turns.length === 0;
 
   return (
@@ -758,7 +741,7 @@ export function AgentActivity({
               {isSdk && (
                 <>
                   <span aria-hidden>·</span>
-                  <StatusDot connected={connected} state={state} />
+                  <StatusDot status={status} />
                 </>
               )}
             </div>

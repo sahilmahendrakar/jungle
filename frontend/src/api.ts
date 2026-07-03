@@ -37,6 +37,10 @@ function withDevAuth(url: string): string {
   return url + (url.includes("?") ? "&" : "?") + `participantId=${encodeURIComponent(devParticipantId)}`;
 }
 
+// One of an agent's four live statuses. Working = actively running a turn; Idle = connected,
+// waiting; Sleeping = machine stopped to save cost; Waking = machine starting, not yet connected.
+export type AgentStatus = "working" | "idle" | "sleeping" | "waking";
+
 export interface Channel {
   id: string;
   name: string;
@@ -44,6 +48,7 @@ export interface Channel {
   dm_with?: string | null; // for dm channels: the other member's handle
   unread_count?: number; // messages after my last_read_seq, excluding my own
   has_mention?: boolean; // any unread message @mentions me
+  member_agent_ids?: string[]; // agent members (drives the row's status dot)
 }
 
 export interface Attachment {
@@ -113,6 +118,7 @@ export interface Participant {
   model?: string | null; // agent model (null = agent-config default)
   mode?: string; // SDK permission mode: 'default'|'acceptEdits'|'plan'|'bypassPermissions'|'dontAsk'
   runtime?: string; // 'sdk' (per-agent runner)
+  status?: AgentStatus; // agents only; live-updated via the `agent_status_changed` WS broadcast
   // Context-window occupancy the agent's runner reported after its last turn (agents only;
   // null/absent until the first report). Live-updated via the `agent_context` WS broadcast.
   context_tokens?: number | null;
@@ -192,7 +198,7 @@ export interface AgentEvent {
 
 export interface AgentEventsPage {
   events: AgentEvent[]; // oldest-first within the page
-  runner: { connected: boolean; state: "idle" | "running" };
+  runner: { connected: boolean; state: "idle" | "running"; status?: AgentStatus };
 }
 
 // Fetch a page of an sdk agent's activity transcript. Page backwards with
