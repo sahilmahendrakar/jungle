@@ -165,7 +165,11 @@ export function MessageList({
                   </span>
                 </div>
                 <div data-testid="message" className="group/msg relative break-words">
-                  {lead.body && <Markdown>{lead.body}</Markdown>}
+                  {lead.body && (
+                    <Markdown personByHandle={personByHandle} onOpenProfile={onOpenProfile}>
+                      {lead.body}
+                    </Markdown>
+                  )}
                   {(lead.attachments?.length ?? 0) > 0 && (
                     <AttachmentList attachments={lead.attachments!} />
                   )}
@@ -178,7 +182,11 @@ export function MessageList({
                 </div>
                 {rest.map((m) => (
                   <div key={m.id} data-testid="message" className="group/msg relative mt-1 break-words">
-                    {m.body && <Markdown>{m.body}</Markdown>}
+                    {m.body && (
+                      <Markdown personByHandle={personByHandle} onOpenProfile={onOpenProfile}>
+                        {m.body}
+                      </Markdown>
+                    )}
                     {(m.attachments?.length ?? 0) > 0 && (
                       <AttachmentList attachments={m.attachments!} />
                     )}

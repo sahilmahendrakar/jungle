@@ -46,7 +46,11 @@ function ThreadMessageRow({
           <span className="text-xs text-muted-foreground">{fmtTime(m.created_at)}</span>
         </div>
         <div className="break-words text-sm">
-          {m.body && <Markdown>{m.body}</Markdown>}
+          {m.body && (
+            <Markdown personByHandle={personByHandle} onOpenProfile={onOpenProfile}>
+              {m.body}
+            </Markdown>
+          )}
           {(m.attachments?.length ?? 0) > 0 && <AttachmentList attachments={m.attachments!} />}
         </div>
       </div>
