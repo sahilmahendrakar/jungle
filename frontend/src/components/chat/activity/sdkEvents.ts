@@ -103,7 +103,22 @@ export interface RawItem {
   key: string;
   value: unknown;
 }
-export type Item = ToolItem | TextItem | ThinkingItem | NoteItem | ResultItem | RawItem;
+// A message that fed this agent from outside its own turn loop: the trigger that woke it,
+// a `/compact` request, or another message delivered to its inbox mid-turn.
+export interface InboundItem {
+  kind: "inbound";
+  key: string;
+  source: "trigger" | "inbox" | "compact";
+  text: string;
+}
+export type Item =
+  | ToolItem
+  | TextItem
+  | ThinkingItem
+  | NoteItem
+  | ResultItem
+  | RawItem
+  | InboundItem;
 
 export interface Turn {
   turnId: string;
@@ -196,6 +211,13 @@ export function buildItems(events: AgentEvent[]): Item[] {
   for (const e of events) {
     const ev = e.event as SdkEvent | null | undefined;
     const type = ev?.type;
+
+    if (type === "jungle_inbound") {
+      const inbound = ev as { source?: string; text?: string };
+      const source = inbound.source === "compact" || inbound.source === "inbox" ? inbound.source : "trigger";
+      items.push({ kind: "inbound", key: `${e.id}`, source, text: String(inbound.text ?? "") });
+      continue;
+    }
 
     if (type === "system") {
       const sys = ev as SdkSystemEvent;
