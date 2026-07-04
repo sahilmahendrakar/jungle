@@ -5,10 +5,14 @@
 //     queued items as one batch, emit turn_started + consumed, and run one
 //     streaming query() whose generator yields the batch as a single user
 //     message. While the query runs, if more items arrive AND no model change
-//     is pending, the generator yields them as a follow-up user message at the
-//     turn boundary (after the previous turn's `result`). Otherwise the
-//     generator returns, the query ends, and the loop restarts (used to apply
-//     a pending model change via query restart with resume).
+//     is pending, the generator yields them as a follow-up user message right
+//     away: the SDK's streamInput() pulls the next generator value and writes
+//     it to the CLI's stdin as soon as it's available, with no wait for a
+//     `result`/turn-end event, so a follow-up is spliced into the live session
+//     mid-turn, not batched until the current turn finishes. If nothing is
+//     queued when a `result` arrives, the generator returns, the query ends,
+//     and the loop restarts (also used to apply a pending model change via
+//     query restart with resume).
 import {
   query,
   type EffortLevel,
@@ -424,12 +428,14 @@ export class Runner {
           // Report context occupancy while the query is still alive (a control
           // request needs the subprocess up — it exits once this loop ends).
           await this.reportContextUsage(q, message);
-          // Turn boundary: the `result` ends this turn's model work. If nothing is queued
-          // to continue with, close the streaming input so the query completes, the CLI
-          // subprocess exits, and runTurn falls through to turn_done + idle. Without this the
-          // generator would await the next batch forever — subprocess stays alive, `running`
-          // never clears, and the agent is stuck "working" (idle-stop never fires). Follow-up
-          // work that arrived mid-turn was already handed to the generator by handleEnqueue.
+          // The `result` ends this turn's model work. Any follow-up that arrived while the
+          // turn was running was already streamed into the generator by handleEnqueue the
+          // moment it was enqueued (see deliverFollowupBatch) — this check only decides
+          // whether to keep the query alive. If nothing is queued, close the streaming input
+          // so the query completes, the CLI subprocess exits, and runTurn falls through to
+          // turn_done + idle. Without this the generator would await the next batch forever —
+          // subprocess stays alive, `running` never clears, and the agent is stuck "working"
+          // (idle-stop never fires).
           this.endTurnIfQuiescent();
         }
       }
@@ -523,11 +529,12 @@ export class Runner {
     }
   }
 
-  // At a turn boundary (a `result` was just seen), end the streaming-input query if there's
-  // nothing more to feed it: resolve the awaited batch with null so makeInputGenerator
-  // returns, the CLI subprocess exits, and runTurn falls through to turn_done + state:idle.
-  // No-op when a follow-up batch was already delivered (batchResolver consumed) or a model
-  // change is pending (handleSetModel already ended the query to restart with the new model).
+  // Called after a `result`: end the streaming-input query if there's nothing more to feed
+  // it, by resolving the awaited batch with null so makeInputGenerator returns, the CLI
+  // subprocess exits, and runTurn falls through to turn_done + state:idle. No-op when a
+  // follow-up batch was already delivered mid-turn (batchResolver consumed by
+  // deliverFollowupBatch before this ever runs) or a model change is pending (handleSetModel
+  // already ended the query to restart with the new model).
   private endTurnIfQuiescent(): void {
     if (!this.batchResolver) return;
     if (this.pendingModel !== null) return;
@@ -537,7 +544,10 @@ export class Runner {
     resolve(null);
   }
 
-  // Called when items arrive while a turn is running and a follow-up is awaited.
+  // Called when items arrive while a turn is running and a follow-up is awaited: resolves
+  // makeInputGenerator's pending promise immediately, so the generator yields the new batch
+  // and the SDK's streamInput() writes it straight to the CLI's stdin — spliced into the live
+  // session mid-turn, without waiting for the current turn's `result`.
   private deliverFollowupBatch(): void {
     if (!this.batchResolver) return;
     const items = this.queue;
