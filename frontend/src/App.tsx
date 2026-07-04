@@ -31,22 +31,8 @@ import {
 } from "./lib/chat";
 import { SignIn } from "./SignIn";
 import { SettingsPanel } from "./Settings";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
-import { avatarClass, initials } from "@/lib/people";
 import { cn } from "@/lib/utils";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { AgentActivity } from "./AgentActivity";
 import {
   WorkingDots,
@@ -56,29 +42,16 @@ import {
   LEFT_WIDTH,
   RIGHT_WIDTH,
 } from "./components/chat/layout";
-import {
-  ParticipantProfilePanel,
-  ConfirmCard,
-  PersonAvatar,
-} from "./components/chat/panels";
+import { ParticipantProfilePanel, ConfirmCard } from "./components/chat/panels";
 import { AddAgentDialog } from "./components/chat/AddAgentDialog";
 import { Composer } from "./components/chat/Composer";
+import { ChannelHeader } from "./components/chat/ChannelHeader";
 import { MessageList } from "./components/chat/MessageList";
 import { Sidebar } from "./components/chat/Sidebar";
 import { ThreadPanel } from "./components/chat/ThreadPanel";
 import { NewChannelDialog } from "./components/chat/NewChannelDialog";
 import { MembersDialog } from "./components/chat/MembersDialog";
 import { DeleteChannelDialog } from "./components/chat/DeleteChannelDialog";
-import {
-  Activity,
-  Hash,
-  MoreVertical,
-  PanelLeft,
-  Trash2,
-  UserPlus,
-  Users,
-  X,
-} from "lucide-react";
 
 
 
@@ -817,114 +790,18 @@ export function App({
       {/* ---------- Main ---------- */}
       <main className="flex min-w-0 flex-1 flex-col bg-background">
         {/* Channel header */}
-        <header className="flex h-14 shrink-0 items-center gap-2.5 border-b px-3 md:px-5">
-          {/* Mobile hamburger: opens the off-canvas drawer. Hidden on md+ (desktop uses the
-              persisted collapse toggle below instead). */}
-          <Button
-            variant="ghost"
-            size="icon"
-            data-testid="sidebar-toggle"
-            aria-label="Open menu"
-            onClick={() => setDrawerOpen(true)}
-            className="-ml-1 size-9 shrink-0 text-muted-foreground md:hidden"
-          >
-            <PanelLeft className="size-5" />
-          </Button>
-          {!sidebarOpen && (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  data-testid="sidebar-expand"
-                  onClick={() => setSidebarOpen(true)}
-                  className="-ml-2 hidden size-8 shrink-0 text-muted-foreground md:inline-flex"
-                >
-                  <PanelLeft className="size-4" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>Open sidebar (⌘\)</TooltipContent>
-            </Tooltip>
-          )}
-          {sel ? (
-            <>
-              {sel.kind === "dm" ? (
-                <button
-                  data-testid="dm-header-profile"
-                  onClick={() => {
-                    const other = personByHandle(sel.dm_with);
-                    if (other) openProfilePanel(other.id);
-                  }}
-                  className="flex min-w-0 items-center gap-2.5 rounded-md px-1.5 py-1 -mx-1.5 transition-colors hover:bg-accent"
-                  title="View profile"
-                >
-                  <PersonAvatar
-                    name={personByHandle(sel.dm_with)?.display_name ?? sel.dm_with ?? "?"}
-                    handle={sel.dm_with ?? "?"}
-                    size="sm"
-                  />
-                  <h2 className="truncate font-semibold">{headerTitle}</h2>
-                </button>
-              ) : (
-                <>
-                  <Hash className="size-5 text-muted-foreground" />
-                  <h2 className="truncate font-semibold">{headerTitle}</h2>
-                </>
-              )}
-
-              {sel.kind !== "dm" && (
-                <div className="ml-auto flex items-center gap-1">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    data-testid="members-button"
-                    onClick={() => setShowMembers(true)}
-                    className="h-8 gap-1.5 rounded-full px-2.5 text-muted-foreground"
-                    title="Members"
-                  >
-                    <Users className="size-4" />
-                    <span className="text-xs font-medium tabular-nums">{members.length}</span>
-                  </Button>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="size-8 text-muted-foreground"
-                        data-testid="channel-menu"
-                        title="Channel settings"
-                      >
-                        <MoreVertical className="size-4" />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" className="w-44">
-                      <DropdownMenuItem
-                        data-testid="menu-members"
-                        onClick={() => setShowMembers(true)}
-                      >
-                        <UserPlus className="size-4" />
-                        Members
-                      </DropdownMenuItem>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem
-                        data-testid="menu-delete-channel"
-                        onClick={() => setShowDeleteConfirm(true)}
-                        className="text-destructive focus:text-destructive"
-                      >
-                        <Trash2 className="size-4" />
-                        Delete channel
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </div>
-              )}
-            </>
-          ) : (
-            <h2 className="font-semibold text-muted-foreground">
-              Select or create a channel
-            </h2>
-          )}
-        </header>
+        <ChannelHeader
+          channel={sel}
+          headerTitle={headerTitle}
+          sidebarOpen={sidebarOpen}
+          memberCount={members.length}
+          personByHandle={personByHandle}
+          onOpenDrawer={() => setDrawerOpen(true)}
+          onExpandSidebar={() => setSidebarOpen(true)}
+          onOpenProfile={openProfilePanel}
+          onOpenMembers={() => setShowMembers(true)}
+          onDeleteChannel={() => setShowDeleteConfirm(true)}
+        />
 
         {/* Messages */}
         <MessageList
