@@ -4,6 +4,11 @@ import type { Message, Participant } from "../../api";
 import { fmtTime } from "../../lib/chat";
 import { Markdown } from "../../Markdown";
 import { AttachmentList, PersonAvatar } from "./panels";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
 // The per-message thread affordance: a persistent "N replies" chip on a root that has replies
@@ -55,14 +60,24 @@ function ThreadFooter({
       </button>
     );
   }
+  // Corner popover (Slack-style): absolutely positioned so it never reserves layout space, and
+  // anchored to this message's own line (not the sender header) so it works the same on every
+  // line of a consecutive/grouped run from one sender.
   return (
-    <button
-      data-testid="reply-in-thread"
-      onClick={() => onOpenThread(rootId)}
-      className="mt-0.5 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground opacity-0 transition-opacity hover:bg-accent focus:opacity-100 group-hover/msg:opacity-100"
-    >
-      <MessageSquare className="size-3.5" /> Reply in thread
-    </button>
+    <div className="pointer-events-none absolute -top-3.5 right-1.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/msg:opacity-100">
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            data-testid="reply-in-thread"
+            onClick={() => onOpenThread(rootId)}
+            className="pointer-events-auto flex size-7 items-center justify-center rounded-md border border-border bg-card text-muted-foreground shadow-sm hover:bg-accent hover:text-accent-foreground"
+          >
+            <MessageSquare className="size-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top">Reply in thread</TooltipContent>
+      </Tooltip>
+    </div>
   );
 }
 
@@ -149,7 +164,7 @@ export function MessageList({
                     {fmtTime(lead.created_at)}
                   </span>
                 </div>
-                <div data-testid="message" className="group/msg break-words">
+                <div data-testid="message" className="group/msg relative break-words">
                   {lead.body && <Markdown>{lead.body}</Markdown>}
                   {(lead.attachments?.length ?? 0) > 0 && (
                     <AttachmentList attachments={lead.attachments!} />
@@ -162,7 +177,7 @@ export function MessageList({
                   />
                 </div>
                 {rest.map((m) => (
-                  <div key={m.id} data-testid="message" className="group/msg mt-1 break-words">
+                  <div key={m.id} data-testid="message" className="group/msg relative mt-1 break-words">
                     {m.body && <Markdown>{m.body}</Markdown>}
                     {(m.attachments?.length ?? 0) > 0 && (
                       <AttachmentList attachments={m.attachments!} />
