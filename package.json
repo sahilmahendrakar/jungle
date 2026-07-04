@@ -5,6 +5,7 @@
   "version": "0.0.0",
   "description": "Jungle — Slack-style app for chatting with cloud agents that do real work",
   "workspaces": [
+    "shared",
     "backend",
     "frontend"
   ],

@@ -1,61 +1,26 @@
 import "./env";
 import pg from "pg";
+import type {
+  ParticipantBase,
+  Kind,
+  ChannelListItem,
+  UnreadThread,
+  Message as PersistedMessage,
+  AttachmentMeta,
+} from "@jungle/shared";
 
 const { Pool } = pg;
 export const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
-export type Kind = "human" | "agent";
+// Wire/domain shapes live in @jungle/shared (the single source of truth shared with the
+// frontend). The DB row types below re-export or extend those, adding server-only fields
+// (e.g. runner_token) that never leave the backend.
+export type { Kind, ChannelListItem, UnreadThread, PersistedMessage, AttachmentMeta };
 
-export interface Participant {
-  id: string;
-  kind: Kind;
-  handle: string;
-  display_name: string;
-  repo: string | null;
-  firebase_uid: string | null;
-  email: string | null;
-  avatar_url: string | null;
-  model: string | null; // agent model override (null = agent-config default)
-  mode: string; // an SDK permission mode: default|acceptEdits|plan|bypassPermissions|dontAsk
-  runtime: string; // 'sdk' (all agents; legacy 'ma' rows may exist on old databases)
-  runner_token: string | null; // per-agent runner secret
-  // Context-window occupancy reported by the runner after each turn (null = no report yet).
-  context_tokens: number | null;
-  context_max_tokens: number | null;
-  context_updated_at: string | null;
-  runner_provider: string; // 'docker' | 'fly' — which Provisioner impl owns this agent's runner
-  runner_meta: Record<string, unknown> | null; // provider handles (Fly: {machineId, volumeId})
-}
-
-export interface PersistedMessage {
-  id: string;
-  channel_id: string;
-  seq: string; // bigint serialized as string
-  sender_id: string;
-  sender_handle: string;
-  body: string;
-  created_at: string;
-  cascade_budget: number | null;
-  // Threads: null on top-level messages; the root message's id on replies. also_to_channel
-  // marks a reply that was also echoed into the main timeline. reply_count/last_reply_at are
-  // denormed on the ROOT (0/null elsewhere) and drive the "N replies" footer + Threads view.
-  thread_root_id: string | null;
-  also_to_channel: boolean;
-  reply_count: number;
-  last_reply_at: string | null;
-  mentions: { id: string; handle: string }[];
-  attachments: AttachmentMeta[];
-}
-
-// The attachment fields that ride on messages (a signed download url is added at the edge
-// by attachments.withUrls — never stored).
-export interface AttachmentMeta {
-  id: string;
-  filename: string;
-  mime: string;
-  size_bytes: number;
-  width: number | null;
-  height: number | null;
+// A participant row as stored: the public shape plus the server-only runner secret. Strip
+// runner_token (see index.ts publicParticipant) before sending to any client.
+export interface Participant extends ParticipantBase {
+  runner_token: string | null; // per-agent runner secret — never reaches clients
 }
 
 export async function createParticipant(p: {
@@ -664,16 +629,6 @@ export async function listAgentEvents(
   return rows;
 }
 
-export interface ChannelListItem {
-  id: string;
-  name: string;
-  kind: string;
-  dm_with: string | null;
-  unread_count: number; // messages after the requester's last_read_seq, excluding their own
-  has_mention: boolean; // any unread message @mentions the requester
-  member_agent_ids: string[]; // agent members of this channel (drives the row's status dot)
-}
-
 export async function listChannels(participantId?: string): Promise<ChannelListItem[]> {
   if (participantId) {
     // For DMs, also surface the other member's handle so the UI can label it "@them".
@@ -794,17 +749,6 @@ export async function followsThread(rootId: string, participantId: string): Prom
     [participantId, rootId],
   );
   return !!rows[0]?.ok;
-}
-
-export interface UnreadThread {
-  root_id: string;
-  channel_id: string;
-  channel_name: string;
-  root_sender_handle: string;
-  root_body: string;
-  reply_count: number;
-  last_reply_at: string | null;
-  unread_count: number; // replies after my thread last_read_seq, excluding my own
 }
 
 // The requester's followed threads that have unread replies, newest activity first. Scoped to

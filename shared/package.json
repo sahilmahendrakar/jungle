@@ -1,0 +1,16 @@
+{
+  "name": "@jungle/shared",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Shared wire contracts (domain types, WebSocket events, runner protocol, constants) for the Jungle backend and frontend. Types + tiny constants only — no runtime dependencies.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

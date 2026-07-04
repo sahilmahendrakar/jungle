@@ -6,6 +6,7 @@
   "description": "Jungle agent-runner: a long-lived process that bridges a Claude Agent SDK session to the Jungle backend over one outbound WebSocket.",
   "main": "dist/index.js",
   "scripts": {
+    "prebuild": "node scripts/sync-protocol.mjs",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "dev": "tsc -p tsconfig.json && node dist/index.js",

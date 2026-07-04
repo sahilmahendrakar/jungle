@@ -2,10 +2,20 @@ import "./env";
 import type { IncomingMessage } from "node:http";
 import type internal from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
+import type {
+  RunnerToBackend,
+  BackendToRunner,
+  ConfigureFrame,
+  AgentStatus,
+  PermissionMode,
+} from "@jungle/shared";
+import { isSdkMode } from "@jungle/shared";
 import * as db from "./db";
 import * as gh from "./github";
 import { signedPath } from "./attachments";
 import { provisionerFor } from "./provisioner";
+
+export type { AgentStatus };
 
 // The SDK-runner side of Jungle. A runner is a per-agent container that dials INTO the backend
 // at GET /api/runner?token=<runner_token> (WS upgrade) and speaks docs/runner-protocol.md.
@@ -67,19 +77,13 @@ let hooks: RunnerHooks | null = null;
 
 // --- Permission mode mapping (protocol §"Permission modes") ---
 
-const SDK_MODES = new Set(["default", "acceptEdits", "plan", "bypassPermissions", "dontAsk"]);
-
 // Map whatever is stored in participants.mode to an SDK wire permissionMode. New sdk agents
 // store an SDK mode directly; legacy MA values are mapped for safety if an agent is migrated.
-export function toPermissionMode(mode: string | null | undefined): string {
-  if (mode && SDK_MODES.has(mode)) return mode;
+export function toPermissionMode(mode: string | null | undefined): PermissionMode {
+  if (mode && isSdkMode(mode)) return mode;
   if (mode === "always_allow") return "bypassPermissions";
   if (mode === "always_ask") return "default";
   return "default";
-}
-
-export function isSdkPermissionMode(mode: string): boolean {
-  return SDK_MODES.has(mode);
 }
 
 // --- Connection registry ---
@@ -110,11 +114,10 @@ export function isConnected(agentId: string): boolean {
 
 // --- Agent status (Working / Idle / Sleeping / Waking up) ---
 
-// The single user-facing status for an agent, derived from two independent facts: whether a
-// runner socket is currently connected (+ its turn state), and the machine's lifecycle when no
-// socket is connected. Connected always wins; sleeping is only ever set by an explicit
-// noteProvisionerStop (never inferred from a dropped socket).
-export type AgentStatus = "working" | "idle" | "sleeping" | "waking";
+// AgentStatus (imported from @jungle/shared) is the single user-facing status for an agent,
+// derived from two independent facts: whether a runner socket is currently connected (+ its
+// turn state), and the machine's lifecycle when no socket is connected. Connected always wins;
+// sleeping is only ever set by an explicit noteProvisionerStop (never inferred from a drop).
 
 // Machine lifecycle bookkeeping, tracked only while NO socket is connected. `starting` = a
 // provisioner.start() was issued and we're waiting for the runner's `hello`; `stopped` = the
@@ -190,7 +193,7 @@ function clearMachine(agentId: string): void {
   machine.delete(agentId);
 }
 
-function send(conn: RunnerConn, frame: Record<string, unknown>): void {
+function send(conn: RunnerConn, frame: BackendToRunner): void {
   if (conn.ws.readyState === WebSocket.OPEN) conn.ws.send(JSON.stringify(frame));
 }
 
@@ -236,8 +239,8 @@ export function systemPromptAppend(agent: db.AgentRow): string {
 
 // Build the `configure` reply to a runner's `hello`: model, permission mode, persona, and
 // (for GitHub-capable agents) a fresh installation token so the runner can authenticate git.
-async function buildConfigure(agent: db.AgentRow): Promise<Record<string, unknown>> {
-  const frame: Record<string, unknown> = {
+async function buildConfigure(agent: db.AgentRow): Promise<ConfigureFrame> {
+  const frame: ConfigureFrame = {
     type: "configure",
     model: agent.model ?? null,
     permissionMode: toPermissionMode(agent.mode),
@@ -375,7 +378,7 @@ const FATAL_RESTART_MAX = 3;
 
 // --- Live config pushes (called by the PATCH /api/agents/:id endpoint) ---
 
-export function setPermissionMode(agentId: string, mode: string): void {
+export function setPermissionMode(agentId: string, mode: PermissionMode): void {
   const conn = conns.get(agentId);
   if (conn) send(conn, { type: "set_permission_mode", mode });
 }
@@ -437,7 +440,9 @@ export function resolveConfirm(agentId: string, confirmId: string, result: Confi
     id: confirmId,
     result: result.result,
     ...(result.denyMessage ? { denyMessage: result.denyMessage } : {}),
-    ...(result.updatedInput !== undefined ? { updatedInput: result.updatedInput } : {}),
+    ...(result.updatedInput !== undefined
+      ? { updatedInput: result.updatedInput as Record<string, unknown> }
+      : {}),
   });
   return true;
 }
@@ -502,9 +507,11 @@ async function accept(ws: WebSocket, token: string): Promise<void> {
 }
 
 async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
-  let frame: any;
+  // Frames are trusted to match the protocol (the runner is our own code); the discriminated
+  // union narrows each case below. Malformed JSON is dropped.
+  let frame: RunnerToBackend;
   try {
-    frame = JSON.parse(raw);
+    frame = JSON.parse(raw) as RunnerToBackend;
   } catch {
     return;
   }
@@ -541,7 +548,9 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
       }
       case "consumed": {
         const ids: string[] = Array.isArray(frame.inboxIds) ? frame.inboxIds : [];
-        await db.markInboxConsumed(agentId, ids, frame.turnId ?? null);
+        // `consumed` carries no turnId (turn_started already recorded it); markInboxConsumed
+        // coalesces, so a null here preserves any turn_id already set.
+        await db.markInboxConsumed(agentId, ids, null);
         break;
       }
       case "event": {
@@ -651,10 +660,10 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         break;
       }
       default:
-        console.warn(`runner[${agentId}] unknown frame type:`, frame.type);
+        console.warn(`runner[${agentId}] unknown frame type:`, (frame as RunnerToBackend).type);
     }
   } catch (e) {
-    console.error(`runner[${agentId}] error handling ${frame?.type}:`, e);
+    console.error(`runner[${agentId}] error handling ${(frame as RunnerToBackend).type}:`, e);
   }
 }
 

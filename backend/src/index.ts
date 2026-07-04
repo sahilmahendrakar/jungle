@@ -12,6 +12,7 @@ import * as att from "./attachments";
 import { storage } from "./storage";
 import { provisionerFor, setProvisioner } from "./provisioner";
 import { FlyProvisioner } from "./provisioner-fly";
+import { HANDLE_RE, isAllowedModel, isSdkMode } from "@jungle/shared";
 
 // Safety net: this backend is a shared relay for every user, so a stray rejection from one
 // agent turn (e.g. a wedged session's "waiting on responses" 400) must not terminate the
@@ -90,7 +91,6 @@ app.post("/api/participants", async (req, res) => {
 
 // --- Identity & onboarding (real auth: Firebase Google sign-in) ---
 
-const HANDLE_RE = /^[a-z0-9][a-z0-9_-]{1,29}$/; // 2–30 chars, lowercase/digits/_/-, no leading symbol
 
 // Derive a starter handle from the Google profile (email local-part or name).
 function suggestHandle(u: auth.AuthUser): string {
@@ -163,11 +163,8 @@ app.post("/api/channels", async (req, res) => {
 // Create an agent = a participant of kind 'agent' running on the SDK runner: mint a per-agent
 // runner token and provision its container. If `repo` ("owner/name") is given, the runner
 // clones it and gets a fresh GitHub installation token in each `configure` (see runners.ts).
-// Models an agent may run (id must be a real model; keep in sync with the UI dropdown).
-const ALLOWED_MODELS = new Set(["claude-haiku-4-5-20251001", "claude-sonnet-5", "claude-opus-4-8"]);
-// SDK runner permission modes (docs/runner-protocol.md §"Permission modes").
-const ALLOWED_SDK_MODES = new Set(["default", "acceptEdits", "plan", "bypassPermissions", "dontAsk"]);
-
+// Allowed models (ALLOWED_MODELS) and SDK permission modes (SDK_MODES) live in @jungle/shared,
+// checked via isAllowedModel / isSdkMode. Keep the UI dropdown in sync with that list.
 app.post("/api/agents", async (req, res) => {
   try {
     const { handle, displayName, repo } = req.body ?? {};
@@ -175,9 +172,9 @@ app.post("/api/agents", async (req, res) => {
       return res.status(400).json({ error: "handle, displayName required" });
     }
     const model = req.body?.model ? String(req.body.model) : null;
-    if (model && !ALLOWED_MODELS.has(model)) return res.status(400).json({ error: `unsupported model: ${model}` });
+    if (model && !isAllowedModel(model)) return res.status(400).json({ error: `unsupported model: ${model}` });
     const mode = req.body?.mode ? String(req.body.mode) : "default";
-    if (!ALLOWED_SDK_MODES.has(mode)) {
+    if (!isSdkMode(mode)) {
       return res.status(400).json({ error: `unsupported mode: ${mode}` });
     }
     const runnerToken = randomBytes(32).toString("hex");
@@ -226,13 +223,13 @@ app.patch("/api/agents/:id", async (req, res) => {
     }
     if (req.body?.mode !== undefined) {
       const mode = String(req.body.mode);
-      if (!ALLOWED_SDK_MODES.has(mode)) return res.status(400).json({ error: `unsupported mode: ${mode}` });
+      if (!isSdkMode(mode)) return res.status(400).json({ error: `unsupported mode: ${mode}` });
       if (mode !== agent.mode) runners.setPermissionMode(agent.id, mode);
       patch.mode = mode;
     }
     if (req.body?.model !== undefined) {
       const model = String(req.body.model);
-      if (!ALLOWED_MODELS.has(model)) return res.status(400).json({ error: `unsupported model: ${model}` });
+      if (!isAllowedModel(model)) return res.status(400).json({ error: `unsupported model: ${model}` });
       if (model !== agent.model) runners.setModel(agent.id, model);
       patch.model = model;
     }

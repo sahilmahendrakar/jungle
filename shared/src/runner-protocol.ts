@@ -1,6 +1,3 @@
-// GENERATED FILE — do not edit. Source of truth: shared/src/runner-protocol.ts
-// Regenerate with `npm run build` (runs scripts/sync-protocol.mjs) in the runner package.
-
 // Jungle agent-runner protocol (v1). See docs/runner-protocol.md — authoritative.
 // Frames are JSON text messages over one outbound WebSocket.
 //
