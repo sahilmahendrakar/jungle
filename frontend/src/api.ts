@@ -198,8 +198,10 @@ export function interruptAgent(id: string): Promise<{ ok: boolean; error?: strin
 }
 
 // Ask an sdk agent to compact/summarize its session context. Runs when the agent is next
-// idle; the profile meter updates when the runner reports the post-compaction usage.
-export function compactAgent(id: string): Promise<{ ok: boolean; error?: string }> {
+// idle; the profile meter updates when the runner reports the post-compaction usage. If the
+// agent's machine was asleep, `waking: true` comes back — the request is queued and runs once
+// its runner reconnects.
+export function compactAgent(id: string): Promise<{ ok: boolean; waking?: boolean; error?: string }> {
   return request(`/api/agents/${id}/compact`, {
     method: "POST",
     auth: true,

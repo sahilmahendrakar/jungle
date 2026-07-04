@@ -417,6 +417,29 @@ export function compact(agentId: string): boolean {
   return true;
 }
 
+// agentId -> a compact request made while the machine was asleep/waking, to be delivered the
+// moment its runner says `hello` (see the "hello" case below).
+const pendingCompact = new Set<string>();
+
+// Compact-button entry point: sends immediately if a runner is connected; otherwise wakes the
+// agent's machine (same wake-on-message path as a triggering chat message) and remembers the
+// request so it's delivered on the runner's next `hello` instead of failing with "offline".
+export async function compactOrWake(
+  agent: db.Participant,
+): Promise<"sent" | "waking" | "wake_failed"> {
+  if (compact(agent.id)) return "sent";
+  pendingCompact.add(agent.id);
+  try {
+    await provisionerFor(agent).start(agent.id);
+    noteProvisionerStart(agent.id);
+    return "waking";
+  } catch (e) {
+    pendingCompact.delete(agent.id);
+    console.error(`compactOrWake: wake failed for ${agent.id}:`, e);
+    return "wake_failed";
+  }
+}
+
 // Runner liveness/state for the UI (Activity header, profile status dot).
 export function runnerState(
   agentId: string,
@@ -544,8 +567,10 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         clearMachine(agentId); // a live hello always wins over stale starting/stopped state
         emitStatus(agentId);
         send(conn, await buildConfigure(agent));
-        // Runner is idle after configure — push any queued work.
+        // Runner is idle after configure — push any queued work, plus a compact requested
+        // while this agent was asleep/waking (see compactOrWake).
         await drain(agentId);
+        if (pendingCompact.delete(agentId)) send(conn, { type: "compact" });
         break;
       }
       case "state": {

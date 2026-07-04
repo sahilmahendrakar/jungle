@@ -163,12 +163,15 @@ router.post(
 );
 
 // Ask an sdk agent to compact/summarize its session context (the profile's Compact button).
+// A sleeping/waking agent has no runner connected to compact yet — rather than failing with
+// "offline", wake its machine and deliver the compact once its runner says `hello`.
 router.post(
   "/api/agents/:id/compact",
   wrap(async (req, res) => {
     const agent = await requireAgent(req);
-    const delivered = runners.compact(agent.id);
-    res.json({ ok: delivered, ...(delivered ? {} : { error: "runner not connected" }) });
+    const result = await runners.compactOrWake(agent);
+    if (result === "wake_failed") return res.json({ ok: false, error: "failed to wake agent" });
+    res.json({ ok: true, waking: result === "waking" });
   }),
 );
 
