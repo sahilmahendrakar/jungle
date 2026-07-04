@@ -1,7 +1,8 @@
 import { Bot, Hash, LogOut, MessagesSquare, PanelLeftClose } from "lucide-react";
-import type { Channel, Participant } from "../../api";
+import type { Channel, Participant, Membership } from "../../api";
 import { firebaseEnabled } from "../../firebase";
 import { EmptyHint, NavItem, PersonAvatar, SectionHeader } from "./panels";
+import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 import {
   Tooltip,
   TooltipContent,
@@ -36,6 +37,11 @@ export function Sidebar({
   onOpenProfile,
   onOpenSettings,
   onSignOut,
+  workspaceId,
+  memberships,
+  onSwitchWorkspace,
+  onCreateWorkspace,
+  onInvitePeople,
 }: {
   rooms: Channel[];
   dms: Channel[];
@@ -60,6 +66,11 @@ export function Sidebar({
   onOpenProfile: (id: string) => void;
   onOpenSettings: () => void;
   onSignOut: () => void;
+  workspaceId?: string;
+  memberships?: Membership[];
+  onSwitchWorkspace?: (workspaceId: string) => void;
+  onCreateWorkspace?: () => void;
+  onInvitePeople?: () => void;
 }) {
   return (
     <aside
@@ -84,12 +95,16 @@ export function Sidebar({
         className="flex h-full w-72 flex-col bg-sidebar text-sidebar-foreground"
         style={isDesktop ? { width: leftWidth } : undefined}
       >
-        {/* Workspace header */}
-        <div className="flex shrink-0 items-center gap-2.5 border-b border-sidebar-border px-4 py-3.5">
-          <img src="/icon-192.png" alt="Jungle" className="size-8 rounded-lg shadow-sm" />
-          <div className="min-w-0 flex-1">
-            <div className="truncate font-bold leading-tight">Jungle</div>
-          </div>
+        {/* Workspace header + switcher */}
+        <div className="flex shrink-0 items-center gap-1 border-b border-sidebar-border px-3 py-3">
+          <WorkspaceSwitcher
+            memberships={memberships}
+            activeWorkspaceId={workspaceId}
+            isAdmin={me?.role === "admin"}
+            onSwitch={onSwitchWorkspace}
+            onCreate={onCreateWorkspace}
+            onInvite={onInvitePeople}
+          />
           <Tooltip>
             <TooltipTrigger asChild>
               <button

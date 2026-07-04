@@ -7,9 +7,15 @@ import type {
   AgentEvent,
   AgentStatus,
   WireMessage,
+  Me,
+  GoogleProfile,
+  Workspace,
+  Membership,
+  InviteInfo,
 } from "@jungle/shared";
 
 export type { Participant, Attachment, UnreadThread, AgentEvent, AgentStatus };
+export type { Me, GoogleProfile, Workspace, Membership, InviteInfo };
 // A message as delivered to the client (attachments carry signed download urls).
 export type Message = WireMessage;
 
@@ -42,6 +48,13 @@ let devParticipantId: string | null = null;
 export function setDevParticipantId(id: string | null) {
   devParticipantId = id;
 }
+// The active workspace (Firebase multi-tenancy): sent as X-Workspace-Id on every authed request so
+// the backend resolves the caller's participant in the right workspace. Null in dev/no-token mode
+// (the participantId already names a workspace).
+let activeWorkspaceId: string | null = null;
+export function setActiveWorkspaceId(id: string | null) {
+  activeWorkspaceId = id;
+}
 
 // One request path for every backend call: resolves the URL, attaches auth (bearer token when
 // present; dev participantId query param when there isn't one and `devAuth` is set), sends JSON,
@@ -65,6 +78,7 @@ function buildUrl(path: string, devAuth: boolean): string {
 async function request<T>(path: string, opts: RequestOpts = {}): Promise<T> {
   const headers: Record<string, string> = { ...opts.headers };
   if (opts.auth && authToken) headers.authorization = `Bearer ${authToken}`;
+  if (activeWorkspaceId) headers["x-workspace-id"] = activeWorkspaceId;
   let body = opts.body;
   if (opts.json !== undefined) {
     headers["content-type"] = headers["content-type"] ?? "application/json";
@@ -353,38 +367,81 @@ export function deleteChannel(channelId: string): Promise<{ ok: boolean }> {
   });
 }
 
-// --- Identity / onboarding (Firebase auth) ---
+// --- Identity / workspaces (Firebase auth) ---
 
-export interface GoogleProfile {
-  uid: string;
-  email: string | null;
-  name: string | null;
-  picture: string | null;
-}
-
-export interface Me {
-  onboarded: boolean;
-  participant?: Participant;
-  profile?: GoogleProfile;
-  suggestedHandle?: string;
-  github?: { connected: boolean; login?: string };
-}
-
+// The signed-in Google account and all workspaces it belongs to.
 export function getMe(): Promise<Me> {
   return request<Me>(`/api/me`, { auth: true, errorMessage: "failed to load profile" });
 }
 
-export function checkHandle(handle: string): Promise<{ available: boolean; valid: boolean }> {
-  return request(`/api/handle-available?handle=${encodeURIComponent(handle)}`, {
-    errorMessage: "failed to check handle",
+// Is a handle free within a workspace (by id) or an invite's workspace (by token)?
+export function checkHandle(
+  handle: string,
+  scope: { workspaceId?: string; invite?: string } = {},
+): Promise<{ available: boolean; valid: boolean }> {
+  const qs = new URLSearchParams({ handle });
+  if (scope.workspaceId) qs.set("workspaceId", scope.workspaceId);
+  if (scope.invite) qs.set("invite", scope.invite);
+  return request(`/api/handle-available?${qs.toString()}`, { errorMessage: "failed to check handle" });
+}
+
+// Create a new workspace; the caller becomes its admin. Returns the workspace + the caller's
+// participant in it.
+export function createWorkspace(args: {
+  name: string;
+  handle: string;
+  displayName: string;
+}): Promise<{ workspace: Workspace; participant: Participant }> {
+  return request(`/api/workspaces`, { json: args, auth: true, errorMessage: "failed to create workspace" });
+}
+
+// Preview an invite link (workspace name + validity). No auth required, but if signed in the
+// response also says whether you're already a member.
+export function getInvite(token: string): Promise<InviteInfo> {
+  return request<InviteInfo>(`/api/invites/${token}`, { auth: true, errorMessage: "failed to load invite" });
+}
+
+// Join a workspace via an invite link. Idempotent if you're already a member.
+export function acceptInvite(token: string, handle: string, displayName: string): Promise<Participant> {
+  return request<Participant>(`/api/invites/${token}/accept`, {
+    json: { handle, displayName },
+    auth: true,
+    errorMessage: "failed to join workspace",
   });
 }
 
-export function completeOnboarding(handle: string, displayName: string): Promise<Participant> {
-  return request<Participant>(`/api/onboarding`, {
-    json: { handle, displayName },
+export interface Invite {
+  token: string;
+  expires_at: string | null;
+  created_at: string;
+}
+
+// Admin: the workspace's active invite links.
+export function listInvites(workspaceId: string): Promise<Invite[]> {
+  return request<Invite[]>(`/api/workspaces/${workspaceId}/invites`, {
     auth: true,
-    errorMessage: "onboarding failed",
+    devAuth: true,
+    errorMessage: "failed to load invites",
+  });
+}
+
+// Admin: create a new invite link (optional expiry in days).
+export function createInvite(workspaceId: string, expiresInDays?: number): Promise<Invite> {
+  return request<Invite>(`/api/workspaces/${workspaceId}/invites`, {
+    json: expiresInDays != null ? { expiresInDays } : {},
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to create invite",
+  });
+}
+
+// Admin: revoke an invite link.
+export function revokeInvite(token: string): Promise<{ ok: boolean }> {
+  return request(`/api/invites/${token}/revoke`, {
+    method: "POST",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to revoke invite",
   });
 }
 

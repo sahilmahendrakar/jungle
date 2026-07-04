@@ -22,6 +22,7 @@ import { mergeById, type ToolConfirm } from "../lib/chat";
 export function useChatSocket(opts: {
   participantId: string | null;
   getWsToken?: () => Promise<string | null>;
+  workspaceId?: string; // Firebase mode: scopes the socket to the active workspace (&workspaceId=)
   // Live reads (no re-subscribe): the open channel, tab focus/visibility, the open Activity agent.
   selectedRef: RefObject<string | null>;
   focusedRef: RefObject<boolean>;
@@ -44,6 +45,7 @@ export function useChatSocket(opts: {
   const {
     participantId,
     getWsToken,
+    workspaceId,
     selectedRef,
     focusedRef,
     activityIdRef,
@@ -70,9 +72,11 @@ export function useChatSocket(opts: {
     let ws: WebSocket;
     let retry: ReturnType<typeof setTimeout> | undefined;
     const connect = async () => {
-      // Firebase mode: authenticate the socket with a fresh ID token. Dev mode: ?participantId=.
+      // Firebase mode: authenticate the socket with a fresh ID token + the active workspace. Dev
+      // mode: ?participantId= (which already names a workspace).
       const qs = getWsToken
-        ? `token=${encodeURIComponent((await getWsToken()) ?? "")}`
+        ? `token=${encodeURIComponent((await getWsToken()) ?? "")}` +
+          (workspaceId ? `&workspaceId=${encodeURIComponent(workspaceId)}` : "")
         : `participantId=${encodeURIComponent(participantId)}`;
       if (stopped) return;
       ws = new WebSocket(`${WS_BASE}/?${qs}`);

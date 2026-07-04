@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useAuth } from "./auth";
-import { checkHandle, completeOnboarding, githubConnectUrl } from "./api";
+import { checkHandle, createWorkspace, acceptInvite, getInvite, githubConnectUrl, type InviteInfo } from "./api";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,7 +9,7 @@ import { avatarClass, initials } from "@/lib/people";
 import { Check, Loader2, LogOut, X } from "lucide-react";
 
 // lucide dropped its brand icons, so render the GitHub mark inline.
-function GithubMark({ className }: { className?: string }) {
+export function GithubMark({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 16 16" fill="currentColor" className={className} aria-hidden>
       <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z" />
@@ -17,37 +17,8 @@ function GithubMark({ className }: { className?: string }) {
   );
 }
 
-const STEPS = ["Your handle", "Connect GitHub"];
-
-function Stepper({ current }: { current: number }) {
-  return (
-    <div className="mb-8 flex items-center gap-2">
-      {STEPS.map((label, i) => (
-        <div key={label} className="flex flex-1 items-center gap-2">
-          <div
-            className={`flex size-6 shrink-0 items-center justify-center rounded-full text-xs font-semibold ${
-              i < current
-                ? "bg-primary text-primary-foreground"
-                : i === current
-                  ? "bg-primary/15 text-primary ring-2 ring-primary"
-                  : "bg-muted text-muted-foreground"
-            }`}
-          >
-            {i < current ? <Check className="size-3.5" /> : i + 1}
-          </div>
-          <span
-            className={`text-xs font-medium ${i === current ? "text-foreground" : "text-muted-foreground"}`}
-          >
-            {label}
-          </span>
-          {i < STEPS.length - 1 && <div className="h-px flex-1 bg-border" />}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function Shell({ children }: { children: React.ReactNode }) {
+// The centered card shell shared by every full-screen onboarding step.
+export function Shell({ children }: { children: React.ReactNode }) {
   const { me, signOut } = useAuth();
   const profile = me?.profile;
   return (
@@ -77,23 +48,32 @@ function Shell({ children }: { children: React.ReactNode }) {
   );
 }
 
-export function Onboarding({ onSkipGithub }: { onSkipGithub: () => void }) {
+export type HandleStatus = "idle" | "checking" | "ok" | "taken" | "invalid";
+
+// Avatar preview + display-name + handle inputs with a debounced availability check scoped to a
+// workspace (or an invite's workspace). The parent owns handle/displayName + the resolved status
+// (so it can gate its submit button); this component drives the check and reports status back.
+export function HandleField({
+  handle,
+  setHandle,
+  displayName,
+  setDisplayName,
+  scope,
+  status,
+  setStatus,
+}: {
+  handle: string;
+  setHandle: (v: string) => void;
+  displayName: string;
+  setDisplayName: (v: string) => void;
+  scope: { workspaceId?: string; invite?: string };
+  status: HandleStatus;
+  setStatus: (s: HandleStatus) => void;
+}) {
   const { me } = useAuth();
-  // me is non-null here (gate guarantees it). Phase is driven by onboarding/connection state.
-  if (me?.onboarded) return <ConnectGithubStep onSkip={onSkipGithub} />;
-  return <HandleStep />;
-}
-
-function HandleStep() {
-  const { me, refreshMe } = useAuth();
-  const [handle, setHandle] = useState(me?.suggestedHandle ?? "");
-  const [displayName, setDisplayName] = useState(me?.profile?.name ?? "");
-  const [status, setStatus] = useState<"idle" | "checking" | "ok" | "taken" | "invalid">("idle");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
   const seq = useRef(0);
+  const scopeKey = scope.workspaceId ?? scope.invite ?? "";
 
-  // Debounced availability check.
   useEffect(() => {
     const h = handle.trim();
     if (!h) return setStatus("idle");
@@ -101,7 +81,7 @@ function HandleStep() {
     const my = ++seq.current;
     const t = setTimeout(async () => {
       try {
-        const { available, valid } = await checkHandle(h);
+        const { available, valid } = await checkHandle(h, scope);
         if (my !== seq.current) return; // a newer keystroke won
         setStatus(!valid ? "invalid" : available ? "ok" : "taken");
       } catch {
@@ -109,30 +89,11 @@ function HandleStep() {
       }
     }, 350);
     return () => clearTimeout(t);
-  }, [handle]);
-
-  async function submit() {
-    setError("");
-    if (status !== "ok") return;
-    setBusy(true);
-    try {
-      await completeOnboarding(handle.trim(), displayName.trim() || handle.trim());
-      await refreshMe(); // now onboarded -> advances to the GitHub step
-    } catch (e) {
-      setError(String((e as Error).message ?? e));
-    } finally {
-      setBusy(false);
-    }
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [handle, scopeKey]);
 
   return (
-    <Shell>
-      <Stepper current={0} />
-      <h1 className="text-xl font-bold tracking-tight">Pick your handle</h1>
-      <p className="mt-1 text-sm text-muted-foreground">
-        This is how teammates and agents @mention you.
-      </p>
-
+    <>
       <div className="mt-5 flex items-center gap-3">
         <Avatar className="size-12 rounded-xl">
           {me?.profile?.picture && <AvatarImage src={me.profile.picture} />}
@@ -181,16 +142,180 @@ function HandleStep() {
             <p className="text-xs text-destructive">2–30 chars: letters, digits, - or _.</p>
           )}
         </div>
-        {error && <p className="text-sm text-destructive">{error}</p>}
-        <Button onClick={submit} disabled={busy || status !== "ok"} className="w-full" size="lg">
-          {busy ? "Setting up…" : "Continue"}
-        </Button>
       </div>
+    </>
+  );
+}
+
+// First-run / "+ New workspace": name the workspace and pick your handle in it (you become admin).
+export function CreateWorkspace({ onCreated }: { onCreated: (workspaceId: string) => void }) {
+  const { me, refreshMe } = useAuth();
+  const [name, setName] = useState("");
+  const [handle, setHandle] = useState(me?.suggestedHandle ?? "");
+  const [displayName, setDisplayName] = useState(me?.profile?.name ?? "");
+  const [status, setStatus] = useState<HandleStatus>("idle");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit() {
+    setError("");
+    if (!name.trim() || status !== "ok") return;
+    setBusy(true);
+    try {
+      const { workspace } = await createWorkspace({
+        name: name.trim(),
+        handle: handle.trim(),
+        displayName: displayName.trim() || handle.trim(),
+      });
+      await refreshMe();
+      onCreated(workspace.id);
+    } catch (e) {
+      setError(String((e as Error).message ?? e));
+      setBusy(false);
+    }
+  }
+
+  // A brand-new workspace has no existing handles, so the availability check (scoped to no
+  // workspace) always passes; still require a non-empty, valid handle.
+  return (
+    <Shell>
+      <h1 className="text-xl font-bold tracking-tight">Create a workspace</h1>
+      <p className="mt-1 text-sm text-muted-foreground">
+        Your own Slack-style space for people and agents. You can invite others after.
+      </p>
+      <div className="mt-5 space-y-1.5">
+        <Label htmlFor="ws-name">Workspace name</Label>
+        <Input
+          id="ws-name"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Acme Inc."
+          autoFocus
+        />
+      </div>
+      <HandleField
+        handle={handle}
+        setHandle={setHandle}
+        displayName={displayName}
+        setDisplayName={setDisplayName}
+        scope={{}}
+        status={status}
+        setStatus={setStatus}
+      />
+      {error && <p className="mt-4 text-sm text-destructive">{error}</p>}
+      <Button
+        onClick={submit}
+        disabled={busy || !name.trim() || status !== "ok"}
+        className="mt-5 w-full"
+        size="lg"
+      >
+        {busy ? "Creating…" : "Create workspace"}
+      </Button>
     </Shell>
   );
 }
 
-function ConnectGithubStep({ onSkip }: { onSkip: () => void }) {
+// The /join/<token> landing: preview the invite, pick a handle for that workspace, and join.
+export function JoinWorkspace({
+  token,
+  onJoined,
+  onNoInvite,
+}: {
+  token: string;
+  onJoined: (workspaceId: string) => void;
+  onNoInvite: () => void;
+}) {
+  const { me, refreshMe } = useAuth();
+  const [invite, setInvite] = useState<InviteInfo | null>(null);
+  const [handle, setHandle] = useState(me?.suggestedHandle ?? "");
+  const [displayName, setDisplayName] = useState(me?.profile?.name ?? "");
+  const [status, setStatus] = useState<HandleStatus>("idle");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    getInvite(token)
+      .then((info) => !cancelled && setInvite(info))
+      .catch(() => !cancelled && setInvite({ valid: false }));
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
+  async function join() {
+    setError("");
+    if (status !== "ok") return;
+    setBusy(true);
+    try {
+      const p = await acceptInvite(token, handle.trim(), displayName.trim() || handle.trim());
+      await refreshMe();
+      onJoined(p.workspace_id);
+    } catch (e) {
+      setError(String((e as Error).message ?? e));
+      setBusy(false);
+    }
+  }
+
+  if (invite === null) {
+    return (
+      <Shell>
+        <div className="flex items-center justify-center py-8">
+          <Loader2 className="size-6 animate-spin text-muted-foreground" />
+        </div>
+      </Shell>
+    );
+  }
+  if (!invite.valid) {
+    return (
+      <Shell>
+        <h1 className="text-xl font-bold tracking-tight">Invite not valid</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          This invite link is invalid, revoked, or expired. Ask whoever shared it for a new one.
+        </p>
+        <Button onClick={onNoInvite} className="mt-5 w-full" size="lg" variant="outline">
+          Continue
+        </Button>
+      </Shell>
+    );
+  }
+  if (invite.alreadyMember) {
+    return (
+      <Shell>
+        <h1 className="text-xl font-bold tracking-tight">You're already in</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          You're already a member of {invite.workspaceName}.
+        </p>
+        <Button onClick={onNoInvite} className="mt-5 w-full" size="lg">
+          Go to workspace
+        </Button>
+      </Shell>
+    );
+  }
+  return (
+    <Shell>
+      <h1 className="text-xl font-bold tracking-tight">Join {invite.workspaceName}</h1>
+      <p className="mt-1 text-sm text-muted-foreground">Pick how you'll appear in this workspace.</p>
+      <HandleField
+        handle={handle}
+        setHandle={setHandle}
+        displayName={displayName}
+        setDisplayName={setDisplayName}
+        scope={{ invite: token }}
+        status={status}
+        setStatus={setStatus}
+      />
+      {error && <p className="mt-4 text-sm text-destructive">{error}</p>}
+      <Button onClick={join} disabled={busy || status !== "ok"} className="mt-5 w-full" size="lg">
+        {busy ? "Joining…" : `Join ${invite.workspaceName}`}
+      </Button>
+    </Shell>
+  );
+}
+
+// Post-join GitHub connect prompt (skippable, remembered per uid). Lets an account's agents read
+// its repos / open PRs. Shown once per membership that hasn't connected GitHub.
+export function GithubStep({ onSkip }: { onSkip: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -208,7 +333,6 @@ function ConnectGithubStep({ onSkip }: { onSkip: () => void }) {
 
   return (
     <Shell>
-      <Stepper current={1} />
       <div className="flex flex-col items-center text-center">
         <div className="flex size-14 items-center justify-center rounded-2xl bg-foreground text-background">
           <GithubMark className="size-7" />

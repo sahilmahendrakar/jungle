@@ -19,6 +19,7 @@ import {
   type Message,
   type Participant,
   type UnreadThread,
+  type Membership,
 } from "./api";
 import {
   mergeById,
@@ -48,19 +49,28 @@ import { ThreadPanel } from "./components/chat/ThreadPanel";
 import { NewChannelDialog } from "./components/chat/NewChannelDialog";
 import { MembersDialog } from "./components/chat/MembersDialog";
 import { DeleteChannelDialog } from "./components/chat/DeleteChannelDialog";
+import { InviteDialog } from "./components/chat/InviteDialog";
 import { useChatSocket } from "./ws/useChatSocket";
 
 
 
 export function App({
   authParticipantId,
+  workspaceId,
   getWsToken,
   me: meProp,
+  memberships,
+  onSwitchWorkspace,
+  onCreateWorkspace,
   onSignOut,
 }: {
   authParticipantId?: string; // from Firebase onboarding; overrides the ?as= dev path
+  workspaceId?: string; // active workspace (Firebase mode); scopes the WS handshake
   getWsToken?: () => Promise<string | null>; // fresh ID token for the WS handshake
   me?: Participant; // current user (Firebase mode)
+  memberships?: Membership[]; // all workspaces this account belongs to (for the switcher)
+  onSwitchWorkspace?: (workspaceId: string) => void;
+  onCreateWorkspace?: () => void;
   onSignOut?: () => void; // Firebase sign-out (else clears ?as=)
 } = {}) {
   const participantId = authParticipantId ?? new URLSearchParams(location.search).get("as");
@@ -75,6 +85,8 @@ export function App({
   const [showNew, setShowNew] = useState(false);
   // Add-agent form
   const [showAddAgent, setShowAddAgent] = useState(false);
+  // Invite-people dialog (admins only, Firebase mode)
+  const [showInvite, setShowInvite] = useState(false);
   // Pending tool-confirmation cards (always_ask agents), keyed by confirmId.
   const [confirms, setConfirms] = useState<ToolConfirm[]>([]);
 
@@ -277,6 +289,7 @@ export function App({
   const wsRef = useChatSocket({
     participantId,
     getWsToken,
+    workspaceId,
     selectedRef,
     focusedRef,
     activityIdRef,
@@ -605,6 +618,11 @@ export function App({
         onOpenProfile={openProfilePanel}
         onOpenSettings={openSettingsPanel}
         onSignOut={signOut}
+        workspaceId={workspaceId}
+        memberships={memberships}
+        onSwitchWorkspace={onSwitchWorkspace}
+        onCreateWorkspace={onCreateWorkspace}
+        onInvitePeople={() => setShowInvite(true)}
       />
 
       {/* Left sidebar resize divider (desktop, only while expanded). */}
@@ -808,6 +826,10 @@ export function App({
         onCreated={() => listParticipants().then(setPeople).catch(() => {})}
         onNotice={setNotice}
       />
+
+      {workspaceId && (
+        <InviteDialog open={showInvite} onOpenChange={setShowInvite} workspaceId={workspaceId} />
+      )}
 
       {/* Live Claude-Code-style transcript for an sdk agent */}
       {activityAgent && (

@@ -36,16 +36,21 @@ function GithubMark({ className }: { className?: string }) {
 // under an AuthProvider (i.e. only in Firebase mode).
 function SettingsContent() {
   const { me, refreshMe, signOut } = useAuth();
-  const participant = me?.participant;
   const profile = me?.profile;
+  // GitHub connection is per-workspace participant. Resolve the active membership (the workspace
+  // stored by AuthGate), falling back to the first.
+  const activeWsId = typeof localStorage !== "undefined" ? localStorage.getItem("jungle.workspace") : null;
+  const membership =
+    me?.memberships.find((m) => m.workspace.id === activeWsId) ?? me?.memberships[0];
+  const participant = membership?.participant;
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [ghStatus, setGhStatus] = useState<GithubStatus | null>(null);
   const [ghLoading, setGhLoading] = useState(true);
 
-  const connected = ghStatus?.connected ?? !!me?.github?.connected;
-  const login = ghStatus?.login ?? me?.github?.login;
+  const connected = ghStatus?.connected ?? !!membership?.github.connected;
+  const login = ghStatus?.login ?? membership?.github.login;
 
   useEffect(() => {
     let cancelled = false;
@@ -63,7 +68,7 @@ function SettingsContent() {
     return () => {
       cancelled = true;
     };
-  }, [me?.github?.connected, me?.github?.login]);
+  }, [membership?.github.connected, membership?.github.login]);
 
   async function connectGithub() {
     setError("");

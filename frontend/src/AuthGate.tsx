@@ -2,10 +2,13 @@ import { useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { useAuth } from "./auth";
 import { GoogleSignIn } from "./GoogleSignIn";
-import { Onboarding } from "./Onboarding";
+import { CreateWorkspace, JoinWorkspace, GithubStep } from "./Onboarding";
 import { App } from "./App";
 import { Settings } from "./Settings";
-import { usePath } from "./route";
+import { setActiveWorkspaceId, type Membership } from "./api";
+import { usePath, navigate } from "./route";
+
+const ACTIVE_WS_KEY = "jungle.workspace";
 
 function FullScreenSpinner() {
   return (
@@ -15,15 +18,29 @@ function FullScreenSpinner() {
   );
 }
 
-// Decides what to show based on auth + onboarding state:
-//   not signed in            -> Google sign-in
-//   signed in, no participant -> onboarding (pick handle)
-//   onboarded, GitHub not yet -> onboarding (connect GitHub, skippable & remembered)
-//   fully set up              -> the chat app, keyed to the Firebase identity
+// Decides what to show based on auth + workspace membership:
+//   not signed in                 -> Google sign-in
+//   /join/<token>                 -> join-workspace screen (survives sign-in, same URL)
+//   signed in, no memberships     -> create-workspace screen
+//   creating a new workspace      -> create-workspace screen
+//   active membership, GitHub off -> connect-GitHub step (skippable, remembered)
+//   otherwise                     -> the chat app, keyed to the active workspace participant
 export function AuthGate() {
   const { ready, user, me, getToken, signOut, refreshMe } = useAuth();
   const [ghDismissed, setGhDismissed] = useState(false);
+  const [creating, setCreating] = useState(false);
+  // The active workspace id (persisted). null = fall back to the first membership.
+  const [activeWsId, setActiveWsId] = useState<string | null>(() =>
+    typeof localStorage !== "undefined" ? localStorage.getItem(ACTIVE_WS_KEY) : null,
+  );
   const path = usePath();
+
+  const selectWorkspace = (id: string) => {
+    localStorage.setItem(ACTIVE_WS_KEY, id);
+    setActiveWsId(id);
+    setCreating(false);
+    if (path.startsWith("/join/")) navigate("/");
+  };
 
   // Remember a per-user "skip GitHub" choice so returning users aren't nagged each login.
   useEffect(() => {
@@ -51,14 +68,40 @@ export function AuthGate() {
   if (!ready) return <FullScreenSpinner />;
   if (!user) return <GoogleSignIn />;
   if (!me) return <FullScreenSpinner />; // profile loading right after sign-in
-  if (!me.onboarded) return <Onboarding onSkipGithub={dismissGithub} />;
-  if (path === "/settings") return <Settings />;
-  if (!me.github?.connected && !ghDismissed) return <Onboarding onSkipGithub={dismissGithub} />;
 
+  // Join-by-link takes priority: works whether or not the account already has memberships.
+  if (path.startsWith("/join/")) {
+    const token = path.slice("/join/".length);
+    return (
+      <JoinWorkspace token={token} onJoined={selectWorkspace} onNoInvite={() => navigate("/")} />
+    );
+  }
+
+  const memberships = me.memberships;
+  if (creating || memberships.length === 0) {
+    return <CreateWorkspace onCreated={selectWorkspace} />;
+  }
+
+  // Resolve the active membership (persisted choice if still valid, else the first).
+  const membership: Membership =
+    memberships.find((m) => m.workspace.id === activeWsId) ?? memberships[0];
+
+  if (path === "/settings") return <Settings />;
+  if (!membership.github.connected && !ghDismissed) return <GithubStep onSkip={dismissGithub} />;
+
+  // Set the active workspace on the API layer before App renders so its data loads (and WS
+  // handshake) are scoped correctly. Keying App to the participant remounts it on a workspace
+  // switch, resetting all chat state and reconnecting the socket cleanly.
+  setActiveWorkspaceId(membership.workspace.id);
   return (
     <App
-      authParticipantId={me.participant!.id}
-      me={me.participant}
+      key={membership.participant.id}
+      authParticipantId={membership.participant.id}
+      workspaceId={membership.workspace.id}
+      me={membership.participant}
+      memberships={memberships}
+      onSwitchWorkspace={selectWorkspace}
+      onCreateWorkspace={() => setCreating(true)}
       getWsToken={getToken}
       onSignOut={signOut}
     />

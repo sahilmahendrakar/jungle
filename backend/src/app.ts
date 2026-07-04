@@ -21,7 +21,7 @@ export function createApp(): express.Express {
   // Lock the origin down before any real deployment.
   app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
-    res.header("Access-Control-Allow-Headers", "content-type, authorization");
+    res.header("Access-Control-Allow-Headers", "content-type, authorization, x-workspace-id");
     res.header("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
     if (req.method === "OPTIONS") {
       res.sendStatus(204);
