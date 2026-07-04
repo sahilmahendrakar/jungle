@@ -62,6 +62,30 @@ try {
     }
   }
 
+  // Agent flow: open a DM with an existing agent (row with a status dot), open its profile from
+  // the DM header, then open the Activity view. Covers the SDK mode/model selects + transcript.
+  const agentRow = page.locator('[data-testid="people-item"]:has([data-testid="status-dot"])').first();
+  if (await agentRow.count()) {
+    await agentRow.click();
+    await page.waitForTimeout(700);
+    const dmProfile = page.locator('[data-testid="dm-header-profile"]').first();
+    if (await dmProfile.count()) {
+      await dmProfile.click();
+      await page.waitForTimeout(700);
+      check("agent profile: SDK mode select", (await page.locator('[data-testid="agent-mode-select"]').count()) > 0);
+      check("agent profile: model select", (await page.locator('[data-testid="agent-model-select"]').count()) > 0);
+      const activityBtn = page.locator('[data-testid="activity-open"]').first();
+      check("agent profile: Activity button", (await activityBtn.count()) > 0);
+      if (await activityBtn.count()) {
+        await activityBtn.click();
+        await page.waitForTimeout(900);
+        check("activity transcript opens", (await page.locator('[data-testid="activity-transcript"]').count()) > 0);
+        check("activity steering input present", (await page.locator('[data-testid="activity-steer-input"]').count()) > 0);
+        await shot(page, "activity");
+      }
+    }
+  }
+
   check("no uncaught page errors", pageErrors.length === 0);
   log(`\nSMOKE DONE: ${fail} failures`);
 } catch (e) {
