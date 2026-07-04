@@ -63,12 +63,19 @@ function appJwt(): string {
 // installation access token cache, keyed by "owner/repo"
 const installTokenCache = new Map<string, { token: string; expMs: number }>();
 
+// Re-mint this far ahead of a token's 1h expiry rather than handing out one that's about to
+// die. Sized so a token is always fresh enough to survive a turn: a runner is handed this token
+// at the *start* of a turn (drain -> git_credentials), but may not do its first git push/gh
+// until minutes in — with too small a window that first git op could 401 on an expired token.
+// 15 min comfortably covers a slow turn's lead time while still reusing the cache most of the hour.
+const MINT_AHEAD_MS = 15 * 60_000;
+
 // Mint an installation access token scoped to one repo (Contents + Pull requests R/W).
-// Cached until ~5 min before expiry. This is the credential agents use for both git
+// Cached until ~15 min before expiry. This is the credential agents use for both git
 // (repo mount) and the GitHub MCP server.
 export async function installationTokenForRepo(repo: string): Promise<string> {
   const cached = installTokenCache.get(repo);
-  if (cached && cached.expMs - Date.now() > 5 * 60_000) return cached.token;
+  if (cached && cached.expMs - Date.now() > MINT_AHEAD_MS) return cached.token;
 
   const [owner, name] = repo.split("/");
   if (!owner || !name) throw new Error(`repo must be "owner/name", got "${repo}"`);
