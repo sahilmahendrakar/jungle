@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { HANDLE_RE } from "@jungle/shared";
+import type { Me, Membership } from "@jungle/shared";
 import * as db from "../../db";
 import * as auth from "../../auth";
 import { wrap, ApiError } from "../errors";
@@ -17,36 +18,49 @@ function suggestHandle(u: auth.AuthUser): string {
   return base.length >= 2 ? base : "user";
 }
 
-// Who am I? Returns the linked participant, or onboarding hints if this Google user is new.
+// Who am I? The signed-in Google account plus every workspace it belongs to. An account with no
+// memberships gets an empty list (the client routes it to "create a workspace" / an invite link).
 router.get(
   "/api/me",
   auth.requireAuth,
   wrap(async (req, res) => {
     const u = auth.authedUser(req)!;
-    const p = await db.getParticipantByFirebaseUid(u.uid);
-    if (p) {
+    const participants = await db.listParticipantsByUid(u.uid);
+    const memberships: Membership[] = [];
+    for (const p of participants) {
+      const ws = await db.getWorkspace(p.workspace_id);
+      if (!ws) continue; // defensive: a membership should always have its workspace
       const gid = await db.getGithubIdentity(p.id);
-      return res.json({
-        onboarded: true,
+      memberships.push({
+        workspace: { id: ws.id, name: ws.name },
         participant: publicParticipant(p),
         github: gid ? { connected: true, login: gid.github_login } : { connected: false },
       });
     }
-    let suggested = suggestHandle(u);
-    if (!(await db.handleAvailable(db.DEFAULT_WORKSPACE_ID, suggested))) {
-      suggested = `${suggested}-${Math.random().toString(36).slice(2, 5)}`;
-    }
-    res.json({ onboarded: false, profile: u, suggestedHandle: suggested });
+    const me: Me = {
+      profile: { uid: u.uid, email: u.email, name: u.name, picture: u.picture },
+      memberships,
+      suggestedHandle: suggestHandle(u),
+    };
+    res.json(me);
   }),
 );
 
-// Is a handle valid + free? (drives the onboarding handle field)
+// Is a handle valid + free within a workspace? Scope comes from ?workspaceId= or an invite token
+// (?invite=<token>); with neither, falls back to the default workspace (legacy onboarding). Drives
+// the handle field on create-workspace and join-workspace.
 router.get(
   "/api/handle-available",
   wrap(async (req, res) => {
     const handle = String(req.query.handle ?? "").trim();
     if (!HANDLE_RE.test(handle)) return res.json({ available: false, valid: false });
-    res.json({ available: await db.handleAvailable(db.DEFAULT_WORKSPACE_ID, handle), valid: true });
+    let workspaceId = String(req.query.workspaceId ?? "") || null;
+    const inviteToken = String(req.query.invite ?? "");
+    if (!workspaceId && inviteToken) {
+      const invite = await db.getInviteByToken(inviteToken);
+      workspaceId = invite?.workspace_id ?? null;
+    }
+    res.json({ available: await db.handleAvailable(workspaceId ?? db.DEFAULT_WORKSPACE_ID, handle), valid: true });
   }),
 );
 

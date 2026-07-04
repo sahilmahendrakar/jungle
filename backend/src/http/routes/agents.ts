@@ -33,10 +33,16 @@ router.post(
     if (!isSdkMode(mode)) throw new ApiError(400, `unsupported mode: ${mode}`);
     const runnerToken = randomBytes(32).toString("hex");
     const runnerProvider = req.body?.runnerProvider === "fly" ? "fly" : RUNNER_PROVIDER_DEFAULT;
-    // The agent joins the creator's workspace.
-    const participant = await db.createParticipant({
-      kind: "agent", workspaceId: me.workspace_id, handle, displayName, runtime: "sdk", runnerToken,
-      repo: repo ?? null, model, mode, runnerProvider,
+    // The agent joins the creator's workspace, subject to the workspace's agent cap. The cap check
+    // + insert run in one transaction (FOR UPDATE on the workspace row) so concurrent creates can't
+    // both slip past the limit.
+    const participant = await db.withTransaction(async (client) => {
+      const { count, cap } = await db.agentCountAndCap(client, me.workspace_id);
+      if (count >= cap) throw new ApiError(409, `this workspace has reached its agent limit (${cap})`);
+      return db.createParticipant({
+        kind: "agent", workspaceId: me.workspace_id, handle, displayName, runtime: "sdk", runnerToken,
+        repo: repo ?? null, model, mode, runnerProvider,
+      }, client);
     });
     // Respond immediately — provisioning (esp. a Fly machine's first boot / image pull) can take
     // up to ~1min, and the row + status UI ("waking") already give the client what it needs.

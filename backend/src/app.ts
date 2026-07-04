@@ -2,6 +2,7 @@ import express from "express";
 import * as auth from "./auth";
 import { errorHandler } from "./http/errors";
 import participantsRouter from "./http/routes/participants";
+import workspacesRouter from "./http/routes/workspaces";
 import identityRouter from "./http/routes/identity";
 import agentsRouter from "./http/routes/agents";
 import attachmentsRouter from "./http/routes/attachments";
@@ -34,6 +35,7 @@ export function createApp(): express.Express {
   });
 
   app.use(participantsRouter);
+  app.use(workspacesRouter);
   app.use(identityRouter);
   app.use(agentsRouter);
   app.use(attachmentsRouter);

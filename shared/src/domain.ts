@@ -40,6 +40,45 @@ export interface Participant extends ParticipantBase {
   status?: AgentStatus;
 }
 
+// --- Workspaces (Slack-style multi-tenancy) ---
+
+// A workspace as sent to clients.
+export interface Workspace {
+  id: string;
+  name: string;
+}
+
+// The Google identity behind a signed-in user (before/independent of any workspace participant).
+export interface GoogleProfile {
+  uid: string;
+  email: string | null;
+  name: string | null;
+  picture: string | null;
+}
+
+// One of a signed-in account's workspace memberships: the workspace, the account's participant in
+// it (handle/role/etc.), and whether GitHub is connected for that participant.
+export interface Membership {
+  workspace: Workspace;
+  participant: Participant;
+  github: { connected: boolean; login?: string };
+}
+
+// GET /api/me: the signed-in Google account and every workspace it belongs to. `suggestedHandle`
+// seeds the handle field when creating/joining a workspace.
+export interface Me {
+  profile: GoogleProfile;
+  memberships: Membership[];
+  suggestedHandle: string;
+}
+
+// GET /api/invites/:token: what a would-be joiner sees before accepting an invite link.
+export interface InviteInfo {
+  valid: boolean; // false = unknown / revoked / expired token
+  workspaceName?: string;
+  alreadyMember?: boolean; // the signed-in account is already in this workspace
+}
+
 // The attachment fields stored on an upload. A signed download `url` is added at the edge by
 // the backend (attachments.withUrls) to produce `Attachment` — the url is never stored.
 export interface AttachmentMeta {

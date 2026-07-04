@@ -1,3 +1,4 @@
+import type pg from "pg";
 import type { ParticipantBase, Kind } from "@jungle/shared";
 import { pool } from "./pool";
 
@@ -26,8 +27,8 @@ export async function createParticipant(p: {
   runtime?: string | null;
   runnerToken?: string | null;
   runnerProvider?: string | null;
-}): Promise<Participant> {
-  const { rows } = await pool.query<Participant>(
+}, client?: pg.PoolClient): Promise<Participant> {
+  const { rows } = await (client ?? pool).query<Participant>(
     `insert into participants
        (kind, workspace_id, handle, display_name, role, repo, firebase_uid, email, avatar_url,
         model, mode, runtime, runner_token, runner_provider)

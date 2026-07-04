@@ -4,6 +4,7 @@
 export { pool } from "./pool";
 export { withTransaction } from "./tx";
 export * from "./participants";
+export * from "./workspaces";
 export * from "./channels";
 export * from "./messages";
 export * from "./threads";
