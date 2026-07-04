@@ -398,6 +398,13 @@ export class Runner {
           // Report context occupancy while the query is still alive (a control
           // request needs the subprocess up — it exits once this loop ends).
           await this.reportContextUsage(q, message);
+          // Turn boundary: the `result` ends this turn's model work. If nothing is queued
+          // to continue with, close the streaming input so the query completes, the CLI
+          // subprocess exits, and runTurn falls through to turn_done + idle. Without this the
+          // generator would await the next batch forever — subprocess stays alive, `running`
+          // never clears, and the agent is stuck "working" (idle-stop never fires). Follow-up
+          // work that arrived mid-turn was already handed to the generator by handleEnqueue.
+          this.endTurnIfQuiescent();
         }
       }
     } catch (err) {
@@ -488,6 +495,20 @@ export class Runner {
       if (batch === null || batch.length === 0) return;
       yield await this.toUserMessage(batch);
     }
+  }
+
+  // At a turn boundary (a `result` was just seen), end the streaming-input query if there's
+  // nothing more to feed it: resolve the awaited batch with null so makeInputGenerator
+  // returns, the CLI subprocess exits, and runTurn falls through to turn_done + state:idle.
+  // No-op when a follow-up batch was already delivered (batchResolver consumed) or a model
+  // change is pending (handleSetModel already ended the query to restart with the new model).
+  private endTurnIfQuiescent(): void {
+    if (!this.batchResolver) return;
+    if (this.pendingModel !== null) return;
+    if (this.queue.length > 0) return;
+    const resolve = this.batchResolver;
+    this.batchResolver = null;
+    resolve(null);
   }
 
   // Called when items arrive while a turn is running and a follow-up is awaited.
