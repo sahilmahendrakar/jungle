@@ -67,6 +67,19 @@ Runs as unprivileged user `agent`; the entrypoint fixes `/workspace` ownership
 as root then drops privileges via `gosu`. Session transcripts and git creds live
 under `/workspace` so memory survives container recreation.
 
+## Deploying a new runner image (Fly)
+
+```bash
+node scripts/deploy-fly-runner.mjs   # build + push registry.fly.io/jungle-runners:v1, then update every machine
+```
+
+**Pushing the tag is not enough.** Fly pins the *resolved image digest* per machine
+at create/update time, so a rebuilt `:v1` only reaches a machine when that machine is
+**updated** — a plain wake (`provisioner.start`) reuses the old pinned digest and keeps
+running the old code. The deploy script does the machine-update step for every agent
+(and `FlyProvisioner.redeploy()` does it for one). Skip the build/push and only roll out
+an already-pushed image with `--rollout`.
+
 ## Testing
 
 ```bash
