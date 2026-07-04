@@ -23,7 +23,9 @@ async function fly<T = any>(path: string, init?: RequestInit): Promise<T> {
 }
 
 const machineName = (agentId: string) => `jungle-agent-${agentId}`;
-const volumeName = (agentId: string) => `jungle_agent_${agentId.replace(/-/g, "")}_ws`;
+// Fly volume names: [a-z0-9_], max 30 chars. A de-hyphenated uuid is 32 chars, so prefix
+// "jr_" + the first 26 hex chars (still 104 bits — collision-free at our scale) = 29 chars.
+const volumeName = (agentId: string) => `jr_${agentId.replace(/-/g, "").slice(0, 26)}`;
 
 // Talks directly to the Fly Machines REST API (https://api.machines.dev/v1) rather than
 // shelling out to flyctl — the backend has no flyctl install and this is a thin enough
