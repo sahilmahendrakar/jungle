@@ -398,6 +398,7 @@ export function ParticipantProfilePanel({
 export function ContextUsageCard({ person }: { person: Participant }) {
   const [requesting, setRequesting] = useState(false);
   const [requested, setRequested] = useState(false);
+  const [waking, setWaking] = useState(false);
   const [err, setErr] = useState("");
 
   const tokens = person.context_tokens ?? null;
@@ -424,7 +425,10 @@ export function ContextUsageCard({ person }: { person: Participant }) {
   const updatedAt = person.context_updated_at ?? null;
   const requestedAtRef = useRef<string | null>(null);
   useEffect(() => {
-    if (requested && updatedAt !== requestedAtRef.current) setRequested(false);
+    if (requested && updatedAt !== requestedAtRef.current) {
+      setRequested(false);
+      setWaking(false);
+    }
   }, [updatedAt, requested]);
 
   async function compact() {
@@ -433,9 +437,10 @@ export function ContextUsageCard({ person }: { person: Participant }) {
     setErr("");
     try {
       const r = await compactAgent(person.id);
-      if (!r.ok) throw new Error(r.error === "runner not connected" ? "Agent is offline." : (r.error ?? "compact failed"));
+      if (!r.ok) throw new Error(r.error ?? "compact failed");
       requestedAtRef.current = updatedAt;
       setRequested(true);
+      setWaking(!!r.waking);
     } catch (e) {
       setErr(String((e as Error).message ?? e));
     } finally {
@@ -484,8 +489,11 @@ export function ContextUsageCard({ person }: { person: Participant }) {
       </Button>
       {requested && (
         <p className="text-[11px] leading-tight text-muted-foreground">
-          The agent will summarize its older conversation when it's next idle; the meter
-          updates when it finishes.
+          {waking
+            ? "The agent was asleep — waking its machine, then it'll summarize its older " +
+              "conversation; the meter updates when it finishes."
+            : "The agent will summarize its older conversation when it's next idle; the meter " +
+              "updates when it finishes."}
         </p>
       )}
       {err && <p className="text-[11px] text-destructive">{err}</p>}
