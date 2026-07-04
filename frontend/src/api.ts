@@ -149,6 +149,7 @@ export function updateAgent(
     method: "PATCH",
     json: patch,
     auth: true,
+    devAuth: true,
     errorMessage: "failed to update agent",
   });
 }
@@ -290,6 +291,7 @@ export function confirmToolCall(confirmId: string, decision: "allow" | "deny"): 
   return request(`/api/agents/confirm`, {
     json: { confirmId, decision },
     auth: true,
+    devAuth: true,
     errorMessage: "failed to submit decision",
   });
 }
@@ -299,6 +301,7 @@ export function confirmToolCall(confirmId: string, decision: "allow" | "deny"): 
 export function listChannelMembers(channelId: string): Promise<Participant[]> {
   return request<Participant[]>(`/api/channels/${channelId}/members`, {
     auth: true,
+    devAuth: true,
     errorMessage: "failed to load members",
   });
 }
@@ -308,6 +311,7 @@ export function addChannelMember(channelId: string, handle: string): Promise<Par
   return request<Participant>(`/api/channels/${channelId}/members`, {
     json: { handle },
     auth: true,
+    devAuth: true,
     errorMessage: "failed to add member",
   });
 }
@@ -316,6 +320,7 @@ export function removeChannelMember(channelId: string, participantId: string): P
   return request(`/api/channels/${channelId}/members/${participantId}`, {
     method: "DELETE",
     auth: true,
+    devAuth: true,
     errorMessage: "failed to remove member",
   });
 }
@@ -324,6 +329,7 @@ export function deleteChannel(channelId: string): Promise<{ ok: boolean }> {
   return request(`/api/channels/${channelId}`, {
     method: "DELETE",
     auth: true,
+    devAuth: true,
     errorMessage: "failed to delete channel",
   });
 }

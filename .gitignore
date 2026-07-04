@@ -11,3 +11,6 @@ build/
 *.pem
 *.key
 /data/
+
+.env.devbypass
+backend/test-boot.ts

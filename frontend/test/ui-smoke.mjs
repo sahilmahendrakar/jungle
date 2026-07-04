@@ -46,6 +46,29 @@ try {
   await page.keyboard.press("Escape");
   await page.waitForTimeout(400);
 
+  // New-channel dialog: name field + member options render, then CLOSE without creating.
+  await page.locator('[data-testid="new-channel-toggle"]').first().click();
+  await page.waitForTimeout(500);
+  check("new-channel dialog: name field", (await page.locator('[data-testid="new-channel-name"]').count()) > 0);
+  check("new-channel dialog: member options", (await page.locator('[data-testid="member-option"]').count()) > 0);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(400);
+
+  // Members dialog: open a non-DM channel, open its members panel, verify the add-input + roster.
+  if (nChannels > 0) {
+    await channels.first().click();
+    await page.waitForTimeout(500);
+    const membersBtn = page.locator('[data-testid="members-button"]').first();
+    if (await membersBtn.count()) {
+      await membersBtn.click();
+      await page.locator('[data-testid="member-row"]').first().waitFor({ timeout: 4000 }).catch(() => {});
+      check("members dialog: add input", (await page.locator('[data-testid="member-add-input"]').count()) > 0);
+      check("members dialog: roster rows", (await page.locator('[data-testid="member-row"]').count()) > 0);
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(400);
+    }
+  }
+
   // Profile dialog via People -> DM -> profile (existing participant; no agent created).
   const person = page.locator('[data-testid="people-item"]').first();
   if (await person.count()) {
