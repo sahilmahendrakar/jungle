@@ -1,4 +1,4 @@
-import { Hash, MoreVertical, PanelLeft, Trash2, UserPlus, Users } from "lucide-react";
+import { Activity, Hash, MessageSquare, MoreVertical, PanelLeft, Trash2, UserPlus, Users } from "lucide-react";
 import type { Channel, Participant } from "../../api";
 import { PersonAvatar } from "./panels";
 import { Button } from "@/components/ui/button";
@@ -17,29 +17,38 @@ import {
 
 // The conversation header bar: mobile menu / desktop sidebar-expand affordances, the channel or DM
 // title (DMs link to the other participant's profile), and — for channels — the member count +
-// settings menu (members / delete). Presentational; every action is a callback.
+// settings menu (members / delete). For an agent DM, also a "View activity"/"View chat" toggle
+// that swaps the message list for the agent's live transcript in place. Presentational; every
+// action is a callback.
 export function ChannelHeader({
   channel,
   headerTitle,
   sidebarOpen,
   memberCount,
   personByHandle,
+  dmAgent,
+  activityOpen,
   onOpenDrawer,
   onExpandSidebar,
   onOpenProfile,
   onOpenMembers,
   onDeleteChannel,
+  onToggleActivity,
 }: {
   channel: Channel | undefined;
   headerTitle: string | null;
   sidebarOpen: boolean;
   memberCount: number;
   personByHandle: (h?: string | null) => Participant | undefined;
+  // The other participant in this DM, when it's an sdk agent (drives the activity toggle).
+  dmAgent?: Participant;
+  activityOpen: boolean;
   onOpenDrawer: () => void;
   onExpandSidebar: () => void;
   onOpenProfile: (id: string) => void;
   onOpenMembers: () => void;
   onDeleteChannel: () => void;
+  onToggleActivity: () => void;
 }) {
   return (
     <header className="flex h-14 shrink-0 items-center gap-2.5 border-b px-3 md:px-5">
@@ -95,6 +104,28 @@ export function ChannelHeader({
               <Hash className="size-5 text-muted-foreground" />
               <h2 className="truncate font-semibold">{headerTitle}</h2>
             </>
+          )}
+
+          {channel.kind === "dm" && dmAgent && (
+            <Button
+              variant="outline"
+              size="sm"
+              data-testid="dm-activity-toggle"
+              onClick={onToggleActivity}
+              className="ml-auto h-8 gap-1.5 text-muted-foreground"
+            >
+              {activityOpen ? (
+                <>
+                  <MessageSquare className="size-4" />
+                  View chat
+                </>
+              ) : (
+                <>
+                  <Activity className="size-4" />
+                  View activity
+                </>
+              )}
+            </Button>
           )}
 
           {channel.kind !== "dm" && (
