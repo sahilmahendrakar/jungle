@@ -68,7 +68,10 @@ export class FlyProvisioner implements Provisioner {
     try {
       await fly(`/apps/${FLY_APP}/machines/${meta.machineId}/start`, { method: "POST" });
     } catch (e) {
-      if (/already (started|running)|current state: started/i.test(String(e))) return;
+      // A machine created via the API auto-boots, so a start() right after create races the
+      // first boot and 412s with "current state: 'created'/'starting'". Those states mean it's
+      // already coming up — treat as success. (A genuinely stopped machine starts cleanly.)
+      if (/already (started|running)|current state: '?(started|created|starting|replacing)/i.test(String(e))) return;
       throw e;
     }
   }
