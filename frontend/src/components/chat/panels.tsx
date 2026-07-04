@@ -243,6 +243,16 @@ export function ParticipantProfilePanel({
               {isSelf && <span className="text-xs text-muted-foreground">(you)</span>}
             </div>
             <div className="truncate text-sm text-muted-foreground">@{person.handle}</div>
+            {isAgent && person.status && (
+              <div className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+                <span
+                  data-testid="status-dot"
+                  data-status={person.status}
+                  className={cn("size-1.5 shrink-0 rounded-full", STATUS_DOT[person.status])}
+                />
+                {STATUS_LABEL[person.status]}
+              </div>
+            )}
           </div>
         </div>
 
