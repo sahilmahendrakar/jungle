@@ -68,6 +68,20 @@ export interface SendMessageFrame {
   };
 }
 
+// Read-only counterpart to SendMessageFrame: fetch a page of channel/thread transcript older
+// than `beforeSeq` (same #channel / @handle addressing as send_message), for the read_history
+// tool. `beforeSeq` omitted -> the most recent page.
+export interface ReadHistoryFrame {
+  type: "read_history";
+  id: string;
+  input: {
+    to: string;
+    threadRootId?: string;
+    beforeSeq?: string;
+    limit?: number;
+  };
+}
+
 export interface ConfirmRequestFrame {
   type: "confirm_request";
   id: string;
@@ -106,6 +120,7 @@ export type RunnerToBackend =
   | ConsumedFrame
   | EventFrame
   | SendMessageFrame
+  | ReadHistoryFrame
   | ConfirmRequestFrame
   | TurnDoneFrame
   | ContextUsageFrame
@@ -168,6 +183,12 @@ export interface SendMessageResultFrame {
   result: { ok: boolean; error?: string; messageId?: string };
 }
 
+export interface ReadHistoryResultFrame {
+  type: "read_history_result";
+  id: string;
+  result: { ok: boolean; error?: string; text?: string; oldestSeq?: string | null };
+}
+
 export interface ConfirmResultFrame {
   type: "confirm_result";
   id: string;
@@ -191,5 +212,6 @@ export type BackendToRunner =
   | SetModelFrame
   | SetEffortFrame
   | SendMessageResultFrame
+  | ReadHistoryResultFrame
   | ConfirmResultFrame
   | GitCredentialsFrame;

@@ -20,7 +20,11 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { log } from "./log.js";
 import { Connection } from "./connection.js";
-import { createJungleMcpServer, type SendMessageResult } from "./send-message-tool.js";
+import {
+  createJungleMcpServer,
+  type SendMessageResult,
+  type ReadHistoryResult,
+} from "./send-message-tool.js";
 import { applyGitCredentials, cloneRepoIfNeeded, getGhToken } from "./git.js";
 import { loadState, saveState } from "./state.js";
 import {
@@ -55,7 +59,7 @@ export interface RunnerEnv {
 const SAFE_TOOLS = new Set([
   "ToolSearch", "Read", "Glob", "Grep", "WebSearch", "WebFetch",
   "TodoWrite", "Task", "NotebookRead", "BashOutput", "TaskOutput",
-  "ListMcpResources", "ReadMcpResource",
+  "ListMcpResources", "ReadMcpResource", "mcp__jungle__read_history",
 ]);
 
 // Fallback context reading derived from a `result` SDK message when the
@@ -125,6 +129,7 @@ export class Runner {
 
   // In-flight request/response correlation.
   private pendingSendMessages = new Map<string, (r: SendMessageResult) => void>();
+  private pendingReadHistory = new Map<string, (r: ReadHistoryResult) => void>();
   private pendingConfirms = new Map<
     string,
     (r: { allow: boolean; message?: string; updatedInput?: Record<string, unknown> }) => void
@@ -215,6 +220,14 @@ export class Runner {
         const resolve = this.pendingSendMessages.get(frame.id);
         if (resolve) {
           this.pendingSendMessages.delete(frame.id);
+          resolve(frame.result);
+        }
+        break;
+      }
+      case "read_history_result": {
+        const resolve = this.pendingReadHistory.get(frame.id);
+        if (resolve) {
+          this.pendingReadHistory.delete(frame.id);
           resolve(frame.result);
         }
         break;
@@ -372,6 +385,7 @@ export class Runner {
     const mcpServer = createJungleMcpServer(
       (id, input) => this.bridgeSendMessage(id, input),
       (filePath) => uploadFile(this.httpBase, this.env.token, this.workspace, filePath),
+      (id, input) => this.bridgeReadHistory(id, input),
     );
     const q = query({
       prompt: this.makeInputGenerator(firstBatch, turnId, compacting),
@@ -387,7 +401,7 @@ export class Runner {
           append: this.systemPromptAppend || undefined,
         },
         mcpServers: { jungle: mcpServer },
-        allowedTools: ["mcp__jungle__send_message"],
+        allowedTools: ["mcp__jungle__send_message", "mcp__jungle__read_history"],
         // A PreToolUse hook returning permissionDecision "ask" is required to
         // route tool calls to canUseTool: in the non-interactive SDK, `default`
         // mode otherwise auto-approves built-in tools and the callback never
@@ -688,6 +702,27 @@ export class Runner {
       // The tool handler applies a 60s timeout; if it fires we clean up here too.
       setTimeout(() => {
         if (this.pendingSendMessages.delete(id)) {
+          resolve({ ok: false, error: "timed out waiting for backend" });
+        }
+      }, 60_000).unref?.();
+    });
+  }
+
+  // ---- read_history bridge ----
+
+  private bridgeReadHistory(
+    id: string,
+    input: { to: string; threadRootId?: string; beforeSeq?: string; limit?: number },
+  ): Promise<ReadHistoryResult> {
+    return new Promise((resolve) => {
+      this.pendingReadHistory.set(id, resolve);
+      const sent = this.conn.send({ type: "read_history", id, input });
+      if (!sent) {
+        this.pendingReadHistory.delete(id);
+        resolve({ ok: false, error: "backend unreachable" });
+      }
+      setTimeout(() => {
+        if (this.pendingReadHistory.delete(id)) {
           resolve({ ok: false, error: "timed out waiting for backend" });
         }
       }, 60_000).unref?.();

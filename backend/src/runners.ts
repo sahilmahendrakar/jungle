@@ -47,6 +47,20 @@ export interface SendMessageResult {
   error?: string;
   messageId?: string;
 }
+export interface ReadHistoryInput {
+  to?: string;
+  // Read a specific thread's transcript instead of the channel's, by its root message id.
+  threadRootId?: string;
+  // Page older than this seq (from a previous result's oldestSeq); omitted = most recent page.
+  beforeSeq?: string;
+  limit?: number;
+}
+export interface ReadHistoryResult {
+  ok: boolean;
+  error?: string;
+  text?: string;
+  oldestSeq?: string | null;
+}
 export type ConfirmDecision = { result: "allow" | "deny"; denyMessage?: string; updatedInput?: unknown };
 
 export interface RunnerHooks {
@@ -55,6 +69,11 @@ export interface RunnerHooks {
     agent: { id: string; handle: string; workspace_id: string },
     input: SendMessageInput,
   ) => Promise<SendMessageResult>;
+  // Read a page of channel/thread history the agent asked for (read_history tool).
+  readHistory: (
+    agent: { id: string; handle: string; workspace_id: string },
+    input: ReadHistoryInput,
+  ) => Promise<ReadHistoryResult>;
   // Surface a tool-confirmation to humans and resolve when one decides. `agentId`+`id`
   // let the decision endpoint route the result back to the right runner.
   requestConfirm: (
@@ -637,6 +656,24 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
           }
         }
         send(conn, { type: "send_message_result", id: frame.id, result });
+        break;
+      }
+      case "read_history": {
+        const agent = await db.getAgentRow(agentId);
+        let result: ReadHistoryResult;
+        if (!hooks || !agent) {
+          result = { ok: false, error: "backend not ready" };
+        } else {
+          try {
+            result = await hooks.readHistory(
+              { id: agent.id, handle: agent.handle, workspace_id: agent.workspace_id },
+              (frame.input ?? {}) as ReadHistoryInput,
+            );
+          } catch (e) {
+            result = { ok: false, error: String((e as Error).message ?? e) };
+          }
+        }
+        send(conn, { type: "read_history_result", id: frame.id, result });
         break;
       }
       case "confirm_request": {
