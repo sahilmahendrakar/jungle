@@ -30,10 +30,34 @@ export const WS_BASE =
   env.VITE_WS_URL?.replace(/\/+$/, "") ??
   (apiUrl ? apiUrl.replace(/^http/, "ws") : `${secure ? "wss" : "ws"}://${host}:3001`);
 
-// Current Firebase ID token, set by the auth provider; attached to authed requests.
+// Last-known Firebase ID token, pushed in by the auth provider on onIdTokenChanged. This is a
+// snapshot that can go stale (tokens expire ~hourly; the callback can lag a backgrounded tab), so
+// it's only a fallback — authed requests prefer the token-getter below, which mints a fresh one.
 let authToken: string | null = null;
 export function setAuthToken(t: string | null) {
   authToken = t;
+}
+// Fresh-token getter registered by the auth provider (wraps Firebase's getIdToken, which returns
+// the cached token when valid and transparently refreshes it when expired). Authed requests await
+// this so the bearer is never stale — mirroring how the WS handshake already gets its token. Left
+// null in the dev/test path (no Firebase); then requests fall back to the cached snapshot / the
+// ?participantId= dev bypass.
+let tokenGetter: (() => Promise<string | null>) | null = null;
+export function setTokenGetter(fn: (() => Promise<string | null>) | null) {
+  tokenGetter = fn;
+}
+// Resolve the bearer to attach to an authed request: a freshly minted token when a getter is
+// registered, else the cached snapshot.
+async function bearerToken(): Promise<string | null> {
+  if (tokenGetter) {
+    try {
+      const t = await tokenGetter();
+      if (t) return t;
+    } catch {
+      /* fall back to the cached snapshot below */
+    }
+  }
+  return authToken;
 }
 // Dev/test identity (?as=<id>): when Firebase isn't configured there's no token, so
 // requester-gated endpoints authenticate via a participantId the backend trusts under
@@ -64,7 +88,10 @@ function buildUrl(path: string, devAuth: boolean): string {
 
 async function request<T>(path: string, opts: RequestOpts = {}): Promise<T> {
   const headers: Record<string, string> = { ...opts.headers };
-  if (opts.auth && authToken) headers.authorization = `Bearer ${authToken}`;
+  if (opts.auth) {
+    const token = await bearerToken();
+    if (token) headers.authorization = `Bearer ${token}`;
+  }
   let body = opts.body;
   if (opts.json !== undefined) {
     headers["content-type"] = headers["content-type"] ?? "application/json";
@@ -411,9 +438,10 @@ export interface Repo {
 
 // List the user's GitHub repos for the picker. A 409 (GitHub not connected) is returned as
 // { connected: false } rather than thrown, so the UI can fall back to manual entry.
-export function listGithubRepos(): Promise<{ connected: boolean; repos?: Repo[]; error?: string }> {
+export async function listGithubRepos(): Promise<{ connected: boolean; repos?: Repo[]; error?: string }> {
+  const token = await bearerToken();
   return fetch(`${BASE}/api/github/repos`, {
-    headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
+    headers: token ? { authorization: `Bearer ${token}` } : {},
   }).then(async (r) => {
     const j = await r.json().catch(() => ({}));
     if (r.status === 409) return { connected: false, error: (j as { error?: string }).error };
