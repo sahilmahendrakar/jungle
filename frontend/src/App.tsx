@@ -71,6 +71,7 @@ import {
 } from "./components/chat/panels";
 import { AddAgentDialog } from "./components/chat/AddAgentDialog";
 import { Composer } from "./components/chat/Composer";
+import { MessageList } from "./components/chat/MessageList";
 import { NewChannelDialog } from "./components/chat/NewChannelDialog";
 import { MembersDialog } from "./components/chat/MembersDialog";
 import { DeleteChannelDialog } from "./components/chat/DeleteChannelDialog";
@@ -80,7 +81,6 @@ import {
   Check,
   Hash,
   LogOut,
-  MessageSquare,
   MessagesSquare,
   MoreVertical,
   PanelLeft,
@@ -166,7 +166,6 @@ export function App({
   activityIdRef.current = activityId;
   const wsRef = useRef<WebSocket | null>(null);
   const selectedRef = useRef<string | null>(null);
-  const viewportRef = useRef<HTMLDivElement | null>(null);
   selectedRef.current = selected;
   // Whether this tab is focused/visible — a message for the open channel only auto-marks-read
   // when the user is actually looking at it (Slack behaviour). Tracked via a ref so the WS
@@ -303,12 +302,6 @@ export function App({
     }
     listChannelMembers(selected).then(setMembers).catch(() => setMembers([]));
   }, [selected]);
-
-  // Keep the message list pinned to the newest message.
-  useEffect(() => {
-    const vp = viewportRef.current;
-    if (vp) vp.scrollTop = vp.scrollHeight;
-  }, [messages, selected]);
 
   // Persist the sidebar open/closed preference and support a ⌘\ / Ctrl+\ toggle (like Slack).
   useEffect(() => {
@@ -747,56 +740,6 @@ export function App({
 
   const totalThreadUnread = unreadThreads.reduce((n, t) => n + t.unread_count, 0);
 
-  // The per-message thread affordance: a persistent "N replies" chip on a root that has replies
-  // (bold + "N new" when I follow it and have unread), a "View thread" link on an also-to-channel
-  // reply shown in the timeline, or an on-hover "Reply in thread" on everything else.
-  const ThreadFooter = ({ m }: { m: Message }) => {
-    const rootId = m.thread_root_id ?? m.id;
-    const isRoot = !m.thread_root_id;
-    const count = isRoot ? replyCounts.get(m.id) ?? 0 : 0;
-    const unread = unreadByRoot.get(rootId) ?? 0;
-    if (isRoot && count > 0) {
-      return (
-        <button
-          data-testid="thread-replies"
-          onClick={() => openThread(rootId)}
-          className={cn(
-            "mt-1 inline-flex items-center gap-1.5 rounded-md border border-transparent px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:border-border hover:bg-accent",
-            unread > 0 && "font-semibold text-primary",
-          )}
-        >
-          <MessageSquare className="size-3.5" />
-          {count} {count === 1 ? "reply" : "replies"}
-          {unread > 0 && (
-            <span className="rounded-full bg-primary px-1.5 text-[10px] font-semibold text-primary-foreground">
-              {unread} new
-            </span>
-          )}
-        </button>
-      );
-    }
-    if (!isRoot) {
-      return (
-        <button
-          data-testid="view-thread"
-          onClick={() => openThread(rootId)}
-          className="mt-0.5 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent"
-        >
-          <MessageSquare className="size-3.5" /> In thread
-        </button>
-      );
-    }
-    return (
-      <button
-        data-testid="reply-in-thread"
-        onClick={() => openThread(rootId)}
-        className="mt-0.5 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground opacity-0 transition-opacity hover:bg-accent focus:opacity-100 group-hover/msg:opacity-100"
-      >
-        <MessageSquare className="size-3.5" /> Reply in thread
-      </button>
-    );
-  };
-
   // Compact message row for the thread panel (root + replies), not sender-grouped.
   const ThreadMessageRow = ({ m }: { m: Message }) => {
     const sender = personByHandle(m.sender_handle);
@@ -1204,78 +1147,17 @@ export function App({
         </header>
 
         {/* Messages */}
-        <div ref={viewportRef} className="min-h-0 flex-1 overflow-y-auto">
-          <div data-testid="message-list" className="flex flex-col gap-5 px-3 py-6 md:px-5">
-            {sel && grouped.length === 0 && (
-              <div className="flex flex-1 flex-col items-center justify-center gap-2 pt-16 text-center">
-                <div className="flex size-12 items-center justify-center rounded-2xl bg-muted">
-                  <MessagesSquare className="size-6 text-muted-foreground" />
-                </div>
-                <p className="text-sm text-muted-foreground">
-                  This is the start of {headerTitle}. Say something — or{" "}
-                  <span className="font-medium text-foreground">@mention</span>{" "}
-                  an agent to put it to work.
-                </p>
-              </div>
-            )}
-
-            {grouped.map(({ lead, rest }) => {
-              const sender = personByHandle(lead.sender_handle);
-              const isAgent = sender?.kind === "agent";
-              return (
-                <div key={lead.id} className="flex gap-3">
-                  <button
-                    onClick={() => sender && openProfilePanel(sender.id)}
-                    disabled={!sender}
-                    className="h-fit shrink-0 rounded-md transition-opacity hover:opacity-80 disabled:cursor-default"
-                    title={sender ? `View @${sender.handle}` : undefined}
-                  >
-                    <PersonAvatar
-                      name={sender?.display_name ?? lead.sender_handle}
-                      handle={lead.sender_handle}
-                    />
-                  </button>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-baseline gap-2">
-                      <button
-                        data-testid="message-sender"
-                        onClick={() => sender && openProfilePanel(sender.id)}
-                        disabled={!sender}
-                        className="font-semibold hover:underline disabled:no-underline"
-                      >
-                        {sender?.display_name ?? lead.sender_handle}
-                      </button>
-                      {isAgent && (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
-                          <Sparkles className="size-2.5" /> agent
-                        </span>
-                      )}
-                      <span className="text-xs text-muted-foreground">
-                        {fmtTime(lead.created_at)}
-                      </span>
-                    </div>
-                    <div data-testid="message" className="group/msg break-words">
-                      {lead.body && <Markdown>{lead.body}</Markdown>}
-                      {(lead.attachments?.length ?? 0) > 0 && (
-                        <AttachmentList attachments={lead.attachments!} />
-                      )}
-                      <ThreadFooter m={lead} />
-                    </div>
-                    {rest.map((m) => (
-                      <div key={m.id} data-testid="message" className="group/msg mt-1 break-words">
-                        {m.body && <Markdown>{m.body}</Markdown>}
-                        {(m.attachments?.length ?? 0) > 0 && (
-                          <AttachmentList attachments={m.attachments!} />
-                        )}
-                        <ThreadFooter m={m} />
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
+        <MessageList
+          grouped={grouped}
+          hasChannel={!!sel}
+          channelId={selected}
+          headerTitle={headerTitle}
+          personByHandle={personByHandle}
+          onOpenProfile={openProfilePanel}
+          replyCounts={replyCounts}
+          unreadByRoot={unreadByRoot}
+          onOpenThread={openThread}
+        />
 
         {/* Working / waking indicator (conditionally rendered: absent when everyone's idle) */}
         {busyMembers.length > 0 && (
