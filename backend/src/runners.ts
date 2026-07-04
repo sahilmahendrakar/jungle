@@ -428,10 +428,12 @@ export function disconnect(agentId: string): void {
   }
 }
 
-// --- Confirm routing (called by the decision endpoint in index.ts) ---
+// --- Confirm routing ---
 
-// Resolve a runner's confirm_request. Returns false if no live runner / unknown id.
-export function resolveConfirm(agentId: string, confirmId: string, result: ConfirmDecision): boolean {
+// Relay a resolved confirm decision to the runner as a confirm_result frame. Called internally
+// when the requestConfirm hook settles (allow/deny/timeout). Returns false if no live runner /
+// unknown id.
+function resolveConfirm(agentId: string, confirmId: string, result: ConfirmDecision): boolean {
   const conn = conns.get(agentId);
   if (!conn || !conn.pendingConfirms.has(confirmId)) return false;
   conn.pendingConfirms.delete(confirmId);

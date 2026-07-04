@@ -8,6 +8,7 @@ import { provisionerFor } from "../../provisioner";
 import { broadcastAll } from "../../ws/appSocket";
 import { resolveConfirmDecision } from "../../services/confirmations";
 import { wrap, ApiError } from "../errors";
+import { optInt } from "../validate";
 import { publicParticipant, requireAgent, requireRequester } from "../guards";
 
 const router = Router();
@@ -110,8 +111,9 @@ router.get(
   "/api/agents/:id/events",
   wrap(async (req, res) => {
     const agent = await requireAgent(req);
-    const before = req.query.before ? Number(req.query.before) : undefined;
-    const limit = req.query.limit ? Number(req.query.limit) : undefined;
+    // Guard against NaN (e.g. ?before=abc) reaching the bigint bind / limit clamp.
+    const before = optInt(req.query.before);
+    const limit = optInt(req.query.limit);
     const rows = await db.listAgentEvents(agent.id, { before, limit });
     rows.reverse(); // newest-first from the DB -> oldest-first for rendering
     res.json({ events: rows, runner: runners.runnerState(agent.id) });

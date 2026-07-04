@@ -15,8 +15,6 @@ const APP_PEM_PATH =
 
 const API = "https://api.github.com";
 const UA = "jungle-mvp";
-// The hosted GitHub MCP server — gives agents PRs/commits/issues over their repos.
-export const GITHUB_MCP_URL = "https://api.githubcopilot.com/mcp/";
 
 export function isConfigured(): boolean {
   return Boolean(CLIENT_ID && CLIENT_SECRET);

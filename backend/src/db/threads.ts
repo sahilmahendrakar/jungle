@@ -16,15 +16,6 @@ const FOLLOWS_THREAD_SQL = `(
   )
 )`;
 
-// True if `participantId` follows the thread rooted at `rootId` (see FOLLOWS_THREAD_SQL).
-export async function followsThread(rootId: string, participantId: string): Promise<boolean> {
-  const { rows } = await pool.query<{ ok: boolean }>(
-    `select ${FOLLOWS_THREAD_SQL} as ok from messages root where root.id = $2`,
-    [participantId, rootId],
-  );
-  return !!rows[0]?.ok;
-}
-
 // The requester's followed threads that have unread replies, newest activity first. Scoped to
 // channels they're a member of. Unread = replies with seq > their thread_reads.last_read_seq
 // (0 if never opened), excluding their own — the exact live aggregate-join pattern listChannels

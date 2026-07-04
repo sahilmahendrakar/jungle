@@ -3,7 +3,8 @@ import { randomBytes } from "node:crypto";
 import * as db from "../../db";
 import * as gh from "../../github";
 import * as auth from "../../auth";
-import { wrap } from "../errors";
+import { wrap, ApiError } from "../errors";
+import { requireRequester } from "../guards";
 
 const router = Router();
 
@@ -12,6 +13,15 @@ const FRONTEND_URL = process.env.FRONTEND_URL ?? "http://localhost:5173";
 
 // Pending OAuth round-trips: state -> participantId. In-memory is fine for a single backend.
 const pendingOAuth = new Map<string, { participantId: string; createdAt: number }>();
+const OAUTH_STATE_TTL_MS = 15 * 60 * 1000; // a round-trip that hasn't completed in 15 min is dead
+
+// Record a pending OAuth state, evicting any that have expired (bounds the map — an abandoned
+// authorize that never hits the callback would otherwise linger forever).
+function trackOAuthState(state: string, participantId: string): void {
+  const cutoff = Date.now() - OAUTH_STATE_TTL_MS;
+  for (const [k, v] of pendingOAuth) if (v.createdAt < cutoff) pendingOAuth.delete(k);
+  pendingOAuth.set(state, { participantId, createdAt: Date.now() });
+}
 
 // Step 1 of connect: a human hits this (e.g. a "Connect GitHub" button) and is redirected to
 // GitHub to authorize. ?participantId identifies who is connecting (dev path).
@@ -20,7 +30,7 @@ router.get("/auth/github", (req, res) => {
   const participantId = (req.query.participantId as string | undefined) || "";
   if (!participantId) return res.status(400).send("participantId required");
   const state = randomBytes(16).toString("hex");
-  pendingOAuth.set(state, { participantId, createdAt: Date.now() });
+  trackOAuthState(state, participantId);
   res.redirect(gh.authorizeUrl(state));
 });
 
@@ -35,7 +45,7 @@ router.post(
     const p = await db.getParticipantByFirebaseUid(u.uid);
     if (!p) return res.status(409).json({ error: "finish onboarding first" });
     const state = randomBytes(16).toString("hex");
-    pendingOAuth.set(state, { participantId: p.id, createdAt: Date.now() });
+    trackOAuthState(state, p.id);
     res.json({ url: gh.authorizeUrl(state) });
   }),
 );
@@ -97,15 +107,18 @@ router.delete(
   }),
 );
 
-// Open a PR using a participant's connected token. Used by tests now and reused by the agent's
-// open_pr tool.
+// Open a PR using a participant's connected token. The requester may only open a PR as
+// themselves — participantId must match the authenticated requester (previously this trusted a
+// client-supplied participantId, letting anyone open a PR with anyone's linked GitHub token).
 router.post(
   "/api/github/open-pr",
   wrap(async (req, res) => {
+    const me = await requireRequester(req);
     const { participantId, repo, title, body, files, headBranch, baseBranch } = req.body ?? {};
     if (!participantId || !repo || !title || !files) {
       return res.status(400).json({ error: "participantId, repo, title, files required" });
     }
+    if (participantId !== me.id) throw new ApiError(403, "cannot open a PR as another participant");
     res.status(201).json(
       await gh.openPullRequest({ participantId, repo, title, body, files, headBranch, baseBranch }),
     );

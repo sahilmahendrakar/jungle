@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { HANDLE_RE } from "@jungle/shared";
 import * as db from "../../db";
 import * as runners from "../../runners";
 import { wrap, ApiError } from "../errors";
@@ -24,6 +25,9 @@ router.post(
     const { kind, handle, displayName } = req.body ?? {};
     if (!kind || !handle || !displayName) {
       throw new ApiError(400, "kind, handle, displayName required");
+    }
+    if (!HANDLE_RE.test(String(handle))) {
+      throw new ApiError(400, "handle must be 2–30 chars: lowercase letters, digits, - or _");
     }
     res.status(201).json(await db.createParticipant({ kind, handle, displayName }));
   }),
