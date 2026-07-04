@@ -199,9 +199,9 @@ function send(conn: RunnerConn, frame: BackendToRunner): void {
 
 // --- Config framing ---
 
-// Compose the systemPromptAppend for an sdk agent. Mirrors the persona framing the MA path
-// puts in each turn's input (runAgentReply in index.ts): who the agent is and how it talks
-// (send_message only). Per-turn/channel context is NOT here — it rides in each enqueue item.
+// Compose the systemPromptAppend for an sdk agent: persona, behavior, and environment. Per-turn
+// routing/context (which channel, recent messages) is NOT here — that's built fresh per dispatch
+// in orchestrator.ts's buildAgentTurnInput and rides in each enqueue item instead.
 export function systemPromptAppend(agent: db.AgentRow): string {
   let s =
     `You are @${agent.handle} (${agent.display_name || agent.handle}) in Jungle, a Slack-style ` +
@@ -210,6 +210,12 @@ export function systemPromptAppend(agent: db.AgentRow): string {
     `(mcp__jungle__send_message): to reply in a channel use to:"#channel-name", to DM someone ` +
     `use to:"@handle". Plain assistant text is NEVER shown to anyone. ` +
     `Each queued message tells you which channel it came from — reply there unless asked otherwise.\n\n` +
+    `— Be responsive —\n` +
+    `People are waiting on you in real time, like a Slack channel. Send a short send_message ` +
+    `as soon as you start non-trivial work (e.g. "On it — looking into this now.") so people know ` +
+    `you've picked it up, instead of going silent until you're fully done. For anything that takes ` +
+    `a while, send brief progress updates along the way rather than one long silence ending in a ` +
+    `final report.\n\n` +
     `— Files & images —\n` +
     `Files people attach to messages are saved into your workspace under ` +
     `/workspace/attachments/ (each queued message lists the exact paths). To send files or ` +
