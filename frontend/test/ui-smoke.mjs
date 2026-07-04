@@ -32,7 +32,15 @@ try {
     await channels.first().click();
     await page.waitForTimeout(800);
     check("message list renders", (await page.locator('[data-testid="message-list"]').count()) > 0);
-    check("composer input present", (await page.locator('[data-testid="composer-input"]').count()) > 0);
+    const composer = page.locator('[data-testid="composer-input"]');
+    check("composer input present", (await composer.count()) > 0);
+    // Exercise the extracted composer's draft + mention state without posting: typing "@" opens
+    // the mention autocomplete. Clear it afterward so nothing is left staged.
+    await composer.first().click();
+    await composer.first().type("@");
+    check("composer mention popup opens", await page.locator('[data-testid="mention-popup"]').first().isVisible({ timeout: 2000 }).catch(() => false));
+    await page.keyboard.press("Escape");
+    await composer.first().fill("");
     await shot(page, "channel");
   }
 

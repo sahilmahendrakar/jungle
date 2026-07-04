@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ServerEvent } from "@jungle/shared";
 import {
   listChannels,
@@ -11,39 +11,24 @@ import {
   removeChannelMember,
   deleteChannel,
   confirmToolCall,
-  updateAgent,
-  deleteAgent,
-  compactAgent,
   setDevParticipantId,
-  uploadAttachment,
-  attachmentUrl,
   getThread,
   markThreadRead,
   listUnreadThreads,
   WS_BASE,
   type AgentEvent,
   type AgentStatus,
-  type Attachment,
   type Channel,
   type Message,
   type Participant,
   type UnreadThread,
 } from "./api";
 import {
-  MAX_ATTACHMENTS_PER_MESSAGE,
-  MAX_ATTACHMENT_BYTES,
-  INLINE_IMAGE_MIMES,
-  fmtBytes,
-  fmtTokens,
   mergeById,
-  detectMention,
   newId,
   fmtTime,
   STATUS_RANK,
-  STATUS_DOT,
-  STATUS_LABEL,
   type ToolConfirm,
-  type PendingAttachment,
 } from "./lib/chat";
 import { SignIn } from "./SignIn";
 import { firebaseEnabled } from "./firebase";
@@ -77,7 +62,6 @@ import {
 } from "./components/chat/layout";
 import {
   AttachmentList,
-  SelectMenu,
   ParticipantProfilePanel,
   ConfirmCard,
   SectionHeader,
@@ -86,6 +70,7 @@ import {
   EmptyHint,
 } from "./components/chat/panels";
 import { AddAgentDialog } from "./components/chat/AddAgentDialog";
+import { Composer } from "./components/chat/Composer";
 import { NewChannelDialog } from "./components/chat/NewChannelDialog";
 import { MembersDialog } from "./components/chat/MembersDialog";
 import { DeleteChannelDialog } from "./components/chat/DeleteChannelDialog";
@@ -93,26 +78,17 @@ import {
   Activity,
   Bot,
   Check,
-  ChevronDown,
-  FileText,
-  FoldVertical,
-  GitBranch,
   Hash,
-  Loader2,
   LogOut,
   MessageSquare,
   MessagesSquare,
   MoreVertical,
   PanelLeft,
   PanelLeftClose,
-  Paperclip,
-  Plus,
   SendHorizonal,
-  ShieldQuestion,
   Sparkles,
   Trash2,
   UserPlus,
-  UserRound,
   Users,
   X,
 } from "lucide-react";
@@ -137,8 +113,6 @@ export function App({
   const [people, setPeople] = useState<Participant[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [draft, setDraft] = useState("");
-  const [pending, setPending] = useState<PendingAttachment[]>([]); // composer attachments
   const [notice, setNotice] = useState("");
   // New-channel dialog (the form lives inside NewChannelDialog)
   const [showNew, setShowNew] = useState(false);
@@ -167,9 +141,6 @@ export function App({
   const [members, setMembers] = useState<Participant[]>([]);
   const [showMembers, setShowMembers] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  // @-mention autocomplete
-  const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
-  const [mentionIndex, setMentionIndex] = useState(0);
   // Collapsible sidebar (persisted, desktop) + profile dialog (participant id being viewed)
   const [sidebarOpen, setSidebarOpen] = useState(
     () => localStorage.getItem("jungle.sidebar") !== "closed",
@@ -193,8 +164,6 @@ export function App({
   const [activityEvents, setActivityEvents] = useState<AgentEvent[]>([]);
   const activityIdRef = useRef<string | null>(null);
   activityIdRef.current = activityId;
-  const taRef = useRef<HTMLTextAreaElement | null>(null);
-  const fileRef = useRef<HTMLInputElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const selectedRef = useRef<string | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -345,15 +314,6 @@ export function App({
   useEffect(() => {
     localStorage.setItem("jungle.sidebar", sidebarOpen ? "open" : "closed");
   }, [sidebarOpen]);
-  // Auto-grow the composer: match the textarea's height to its content up to the CSS
-  // max-height (max-h-40), past which it scrolls. Keyed on draft so it also shrinks back
-  // after sending (draft cleared) or accepting a mention.
-  useLayoutEffect(() => {
-    const ta = taRef.current;
-    if (!ta) return;
-    ta.style.height = "auto";
-    ta.style.height = `${ta.scrollHeight}px`;
-  }, [draft]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "\\") {
@@ -537,89 +497,29 @@ export function App({
     };
   }, [participantId]);
 
-  // Stage files in the composer and start uploading each immediately (upload-first).
-  // Shared by the paperclip picker and paste-into-textarea.
-  function addFiles(files: FileList | File[]) {
-    let slots = MAX_ATTACHMENTS_PER_MESSAGE - pending.length;
-    const chips: PendingAttachment[] = [];
-    for (const file of Array.from(files)) {
-      if (slots <= 0) {
-        setNotice(`Up to ${MAX_ATTACHMENTS_PER_MESSAGE} attachments per message.`);
-        break;
-      }
-      if (file.size > MAX_ATTACHMENT_BYTES) {
-        setNotice(`"${file.name}" is too large (max 25MB per file).`);
-        continue;
-      }
-      slots--;
-      const key = newId();
-      chips.push({
-        key,
-        name: file.name,
-        size: file.size,
-        mime: file.type || "application/octet-stream",
-        status: "uploading",
-        previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined,
-      });
-      uploadAttachment(file)
-        .then((att) =>
-          setPending((ps) =>
-            ps.map((p) => (p.key === key ? { ...p, status: "ready" as const, att } : p)),
-          ),
-        )
-        .catch((e) =>
-          setPending((ps) =>
-            ps.map((p) =>
-              p.key === key
-                ? { ...p, status: "error" as const, error: String((e as Error).message ?? e) }
-                : p,
-            ),
-          ),
-        );
-    }
-    if (chips.length) setPending((ps) => [...ps, ...chips]);
-  }
-
-  function removePending(key: string) {
-    const gone = pending.find((p) => p.key === key);
-    if (gone?.previewUrl) URL.revokeObjectURL(gone.previewUrl);
-    setPending((ps) => ps.filter((p) => p.key !== key));
-  }
-
-  function send() {
-    const body = draft.trim();
-    const readyIds = pending
-      .filter((p) => p.status === "ready" && p.att)
-      .map((p) => p.att!.id);
-    if (!body && readyIds.length === 0) return;
+  // Post the composer's message over WS. No optimistic echo — the message appears when it
+  // round-trips back, which proves the full send -> persist -> fan-out -> render loop. Returns
+  // false (and surfaces a notice) when it can't send, so the composer keeps the draft.
+  function postMessage(body: string, attachmentIds: string[]): boolean {
     if (!selected) {
       setNotice("Pick or create a channel first.");
-      return;
-    }
-    if (pending.some((p) => p.status === "uploading")) {
-      setNotice("Wait for uploads to finish.");
-      return;
+      return false;
     }
     if (wsRef.current?.readyState !== WebSocket.OPEN) {
       setNotice("Connecting to the server… try again in a moment.");
-      return;
+      return false;
     }
-    // No optimistic echo — the message appears when it round-trips back over WS,
-    // which proves the full send -> persist -> fan-out -> render loop.
     wsRef.current.send(
       JSON.stringify({
         type: "post",
         channelId: selected,
         body,
         clientMsgId: newId(),
-        ...(readyIds.length ? { attachmentIds: readyIds } : {}),
+        ...(attachmentIds.length ? { attachmentIds } : {}),
       }),
     );
-    setDraft("");
-    for (const p of pending) if (p.previewUrl) URL.revokeObjectURL(p.previewUrl);
-    setPending([]);
-    setMention(null);
     setNotice("");
+    return true;
   }
 
   // Open a thread in the right panel (root + replies derive from loaded messages — safe today
@@ -696,59 +596,6 @@ export function App({
     );
     setThreadDraft("");
     setAlsoToChannel(false);
-  }
-
-  // Candidates for the @-mention popup: everyone but me, matching the typed query, with
-  // current channel members surfaced first, then handle-prefix matches.
-  const mentionCandidates = useMemo(() => {
-    if (!mention) return [];
-    const q = mention.query.toLowerCase();
-    const memberIds = new Set(members.map((m) => m.id));
-    return people
-      .filter((p) => p.id !== participantId)
-      .filter(
-        (p) =>
-          !q ||
-          p.handle.toLowerCase().includes(q) ||
-          p.display_name.toLowerCase().includes(q),
-      )
-      .sort((a, b) => {
-        const am = memberIds.has(a.id) ? 0 : 1;
-        const bm = memberIds.has(b.id) ? 0 : 1;
-        if (am !== bm) return am - bm;
-        const asw = a.handle.toLowerCase().startsWith(q) ? 0 : 1;
-        const bsw = b.handle.toLowerCase().startsWith(q) ? 0 : 1;
-        if (asw !== bsw) return asw - bsw;
-        return a.display_name.localeCompare(b.display_name);
-      })
-      .slice(0, 8);
-  }, [mention, people, members, participantId]);
-
-  // Recompute the active mention token from the textarea's current value + caret.
-  function syncMention(value: string, caret: number) {
-    setMention(detectMention(value, caret));
-    setMentionIndex(0);
-  }
-
-  // Replace the in-progress "@query" token with "@handle " and drop the popup.
-  function acceptMention(p: Participant) {
-    const m = mention;
-    const ta = taRef.current;
-    if (!m) return;
-    const caret = ta?.selectionStart ?? m.start + 1 + m.query.length;
-    const before = draft.slice(0, m.start);
-    const after = draft.slice(caret);
-    const insert = `@${p.handle} `;
-    const next = before + insert + after;
-    setDraft(next);
-    setMention(null);
-    const pos = (before + insert).length;
-    requestAnimationFrame(() => {
-      if (ta) {
-        ta.focus();
-        ta.setSelectionRange(pos, pos);
-      }
-    });
   }
 
   function signOut() {
@@ -1469,176 +1316,15 @@ export function App({
         )}
 
         {/* Composer */}
-        <div className="px-3 pb-3 pt-1 md:px-5 md:pb-5">
-          <div className="relative rounded-xl border bg-card p-2 shadow-sm focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/20">
-            {/* @-mention autocomplete */}
-            {mention && mentionCandidates.length > 0 && (
-              <div
-                data-testid="mention-popup"
-                className="absolute bottom-full left-0 z-20 mb-2 w-72 overflow-hidden rounded-lg border bg-popover text-popover-foreground shadow-lg"
-              >
-                <div className="max-h-64 overflow-y-auto p-1">
-                  {mentionCandidates.map((p, i) => (
-                    <button
-                      key={p.id}
-                      data-testid="mention-option"
-                      onMouseDown={(e) => {
-                        e.preventDefault();
-                        acceptMention(p);
-                      }}
-                      onMouseEnter={() => setMentionIndex(i)}
-                      className={cn(
-                        "flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm",
-                        i === mentionIndex ? "bg-accent" : "hover:bg-accent/60",
-                      )}
-                    >
-                      <PersonAvatar name={p.display_name} handle={p.handle} size="sm" />
-                      <span className="flex min-w-0 items-center gap-1">
-                        <span className="truncate font-medium">{p.display_name}</span>
-                        <span className="truncate text-muted-foreground">@{p.handle}</span>
-                        {p.kind === "agent" && <Bot className="size-3.5 shrink-0 text-primary" />}
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-            {/* Staged attachments (upload-first): thumbnails for images, a file icon otherwise. */}
-            {pending.length > 0 && (
-              <div className="mb-2 flex flex-wrap gap-2 px-1">
-                {pending.map((p) => (
-                  <div
-                    key={p.key}
-                    data-testid="pending-attachment"
-                    data-status={p.status}
-                    className={cn(
-                      "flex items-center gap-2 rounded-lg border bg-muted/40 py-1 pl-1.5 pr-1.5 text-sm",
-                      p.status === "error" && "border-destructive/40 bg-destructive/5",
-                    )}
-                  >
-                    {p.previewUrl ? (
-                      <img
-                        src={p.previewUrl}
-                        alt={p.name}
-                        className="size-9 shrink-0 rounded-md border object-cover"
-                      />
-                    ) : (
-                      <span className="flex size-9 shrink-0 items-center justify-center rounded-md border bg-background">
-                        <FileText className="size-4 text-muted-foreground" />
-                      </span>
-                    )}
-                    <span className="max-w-40 truncate">{p.name}</span>
-                    {p.status === "uploading" && (
-                      <Loader2 className="size-4 shrink-0 animate-spin text-muted-foreground" />
-                    )}
-                    {p.status === "error" && (
-                      <span className="shrink-0 text-xs text-destructive" title={p.error}>
-                        failed
-                      </span>
-                    )}
-                    <button
-                      data-testid="pending-attachment-remove"
-                      onClick={() => removePending(p.key)}
-                      aria-label={`Remove ${p.name}`}
-                      className="flex size-5 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                    >
-                      <X className="size-3.5" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-            <div className="flex items-end gap-2">
-            <input
-              ref={fileRef}
-              data-testid="attach-input"
-              type="file"
-              multiple
-              className="hidden"
-              onChange={(e) => {
-                if (e.target.files?.length) addFiles(e.target.files);
-                e.target.value = ""; // allow re-picking the same file
-              }}
-            />
-            <Button
-              variant="ghost"
-              size="icon"
-              data-testid="attach-button"
-              aria-label="Attach files"
-              title="Attach files"
-              onClick={() => fileRef.current?.click()}
-              className="shrink-0 text-muted-foreground"
-            >
-              <Paperclip className="size-4" />
-            </Button>
-            <Textarea
-              ref={taRef}
-              data-testid="composer-input"
-              value={draft}
-              onChange={(e) => {
-                setDraft(e.target.value);
-                syncMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
-              }}
-              onPaste={(e) => {
-                if (e.clipboardData.files.length) {
-                  e.preventDefault();
-                  addFiles(e.clipboardData.files);
-                }
-              }}
-              onSelect={(e) => {
-                const t = e.target as HTMLTextAreaElement;
-                syncMention(t.value, t.selectionStart ?? 0);
-              }}
-              onKeyDown={(e) => {
-                if (mention && mentionCandidates.length > 0) {
-                  if (e.key === "ArrowDown") {
-                    e.preventDefault();
-                    setMentionIndex((i) => (i + 1) % mentionCandidates.length);
-                    return;
-                  }
-                  if (e.key === "ArrowUp") {
-                    e.preventDefault();
-                    setMentionIndex(
-                      (i) => (i - 1 + mentionCandidates.length) % mentionCandidates.length,
-                    );
-                    return;
-                  }
-                  if (e.key === "Enter" || e.key === "Tab") {
-                    e.preventDefault();
-                    acceptMention(mentionCandidates[mentionIndex]);
-                    return;
-                  }
-                  if (e.key === "Escape") {
-                    e.preventDefault();
-                    setMention(null);
-                    return;
-                  }
-                }
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  send();
-                }
-              }}
-              rows={1}
-              placeholder={
-                headerTitle
-                  ? `Message ${sel?.kind === "dm" ? headerTitle : "#" + headerTitle}`
-                  : "Select or create a channel"
-              }
-              className="max-h-40 min-h-9 resize-none overflow-y-auto border-0 bg-transparent px-2 py-1.5 shadow-none focus-visible:ring-0"
-            />
-            <Button
-              data-testid="send-button"
-              onClick={send}
-              size="icon"
-              className="shrink-0"
-              aria-label="Send"
-            >
-              <SendHorizonal className="size-4" />
-            </Button>
-            </div>
-          </div>
-        </div>
+        <Composer
+          headerTitle={headerTitle}
+          isDm={sel?.kind === "dm"}
+          people={people}
+          members={members}
+          participantId={participantId}
+          onSend={postMessage}
+          onNotice={setNotice}
+        />
       </main>
 
       {/* ---------- Right panel (contextual sidebar) ----------
