@@ -38,9 +38,16 @@ single **outbound** WebSocket. The protocol is defined in
 
 ```bash
 npm install
-npm run build      # tsc -> dist/
+npm run build      # sync protocol from shared, then tsc -> dist/
 npm start          # node dist/index.js
 ```
+
+`src/protocol.ts` is **generated** — `npm run build` first runs
+`scripts/sync-protocol.mjs`, which copies the source of truth at
+`../shared/src/runner-protocol.ts` (the backend imports the same types from
+`@jungle/shared`). Edit the shared file, not `src/protocol.ts`. In an isolated
+checkout without the workspace the sync is a no-op and the committed copy is
+used, so the Docker build (which builds `dist/` outside the image) is unaffected.
 
 ## Docker
 

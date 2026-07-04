@@ -1,3 +1,18 @@
+// Wire types are the single source of truth in @jungle/shared (also consumed by the backend).
+// The frontend re-exports the ones it uses so components can keep importing from "./api".
+import type {
+  Participant,
+  Attachment,
+  UnreadThread,
+  AgentEvent,
+  AgentStatus,
+  WireMessage,
+} from "@jungle/shared";
+
+export type { Participant, Attachment, UnreadThread, AgentEvent, AgentStatus };
+// A message as delivered to the client (attachments carry signed download urls).
+export type Message = WireMessage;
+
 // Backend base URL resolution, in priority order:
 //   1. VITE_API_URL — explicit backend origin (e.g. https://54-85-220-156.sslip.io).
 //      Set this in prod (Vercel) where the frontend and backend live on different hosts.
@@ -27,19 +42,45 @@ let devParticipantId: string | null = null;
 export function setDevParticipantId(id: string | null) {
   devParticipantId = id;
 }
-function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
-  return authToken ? { authorization: `Bearer ${authToken}`, ...extra } : extra;
+
+// One request path for every backend call: resolves the URL, attaches auth (bearer token when
+// present; dev participantId query param when there isn't one and `devAuth` is set), sends JSON,
+// and throws a useful Error on a non-2xx so callers never silently swallow failures.
+interface RequestOpts {
+  method?: string;
+  json?: unknown; // JSON body (sets content-type)
+  body?: BodyInit; // raw body (e.g. an upload); takes precedence over `json`
+  headers?: Record<string, string>;
+  auth?: boolean; // attach the bearer token if we have one
+  devAuth?: boolean; // append ?participantId= for the dev/no-token path
+  errorMessage?: string; // fallback message if the response has no { error }
 }
-// Append the dev participantId to a URL's query when running without a token, so GET
-// endpoints gated by requester() resolve an identity under DEV_BYPASS. No-op in prod.
-function withDevAuth(url: string): string {
-  if (authToken || !devParticipantId) return url;
+
+function buildUrl(path: string, devAuth: boolean): string {
+  const url = `${BASE}${path}`;
+  if (!devAuth || authToken || !devParticipantId) return url;
   return url + (url.includes("?") ? "&" : "?") + `participantId=${encodeURIComponent(devParticipantId)}`;
 }
 
-// One of an agent's four live statuses. Working = actively running a turn; Idle = connected,
-// waiting; Sleeping = machine stopped to save cost; Waking = machine starting, not yet connected.
-export type AgentStatus = "working" | "idle" | "sleeping" | "waking";
+async function request<T>(path: string, opts: RequestOpts = {}): Promise<T> {
+  const headers: Record<string, string> = { ...opts.headers };
+  if (opts.auth && authToken) headers.authorization = `Bearer ${authToken}`;
+  let body = opts.body;
+  if (opts.json !== undefined) {
+    headers["content-type"] = headers["content-type"] ?? "application/json";
+    body = JSON.stringify(opts.json);
+  }
+  const res = await fetch(buildUrl(path, opts.devAuth ?? false), {
+    method: opts.method ?? (body ? "POST" : "GET"),
+    headers,
+    body,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error((data as { error?: string }).error ?? opts.errorMessage ?? "request failed");
+  return data as T;
+}
+
+// One of an agent's four live statuses is exported above from @jungle/shared.
 
 export interface Channel {
   id: string;
@@ -51,57 +92,19 @@ export interface Channel {
   member_agent_ids?: string[]; // agent members (drives the row's status dot)
 }
 
-export interface Attachment {
-  id: string;
-  filename: string;
-  mime: string;
-  size_bytes: number;
-  width?: number | null;
-  height?: number | null;
-  url: string; // origin-relative signed path — prefix with the API BASE (see attachmentUrl)
-}
-
-export interface Message {
-  id: string;
-  channel_id: string;
-  seq: string;
-  sender_id: string;
-  sender_handle: string;
-  body: string;
-  created_at: string;
-  mentions?: { id: string; handle: string }[]; // present on WS message frames
-  attachments?: Attachment[]; // may be absent on older cached shapes — treat as empty
-  // Threads: null/absent on top-level messages; the root message's id on replies.
-  // also_to_channel marks a reply also echoed into the main timeline. reply_count/last_reply_at
-  // are denormed on the ROOT (the client also derives replies from loaded messages).
-  thread_root_id?: string | null;
-  also_to_channel?: boolean;
-  reply_count?: number;
-  last_reply_at?: string | null;
-}
-
-// A followed thread with unread replies, for the "Threads" view (GET /api/threads/unread).
-export interface UnreadThread {
-  root_id: string;
-  channel_id: string;
-  channel_name: string;
-  root_sender_handle: string;
-  root_body: string;
-  reply_count: number;
-  last_reply_at: string | null;
-  unread_count: number;
-}
-
 // Upload a file (upload-first, Slack-style): returns the stored Attachment whose id is
 // then referenced by the WS `post` frame's attachmentIds. Max 25MB per file.
 export function uploadAttachment(file: File): Promise<Attachment> {
   const mime = file.type || "application/octet-stream";
   const qs = `filename=${encodeURIComponent(file.name)}&mime=${encodeURIComponent(mime)}`;
-  return fetch(withDevAuth(`${BASE}/api/attachments?${qs}`), {
+  return request<Attachment>(`/api/attachments?${qs}`, {
     method: "POST",
-    headers: authHeaders({ "content-type": "application/octet-stream" }),
     body: file,
-  }).then((r) => json<Attachment>(r, "upload failed"));
+    headers: { "content-type": "application/octet-stream" },
+    auth: true,
+    devAuth: true,
+    errorMessage: "upload failed",
+  });
 }
 
 // Attachment urls come back origin-relative (signed path); resolve against the API BASE.
@@ -109,29 +112,8 @@ export function attachmentUrl(a: Attachment): string {
   return `${BASE}${a.url}`;
 }
 
-export interface Participant {
-  id: string;
-  kind: "human" | "agent";
-  handle: string;
-  display_name: string;
-  repo?: string | null;
-  model?: string | null; // agent model (null = agent-config default)
-  mode?: string; // SDK permission mode: 'default'|'acceptEdits'|'plan'|'bypassPermissions'|'dontAsk'
-  runtime?: string; // 'sdk' (per-agent runner)
-  status?: AgentStatus; // agents only; live-updated via the `agent_status_changed` WS broadcast
-  // Context-window occupancy the agent's runner reported after its last turn (agents only;
-  // null/absent until the first report). Live-updated via the `agent_context` WS broadcast.
-  context_tokens?: number | null;
-  context_max_tokens?: number | null;
-  context_updated_at?: string | null;
-}
-
 export function listParticipants(): Promise<Participant[]> {
-  return fetch(`${BASE}/api/participants`).then(async (r) => {
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error ?? "failed to load participants");
-    return j;
-  });
+  return request<Participant[]>(`/api/participants`, { errorMessage: "failed to load participants" });
 }
 
 // Create a human participant, or (kind "agent", optional repo/model/mode) a cloud agent.
@@ -144,7 +126,7 @@ export function createParticipant(p: {
   mode?: string;
 }): Promise<Participant> {
   const path = p.kind === "agent" ? "/api/agents" : "/api/participants";
-  const body =
+  const json =
     p.kind === "agent"
       ? {
           handle: p.handle,
@@ -154,46 +136,32 @@ export function createParticipant(p: {
           ...(p.mode ? { mode: p.mode } : {}),
         }
       : { kind: "human", handle: p.handle, displayName: p.displayName };
-  return fetch(`${BASE}${path}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  }).then(async (r) => {
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error ?? "create failed");
-    return j;
-  });
+  return request<Participant>(path, { json, errorMessage: "create failed" });
 }
 
 // Update an agent's editable config from its profile page. `mode` is applied live; for sdk
-// agents `model` is applied at the agent's next turn boundary (read-only for ma agents).
+// agents `model` is applied at the agent's next turn boundary.
 export function updateAgent(
   id: string,
   patch: { displayName?: string; mode?: string; model?: string },
 ): Promise<Participant> {
-  return fetch(`${BASE}/api/agents/${id}`, {
+  return request<Participant>(`/api/agents/${id}`, {
     method: "PATCH",
-    headers: authHeaders({ "content-type": "application/json" }),
-    body: JSON.stringify(patch),
-  }).then((r) => json<Participant>(r, "failed to update agent"));
+    json: patch,
+    auth: true,
+    errorMessage: "failed to update agent",
+  });
 }
 
 // Permanently delete an agent: tears down its runner/container and removes all of its data
 // (its DMs and the messages it sent). Irreversible.
 export function deleteAgent(id: string): Promise<{ ok: boolean; error?: string }> {
-  return fetch(withDevAuth(`${BASE}/api/agents/${id}`), {
+  return request(`/api/agents/${id}`, {
     method: "DELETE",
-    headers: authHeaders(),
-  }).then((r) => json<{ ok: boolean; error?: string }>(r, "failed to delete agent"));
-}
-
-// A single Claude Agent SDK stream message persisted for an sdk agent. `event` is the raw
-// SDK message JSON (system/assistant/user/result); render defensively (shapes may vary).
-export interface AgentEvent {
-  id: number;
-  turn_id: string;
-  event: unknown;
-  created_at: string;
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to delete agent",
+  });
 }
 
 export interface AgentEventsPage {
@@ -211,44 +179,54 @@ export function fetchAgentEvents(
   if (opts.before != null) qs.set("before", String(opts.before));
   if (opts.limit != null) qs.set("limit", String(opts.limit));
   const q = qs.toString();
-  return fetch(withDevAuth(`${BASE}/api/agents/${id}/events${q ? `?${q}` : ""}`), {
-    headers: authHeaders(),
-  }).then((r) => json<AgentEventsPage>(r, "failed to load activity"));
+  return request<AgentEventsPage>(`/api/agents/${id}/events${q ? `?${q}` : ""}`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load activity",
+  });
 }
 
 // Stop an sdk agent's currently-running turn.
 export function interruptAgent(id: string): Promise<{ ok: boolean; error?: string }> {
-  return fetch(withDevAuth(`${BASE}/api/agents/${id}/interrupt`), {
+  return request(`/api/agents/${id}/interrupt`, {
     method: "POST",
-    headers: authHeaders(),
-  }).then((r) => json<{ ok: boolean; error?: string }>(r, "failed to stop agent"));
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to stop agent",
+  });
 }
 
 // Ask an sdk agent to compact/summarize its session context. Runs when the agent is next
 // idle; the profile meter updates when the runner reports the post-compaction usage.
 export function compactAgent(id: string): Promise<{ ok: boolean; error?: string }> {
-  return fetch(withDevAuth(`${BASE}/api/agents/${id}/compact`), {
+  return request(`/api/agents/${id}/compact`, {
     method: "POST",
-    headers: authHeaders(),
-  }).then((r) => json<{ ok: boolean; error?: string }>(r, "failed to compact context"));
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to compact context",
+  });
 }
 
 export function listChannels(participantId: string): Promise<Channel[]> {
-  return fetch(`${BASE}/api/channels?participantId=${participantId}`).then((r) => r.json());
+  return request<Channel[]>(`/api/channels?participantId=${participantId}`, {
+    errorMessage: "failed to load channels",
+  });
 }
 
 // Mark a channel read for the current user: advances my last_read_seq to the channel's max
-// message seq (or the supplied `seq`). Requester-gated; uses withDevAuth so the ?participantId=
-// dev path resolves an identity when there's no Firebase token.
+// message seq (or the supplied `seq`). Requester-gated; uses the dev participantId path when
+// there's no Firebase token.
 export function markChannelRead(
   channelId: string,
   seq?: number,
 ): Promise<{ ok: boolean; lastReadSeq: number }> {
-  return fetch(withDevAuth(`${BASE}/api/channels/${channelId}/read`), {
+  return request(`/api/channels/${channelId}/read`, {
     method: "POST",
-    headers: authHeaders({ "content-type": "application/json" }),
-    body: JSON.stringify(seq != null ? { seq } : {}),
-  }).then((r) => json<{ ok: boolean; lastReadSeq: number }>(r, "failed to mark read"));
+    json: seq != null ? { seq } : {},
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to mark read",
+  });
 }
 
 // Create a channel (kind "channel") or DM (kind "dm") with the given member handles.
@@ -257,19 +235,13 @@ export function createChannel(c: {
   kind: "channel" | "dm";
   memberHandles: string[];
 }): Promise<Channel> {
-  return fetch(`${BASE}/api/channels`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(c),
-  }).then(async (r) => {
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error ?? "failed to create channel");
-    return j;
-  });
+  return request<Channel>(`/api/channels`, { json: c, errorMessage: "failed to create channel" });
 }
 
 export function getMessages(channelId: string): Promise<Message[]> {
-  return fetch(`${BASE}/api/channels/${channelId}/messages`).then((r) => r.json());
+  return request<Message[]>(`/api/channels/${channelId}/messages`, {
+    errorMessage: "failed to load messages",
+  });
 }
 
 // --- Threads ---
@@ -277,9 +249,11 @@ export function getMessages(channelId: string): Promise<Message[]> {
 // Full transcript of one thread (root + replies, seq order). Used to lazy-load a thread the
 // client doesn't already hold locally (e.g. opened from the Threads view in another channel).
 export function getThread(channelId: string, rootId: string): Promise<Message[]> {
-  return fetch(withDevAuth(`${BASE}/api/channels/${channelId}/threads/${rootId}`), {
-    headers: authHeaders(),
-  }).then((r) => json<Message[]>(r, "failed to load thread"));
+  return request<Message[]>(`/api/channels/${channelId}/threads/${rootId}`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load thread",
+  });
 }
 
 // Mark a thread read for the current user (participation-gated thread unreads): advances my
@@ -288,71 +262,70 @@ export function markThreadRead(
   rootId: string,
   seq?: number,
 ): Promise<{ ok: boolean; lastReadSeq: number }> {
-  return fetch(withDevAuth(`${BASE}/api/threads/${rootId}/read`), {
+  return request(`/api/threads/${rootId}/read`, {
     method: "POST",
-    headers: authHeaders({ "content-type": "application/json" }),
-    body: JSON.stringify(seq != null ? { seq } : {}),
-  }).then((r) => json<{ ok: boolean; lastReadSeq: number }>(r, "failed to mark thread read"));
+    json: seq != null ? { seq } : {},
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to mark thread read",
+  });
 }
 
 // My followed threads (authored root / replied / @mentioned) that have unread replies.
 export function listUnreadThreads(): Promise<UnreadThread[]> {
-  return fetch(withDevAuth(`${BASE}/api/threads/unread`), { headers: authHeaders() }).then((r) =>
-    json<UnreadThread[]>(r, "failed to load threads"),
-  );
+  return request<UnreadThread[]>(`/api/threads/unread`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load threads",
+  });
 }
 
 // Find-or-create a 1:1 DM with another participant.
 export function createDm(participantId: string, otherId: string): Promise<{ id: string; kind: string }> {
-  return fetch(`${BASE}/api/dms`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ participantId, otherId }),
-  }).then(async (r) => {
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error ?? "failed to open DM");
-    return j;
-  });
+  return request(`/api/dms`, { json: { participantId, otherId }, errorMessage: "failed to open DM" });
 }
 
 // Approve or deny a pending tool confirmation from an always_ask agent.
 export function confirmToolCall(confirmId: string, decision: "allow" | "deny"): Promise<{ ok: boolean }> {
-  return fetch(`${BASE}/api/agents/confirm`, {
-    method: "POST",
-    headers: authHeaders({ "content-type": "application/json" }),
-    body: JSON.stringify({ confirmId, decision }),
-  }).then((r) => json<{ ok: boolean }>(r, "failed to submit decision"));
+  return request(`/api/agents/confirm`, {
+    json: { confirmId, decision },
+    auth: true,
+    errorMessage: "failed to submit decision",
+  });
 }
 
 // --- Channel members + delete ---
 
 export function listChannelMembers(channelId: string): Promise<Participant[]> {
-  return fetch(`${BASE}/api/channels/${channelId}/members`, { headers: authHeaders() }).then((r) =>
-    json<Participant[]>(r, "failed to load members"),
-  );
+  return request<Participant[]>(`/api/channels/${channelId}/members`, {
+    auth: true,
+    errorMessage: "failed to load members",
+  });
 }
 
 // Add a participant (by handle) to a channel. Returns the added participant.
 export function addChannelMember(channelId: string, handle: string): Promise<Participant> {
-  return fetch(`${BASE}/api/channels/${channelId}/members`, {
-    method: "POST",
-    headers: authHeaders({ "content-type": "application/json" }),
-    body: JSON.stringify({ handle }),
-  }).then((r) => json<Participant>(r, "failed to add member"));
+  return request<Participant>(`/api/channels/${channelId}/members`, {
+    json: { handle },
+    auth: true,
+    errorMessage: "failed to add member",
+  });
 }
 
 export function removeChannelMember(channelId: string, participantId: string): Promise<{ ok: boolean }> {
-  return fetch(`${BASE}/api/channels/${channelId}/members/${participantId}`, {
+  return request(`/api/channels/${channelId}/members/${participantId}`, {
     method: "DELETE",
-    headers: authHeaders(),
-  }).then((r) => json<{ ok: boolean }>(r, "failed to remove member"));
+    auth: true,
+    errorMessage: "failed to remove member",
+  });
 }
 
 export function deleteChannel(channelId: string): Promise<{ ok: boolean }> {
-  return fetch(`${BASE}/api/channels/${channelId}`, {
+  return request(`/api/channels/${channelId}`, {
     method: "DELETE",
-    headers: authHeaders(),
-  }).then((r) => json<{ ok: boolean }>(r, "failed to delete channel"));
+    auth: true,
+    errorMessage: "failed to delete channel",
+  });
 }
 
 // --- Identity / onboarding (Firebase auth) ---
@@ -372,43 +345,39 @@ export interface Me {
   github?: { connected: boolean; login?: string };
 }
 
-async function json<T>(r: Response, fallbackErr: string): Promise<T> {
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error((j as { error?: string }).error ?? fallbackErr);
-  return j as T;
-}
-
 export function getMe(): Promise<Me> {
-  return fetch(`${BASE}/api/me`, { headers: authHeaders() }).then((r) => json<Me>(r, "failed to load profile"));
+  return request<Me>(`/api/me`, { auth: true, errorMessage: "failed to load profile" });
 }
 
 export function checkHandle(handle: string): Promise<{ available: boolean; valid: boolean }> {
-  return fetch(`${BASE}/api/handle-available?handle=${encodeURIComponent(handle)}`).then((r) =>
-    json(r, "failed to check handle"),
-  );
+  return request(`/api/handle-available?handle=${encodeURIComponent(handle)}`, {
+    errorMessage: "failed to check handle",
+  });
 }
 
 export function completeOnboarding(handle: string, displayName: string): Promise<Participant> {
-  return fetch(`${BASE}/api/onboarding`, {
-    method: "POST",
-    headers: authHeaders({ "content-type": "application/json" }),
-    body: JSON.stringify({ handle, displayName }),
-  }).then((r) => json<Participant>(r, "onboarding failed"));
+  return request<Participant>(`/api/onboarding`, {
+    json: { handle, displayName },
+    auth: true,
+    errorMessage: "onboarding failed",
+  });
 }
 
 export function githubConnectUrl(): Promise<{ url: string }> {
-  return fetch(`${BASE}/api/github/connect-url`, {
+  return request(`/api/github/connect-url`, {
     method: "POST",
-    headers: authHeaders(),
-  }).then((r) => json<{ url: string }>(r, "failed to start GitHub connect"));
+    auth: true,
+    errorMessage: "failed to start GitHub connect",
+  });
 }
 
 // Disconnect the current user's GitHub account (removes stored tokens).
 export function disconnectGithub(): Promise<{ ok: boolean }> {
-  return fetch(`${BASE}/api/github/connection`, {
+  return request(`/api/github/connection`, {
     method: "DELETE",
-    headers: authHeaders(),
-  }).then((r) => json<{ ok: boolean }>(r, "failed to disconnect GitHub"));
+    auth: true,
+    errorMessage: "failed to disconnect GitHub",
+  });
 }
 
 export interface GithubStatus {
@@ -420,9 +389,10 @@ export interface GithubStatus {
 }
 
 export function getGithubStatus(): Promise<GithubStatus> {
-  return fetch(`${BASE}/api/github/status`, { headers: authHeaders() }).then((r) =>
-    json<GithubStatus>(r, "failed to load GitHub status"),
-  );
+  return request<GithubStatus>(`/api/github/status`, {
+    auth: true,
+    errorMessage: "failed to load GitHub status",
+  });
 }
 
 export interface Repo {
@@ -434,7 +404,9 @@ export interface Repo {
 // List the user's GitHub repos for the picker. A 409 (GitHub not connected) is returned as
 // { connected: false } rather than thrown, so the UI can fall back to manual entry.
 export function listGithubRepos(): Promise<{ connected: boolean; repos?: Repo[]; error?: string }> {
-  return fetch(`${BASE}/api/github/repos`, { headers: authHeaders() }).then(async (r) => {
+  return fetch(`${BASE}/api/github/repos`, {
+    headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
+  }).then(async (r) => {
     const j = await r.json().catch(() => ({}));
     if (r.status === 409) return { connected: false, error: (j as { error?: string }).error };
     if (!r.ok) throw new Error((j as { error?: string }).error ?? "failed to list repos");

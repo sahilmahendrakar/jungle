@@ -1,0 +1,46 @@
+import express from "express";
+import * as auth from "./auth";
+import { errorHandler } from "./http/errors";
+import participantsRouter from "./http/routes/participants";
+import identityRouter from "./http/routes/identity";
+import agentsRouter from "./http/routes/agents";
+import attachmentsRouter from "./http/routes/attachments";
+import channelsRouter from "./http/routes/channels";
+import threadsRouter from "./http/routes/threads";
+import githubRouter from "./http/routes/github";
+
+// Build the Express app: global middleware, the per-domain routers, and the terminal error
+// handler. The http server + WebSocket wiring live in index.ts (boot).
+export function createApp(): express.Express {
+  const app = express();
+  app.use(express.json());
+  app.use(auth.attachAuth); // populates req.auth when a valid Firebase token is present
+
+  // MVP CORS: the frontend (a different origin in dev) needs to read API responses.
+  // Lock the origin down before any real deployment.
+  app.use((req, res, next) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Headers", "content-type, authorization");
+    res.header("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
+    if (req.method === "OPTIONS") {
+      res.sendStatus(204);
+      return;
+    }
+    next();
+  });
+
+  app.get("/health", (_req, res) => {
+    res.json({ ok: true, service: "jungle-backend" });
+  });
+
+  app.use(participantsRouter);
+  app.use(identityRouter);
+  app.use(agentsRouter);
+  app.use(attachmentsRouter);
+  app.use(channelsRouter);
+  app.use(threadsRouter);
+  app.use(githubRouter);
+
+  app.use(errorHandler);
+  return app;
+}
