@@ -15,7 +15,6 @@ import {
   markThreadRead,
   listUnreadThreads,
   type AgentEvent,
-  type AgentStatus,
   type Channel,
   type Message,
   type Participant,
@@ -24,7 +23,6 @@ import {
 import {
   mergeById,
   newId,
-  STATUS_RANK,
   type ToolConfirm,
 } from "./lib/chat";
 import { SignIn } from "./SignIn";
@@ -524,16 +522,7 @@ export function App({
   const dmChannelWith = (handle: string) => dms.find((c) => c.dm_with === handle);
   const personByHandle = (h?: string | null) =>
     h ? people.find((p) => p.handle === h) : undefined;
-  // Per-agent status lookup + the priority rule for a channel row with several agent members.
   const peopleById = new Map(people.map((p) => [p.id, p]));
-  const rowAgentStatus = (agentIds?: string[]): AgentStatus | undefined => {
-    let best: AgentStatus | undefined;
-    for (const id of agentIds ?? []) {
-      const s = peopleById.get(id)?.status;
-      if (s && (!best || STATUS_RANK[s] < STATUS_RANK[best])) best = s;
-    }
-    return best;
-  };
   // Agents working/waking in the currently-open channel (drives the header banner). Read status
   // from the live `people` map rather than the `members` roster snapshot so it stays current.
   const busyMembers = members
@@ -602,7 +591,6 @@ export function App({
         drawerOpen={drawerOpen}
         resizing={resizing}
         leftWidth={left.width}
-        rowAgentStatus={rowAgentStatus}
         personByHandle={personByHandle}
         dmChannelWith={dmChannelWith}
         onSelectChannel={selectAndClose}

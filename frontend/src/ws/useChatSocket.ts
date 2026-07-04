@@ -96,7 +96,8 @@ export function useChatSocket(opts: {
         if (evt.type === "members_changed") {
           if (evt.channelId === selectedRef.current)
             listChannelMembers(evt.channelId).then(setMembers).catch(() => {});
-          // Keep member_agent_ids fresh for the sidebar status dot even on non-open channels.
+          // Refresh the sidebar list so a channel I was just added to/removed from shows up
+          // correctly even when it's not the one currently open.
           reloadChannels();
           return;
         }

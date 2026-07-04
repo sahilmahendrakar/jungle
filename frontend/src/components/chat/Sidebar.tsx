@@ -1,5 +1,5 @@
 import { Bot, Hash, LogOut, MessagesSquare, PanelLeftClose } from "lucide-react";
-import type { AgentStatus, Channel, Participant } from "../../api";
+import type { Channel, Participant } from "../../api";
 import { firebaseEnabled } from "../../firebase";
 import { EmptyHint, NavItem, PersonAvatar, SectionHeader } from "./panels";
 import {
@@ -25,7 +25,6 @@ export function Sidebar({
   drawerOpen,
   resizing,
   leftWidth,
-  rowAgentStatus,
   personByHandle,
   dmChannelWith,
   onSelectChannel,
@@ -50,7 +49,6 @@ export function Sidebar({
   drawerOpen: boolean;
   resizing: boolean;
   leftWidth: number;
-  rowAgentStatus: (agentIds?: string[]) => AgentStatus | undefined;
   personByHandle: (h?: string | null) => Participant | undefined;
   dmChannelWith: (handle: string) => Channel | undefined;
   onSelectChannel: (id: string) => void;
@@ -138,7 +136,6 @@ export function Sidebar({
                   onClick={() => onSelectChannel(c.id)}
                   icon={<Hash className="size-4 opacity-70" />}
                   label={c.name}
-                  status={rowAgentStatus(c.member_agent_ids)}
                   unread={unread}
                   // Slack: regular channel unreads are bold-only; only a mention shows a count badge.
                   badgeCount={c.has_mention ? c.unread_count ?? 0 : 0}

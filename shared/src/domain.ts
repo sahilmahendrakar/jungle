@@ -89,7 +89,7 @@ export interface ChannelListItem {
   dm_with: string | null; // for dm channels: the other member's handle
   unread_count: number; // messages after the requester's last_read_seq, excluding their own
   has_mention: boolean; // any unread message @mentions the requester
-  member_agent_ids: string[]; // agent members (drives the row's status dot)
+  member_agent_ids: string[]; // agent members of this channel
 }
 
 // A followed thread with unread replies, for the "Threads" view (GET /api/threads/unread).
