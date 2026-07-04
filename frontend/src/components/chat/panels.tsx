@@ -433,7 +433,7 @@ export function ContextUsageCard({ person }: { person: Participant }) {
     setErr("");
     try {
       const r = await compactAgent(person.id);
-      if (!r.ok) throw new Error(r.error === "runner not connected" ? "Agent is offline." : (r.error ?? "compact failed"));
+      if (!r.ok) throw new Error(r.error === "runner not connected" ? "Couldn't wake the agent." : (r.error ?? "compact failed"));
       requestedAtRef.current = updatedAt;
       setRequested(true);
     } catch (e) {
