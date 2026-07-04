@@ -32,6 +32,26 @@ function broadcastAgentWorkspace(agentId: string, payload: unknown): void {
 // destination). Overwritten each dispatch; sdk turns are serialized per agent by the runner.
 const sdkContext = new Map<string, { budget: number; channelId: string; threadRootId: string | null }>();
 
+// Only the last few messages are inlined into the turn prompt — enough to orient the agent
+// without ballooning prompt size as a channel/thread grows. If it needs more, it can be given a
+// history-reading tool (not yet implemented) to pull further back.
+const RECENT_CONTEXT_LIMIT = 5;
+
+// Render the message that actually triggered this turn as its own emphasized block, clearly set
+// apart from the surrounding context. Agents were observed latching onto an earlier, unrelated
+// line in "recent conversation" and acting on that instead — this makes the actual task
+// unambiguous even when it's buried near the bottom of a busy channel or thread.
+function formatTriggerMessage(message: PersistedMessage): string {
+  const attached = message.attachments?.length
+    ? ` [attached: ${message.attachments.map((a) => a.filename).join(", ")}]`
+    : "";
+  return (
+    `>>> THIS is the message that addressed you — it's what you're being asked to do. ` +
+    `Everything above is background only.\n` +
+    `@${message.sender_handle}: ${message.body}${attached}`
+  );
+}
+
 // Compose the turn-input prompt for a dispatched agent. There are three shapes:
 //  - Existing thread: the agent gets the THREAD transcript; omitting threadRootId keeps its reply
 //    in that thread (it can pass threadRootId:null / alsoToChannel to reach the whole channel).
@@ -45,11 +65,14 @@ async function buildAgentTurnInput(
   triggerChannelName: string,
   existingThreadRootId: string | null,
   topLevelChannelMessageId: string | null,
+  triggerMessage: PersistedMessage,
 ): Promise<string> {
+  const triggerBlock = formatTriggerMessage(triggerMessage);
   if (existingThreadRootId) {
     return (
       `You are @${agent.handle} in Jungle. You were addressed in a thread in #${triggerChannelName}.\n\n` +
-      `Thread so far:\n${await db.getThreadContext(existingThreadRootId)}\n\n` +
+      `Thread so far:\n${await db.getThreadContext(existingThreadRootId, RECENT_CONTEXT_LIMIT)}\n\n` +
+      `${triggerBlock}\n\n` +
       `Reply by calling send_message with to:"#${triggerChannelName}" — your reply stays in this ` +
       `thread automatically, which is where your progress updates and results should go. Post ` +
       `frequent short updates as you work (e.g. "On it", your plan, what you're starting on). If a ` +
@@ -61,7 +84,8 @@ async function buildAgentTurnInput(
     return (
       `You are @${agent.handle} in Jungle. You were addressed in #${triggerChannelName} by message ` +
       `id ${topLevelChannelMessageId}.\n\n` +
-      `Recent conversation:\n${await db.getRecentContext(triggerChannelId, 20)}\n\n` +
+      `Recent conversation:\n${await db.getRecentContext(triggerChannelId, RECENT_CONTEXT_LIMIT)}\n\n` +
+      `${triggerBlock}\n\n` +
       `Reply by calling send_message with to:"#${triggerChannelName}". You decide where it lands: ` +
       `to reply in a THREAD under the message that addressed you (preferred — keeps the channel ` +
       `tidy, and where your progress updates should go), pass threadRootId:"${topLevelChannelMessageId}". ` +
@@ -73,7 +97,8 @@ async function buildAgentTurnInput(
   }
   return (
     `You are @${agent.handle} in Jungle. You were addressed in #${triggerChannelName}.\n\n` +
-    `Recent conversation:\n${await db.getRecentContext(triggerChannelId, 20)}\n\n` +
+    `Recent conversation:\n${await db.getRecentContext(triggerChannelId, RECENT_CONTEXT_LIMIT)}\n\n` +
+    `${triggerBlock}\n\n` +
     `Respond by calling send_message — to reply here use to:"#${triggerChannelName}". Send a short ` +
     `update as soon as you pick up non-trivial work, then brief progress notes as you go. ` +
     `You may also DM someone with to:"@handle", or post in another channel you belong to.`
@@ -127,6 +152,7 @@ export async function triggerMentionedAgents(
       await db.addChannelMember(channelId, agent.id);
       void runAgentReply(
         channelId, channel.name, agent, budget - 1, message.attachments, rootId, topLevelChannelMessageId,
+        message,
       );
     }
   } catch (e) {
@@ -142,6 +168,7 @@ async function runAgentReply(
   attachments: db.AttachmentMeta[] = [],
   existingThreadRootId: string | null = null,
   topLevelChannelMessageId: string | null = null,
+  triggerMessage: PersistedMessage,
 ): Promise<void> {
   // The agent's working/idle status is tracked from the runner's real turn lifecycle and
   // broadcast as agent_status_changed (see runners.ts) — no per-dispatch flash.
@@ -152,6 +179,7 @@ async function runAgentReply(
       triggerChannelName,
       existingThreadRootId,
       topLevelChannelMessageId,
+      triggerMessage,
     );
     // Repo-specific working instructions live in the runner's systemPromptAppend (runners.ts).
 
@@ -239,6 +267,45 @@ async function deliverAgentMessage(
   }
 }
 
+// A runner's read_history call: same #channel/@handle destination resolution as
+// deliverAgentMessage, but read-only — fetches a page of transcript older than `beforeSeq`
+// (backend/db/{messages,threads}.ts's *HistoryBefore), or a specific thread's transcript when
+// `threadRootId` is given. Backs the read_history tool, for context beyond the few messages
+// inlined into the turn prompt (RECENT_CONTEXT_LIMIT above).
+async function readAgentHistory(
+  agent: { id: string; handle: string; workspace_id: string },
+  toolInput: runners.ReadHistoryInput,
+): Promise<runners.ReadHistoryResult> {
+  const to = String(toolInput.to ?? "").trim();
+  let channelId: string;
+  if (to.startsWith("#")) {
+    const ch = await db.getChannelByNameForMember(to.slice(1), agent.id);
+    if (!ch) return { ok: false, error: `you are not a member of channel ${to} (or it doesn't exist)` };
+    channelId = ch.id;
+  } else if (to.startsWith("@")) {
+    const other = await db.getParticipantByHandle(agent.workspace_id, to.slice(1));
+    if (!other) return { ok: false, error: `no participant named ${to}` };
+    channelId = await db.findOrCreateDm(agent.id, other.id);
+  } else {
+    return { ok: false, error: `"to" must start with "#" (channel) or "@" (handle)` };
+  }
+
+  const limit = Math.min(50, Math.max(1, Number(toolInput.limit) || 20));
+  const beforeSeq = toolInput.beforeSeq ? String(toolInput.beforeSeq) : undefined;
+  try {
+    if (toolInput.threadRootId) {
+      const rootChannel = await db.getMessageChannelId(toolInput.threadRootId);
+      if (rootChannel !== channelId) return { ok: false, error: "that thread isn't in this channel" };
+      const page = await db.getThreadHistoryBefore(toolInput.threadRootId, limit, beforeSeq);
+      return { ok: true, text: page.text, oldestSeq: page.oldestSeq };
+    }
+    const page = await db.getChannelHistoryBefore(channelId, limit, beforeSeq);
+    return { ok: true, text: page.text, oldestSeq: page.oldestSeq };
+  } catch (e) {
+    return { ok: false, error: String((e as Error).message ?? e) };
+  }
+}
+
 // The chat-side effects the runner subsystem calls back into (wired via runners.init). Kept here
 // so all cascade/dispatch logic lives in one module.
 export function buildRunnerHooks(): runners.RunnerHooks {
@@ -251,6 +318,10 @@ export function buildRunnerHooks(): runners.RunnerHooks {
         channelId: ctx?.channelId,
         threadRootId: ctx?.threadRootId ?? null,
       });
+    },
+    // A runner's read_history -> the same destination resolution as send_message, read-only.
+    readHistory: (agent, input) => {
+      return readAgentHistory(agent, input);
     },
     // A runner's confirm_request -> surface a confirmation card in the channel that triggered this
     // agent. Resolving the card resolves this promise; runners.ts relays it as confirm_result.

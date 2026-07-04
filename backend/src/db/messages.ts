@@ -4,7 +4,7 @@ import { pool } from "./pool";
 import { withTransaction } from "./tx";
 import { resolveMentions, getParticipant } from "./participants";
 import { attachmentsForMessages } from "./attachments";
-import { formatContextLines, type ContextRow } from "./context";
+import { formatContextLines, oldestSeqOf, type ContextRow } from "./context";
 
 // Resolve a thread reply's root. Returns the id to store in thread_root_id, or throws if the
 // target doesn't exist / is in another channel. Guarantees replies never nest: if the target
@@ -186,6 +186,33 @@ export async function getRecentContext(channelId: string, limit = 20): Promise<s
     [channelId, limit],
   );
   return formatContextLines(rows);
+}
+
+export interface ContextPage {
+  text: string; // oldest -> newest, same rendering as getRecentContext
+  oldestSeq: string | null; // pass as `beforeSeq` to page further back; null once exhausted
+}
+
+// Agent-facing "read more history" tool backing: a page of channel context older than
+// `beforeSeq` (or the most recent page, when omitted). Unlike getRecentContext this is a real
+// backward cursor — getMessages/getRecentContext only ever expose a forward (afterSeq) cursor,
+// which is fine for reconnect backfill but can't page an agent further into the past on demand.
+export async function getChannelHistoryBefore(
+  channelId: string,
+  limit: number,
+  beforeSeq?: string,
+): Promise<ContextPage> {
+  const { rows } = await pool.query<ContextRow>(
+    `select p.handle, m.body, m.seq,
+            (select array_agg(a.filename order by a.created_at)
+             from attachments a where a.message_id = m.id) as att
+     from messages m join participants p on p.id = m.sender_id
+     where m.channel_id = $1 ${beforeSeq ? "and m.seq < $3" : ""}
+     order by m.seq desc limit $2`,
+    beforeSeq ? [channelId, limit, beforeSeq] : [channelId, limit],
+  );
+  const oldestSeq = oldestSeqOf(rows);
+  return { text: formatContextLines(rows), oldestSeq };
 }
 
 // The channel a message belongs to (for membership checks on thread endpoints). Null if gone.
