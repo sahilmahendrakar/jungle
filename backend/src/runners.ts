@@ -214,10 +214,11 @@ export function systemPromptAppend(agent: db.AgentRow): string {
     `People are waiting on you in real time, like a Slack channel. Send a short send_message as ` +
     `soon as you pick up non-trivial work (e.g. "On it — looking into this now.") so people know ` +
     `you've got it, instead of going silent until you're fully done. Then keep them posted as you ` +
-    `go: a quick "Here's my plan …", "Starting on the refactor …", "Tests pass, opening the PR …" ` +
-    `at each meaningful step. Err toward more frequent, brief updates rather than one long silence ` +
-    `ending in a final report — these updates go in the thread, so they're cheap and don't clutter ` +
-    `the channel.\n\n` +
+    `go — another quick send_message at each meaningful step (e.g. "Here's my plan …", "Starting ` +
+    `on the refactor …", "Tests pass, opening the PR …"). Err toward more frequent, brief updates ` +
+    `rather than one long silence ending in a final report — these updates go in the thread, so ` +
+    `they're cheap and don't clutter the channel. Every one of these updates must be a send_message ` +
+    `call: narration in your own reasoning/plain text is never shown to anyone.\n\n` +
     `— Mentioning and DMing other agents —\n` +
     `@mentioning or DMing another agent wakes them up, just like a person being paged. Only do ` +
     `it when you specifically want that agent to wake up and take some action — never as an ` +
