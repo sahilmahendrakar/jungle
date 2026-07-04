@@ -407,14 +407,37 @@ export function interrupt(agentId: string): boolean {
   return true;
 }
 
+// Compact requests that arrived while the agent was asleep/waking — delivered as soon as the
+// runner's next `hello` arrives (see handleFrame's "hello" case).
+const pendingCompact = new Set<string>();
+
 // Ask the agent's runner to compact/summarize its session context. The runner runs a
-// dedicated `/compact` turn when the agent is next idle (repeated requests coalesce).
-// Returns false if no runner is connected.
-export function compact(agentId: string): boolean {
+// dedicated `/compact` turn when the agent is next idle (repeated requests coalesce). If the
+// machine is asleep, this wakes it (same idiom as orchestrator.ts's wake-on-message) and queues
+// the compact for delivery on connect instead of failing. Returns false only if the wake itself
+// couldn't be started.
+export async function compact(agentId: string): Promise<boolean> {
   const conn = conns.get(agentId);
-  if (!conn) return false;
-  send(conn, { type: "compact" });
-  return true;
+  if (conn) {
+    send(conn, { type: "compact" });
+    return true;
+  }
+  pendingCompact.add(agentId);
+  if (machine.get(agentId)?.kind === "starting") return true; // already waking
+  const agent = await db.getAgentRow(agentId);
+  if (!agent) {
+    pendingCompact.delete(agentId);
+    return false;
+  }
+  try {
+    await provisionerFor(agent).start(agentId);
+    noteProvisionerStart(agentId);
+    return true;
+  } catch (e) {
+    console.error(`compact: wake failed for ${agentId}:`, e);
+    pendingCompact.delete(agentId);
+    return false;
+  }
 }
 
 // Runner liveness/state for the UI (Activity header, profile status dot).
@@ -546,6 +569,8 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         send(conn, await buildConfigure(agent));
         // Runner is idle after configure — push any queued work.
         await drain(agentId);
+        // Deliver a compact that was requested while this agent was asleep/waking.
+        if (pendingCompact.delete(agentId)) send(conn, { type: "compact" });
         break;
       }
       case "state": {

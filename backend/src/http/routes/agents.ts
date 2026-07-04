@@ -167,7 +167,7 @@ router.post(
   "/api/agents/:id/compact",
   wrap(async (req, res) => {
     const agent = await requireAgent(req);
-    const delivered = runners.compact(agent.id);
+    const delivered = await runners.compact(agent.id);
     res.json({ ok: delivered, ...(delivered ? {} : { error: "runner not connected" }) });
   }),
 );
