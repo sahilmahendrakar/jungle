@@ -90,7 +90,7 @@ export function InviteDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-3">
+        <div className="min-w-0 space-y-3">
           <Button onClick={create} disabled={busy} className="w-full gap-2">
             {busy ? <Loader2 className="size-4 animate-spin" /> : <Link2 className="size-4" />}
             Create invite link
@@ -109,9 +109,9 @@ export function InviteDialog({
               {invites.map((inv) => (
                 <div
                   key={inv.token}
-                  className="flex items-center gap-2 rounded-lg border px-2.5 py-2 text-sm"
+                  className="flex items-start gap-2 rounded-lg border px-2.5 py-2 text-sm"
                 >
-                  <span className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground">
+                  <span className="min-w-0 flex-1 break-all font-mono text-xs text-muted-foreground">
                     {inviteUrl(inv.token)}
                   </span>
                   <button
