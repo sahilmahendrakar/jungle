@@ -99,6 +99,22 @@ export class FlyProvisioner implements Provisioner {
     await db.clearRunnerMeta(agentId);
   }
 
+  // Re-pull the runner image onto an existing machine. Fly pins the RESOLVED image digest per
+  // machine at create/update time, so pushing a new tag (e.g. a rebuilt :v1) does NOT roll out
+  // to existing machines on its own — a plain start() reuses the old pinned digest. This POSTs a
+  // machine update with the image swapped (default: the current FLY_RUNNER_IMAGE tag, which Fly
+  // re-resolves to the latest digest), preserving the volume mount, env, and guest; Fly recreates
+  // the container in place. Run after pushing a new image (see scripts/deploy-fly-runner.mjs).
+  async redeploy(agentId: string, image: string = FLY_RUNNER_IMAGE): Promise<void> {
+    const meta = await db.getRunnerMeta(agentId);
+    if (!meta?.machineId) throw new Error(`fly redeploy: no machine recorded for ${agentId}`);
+    const m = await fly<{ config: Record<string, unknown> }>(`/apps/${FLY_APP}/machines/${meta.machineId}`);
+    await fly(`/apps/${FLY_APP}/machines/${meta.machineId}`, {
+      method: "POST",
+      body: JSON.stringify({ config: { ...m.config, image } }),
+    });
+  }
+
   async status(agentId: string): Promise<"running" | "stopped" | "absent"> {
     const meta = await db.getRunnerMeta(agentId);
     if (!meta?.machineId) return "absent";
