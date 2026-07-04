@@ -49,7 +49,7 @@ The preprod frontend must point at the preprod backend. Set these on the Vercel 
 - `VITE_API_URL = https://preprod-api.52.87.26.31.sslip.io`
 - `VITE_WS_URL  = wss://preprod-api.52.87.26.31.sslip.io`
 
-Then redeploy the `preprod` branch.
+Then redeploy the `preprod` branch. _(Configured 2026-07-04.)_
 
 ## Notes / caveats
 
