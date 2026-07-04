@@ -210,12 +210,14 @@ export function systemPromptAppend(agent: db.AgentRow): string {
     `(mcp__jungle__send_message): to reply in a channel use to:"#channel-name", to DM someone ` +
     `use to:"@handle". Plain assistant text is NEVER shown to anyone. ` +
     `Each queued message tells you which channel it came from — reply there unless asked otherwise.\n\n` +
-    `— Be responsive —\n` +
-    `People are waiting on you in real time, like a Slack channel. Send a short send_message ` +
-    `as soon as you start non-trivial work (e.g. "On it — looking into this now.") so people know ` +
-    `you've picked it up, instead of going silent until you're fully done. For anything that takes ` +
-    `a while, send brief progress updates along the way rather than one long silence ending in a ` +
-    `final report.\n\n` +
+    `— Be responsive: narrate your work —\n` +
+    `People are waiting on you in real time, like a Slack channel. Send a short send_message as ` +
+    `soon as you pick up non-trivial work (e.g. "On it — looking into this now.") so people know ` +
+    `you've got it, instead of going silent until you're fully done. Then keep them posted as you ` +
+    `go: a quick "Here's my plan …", "Starting on the refactor …", "Tests pass, opening the PR …" ` +
+    `at each meaningful step. Err toward more frequent, brief updates rather than one long silence ` +
+    `ending in a final report — these updates go in the thread, so they're cheap and don't clutter ` +
+    `the channel.\n\n` +
     `— Mentioning and DMing other agents —\n` +
     `@mentioning or DMing another agent wakes them up, just like a person being paged. Only do ` +
     `it when you specifically want that agent to wake up and take some action — never as an ` +
@@ -223,9 +225,14 @@ export function systemPromptAppend(agent: db.AgentRow): string {
     `a message addressed to a different agent, don't assume it's your job too — only act on it if ` +
     `the user specifically mentioned or asked you.\n\n` +
     `— Threads vs channel —\n` +
-    `Prefer replying in the thread you were addressed in rather than posting to the main channel ` +
-    `timeline, to avoid filling the channel with noise. Only post directly to the channel (or use ` +
-    `alsoToChannel) when the update is something the whole channel should see.\n\n` +
+    `You choose where each reply lands, and for most cases you should choose a thread rather than ` +
+    `the main channel timeline — it keeps the channel tidy. When you're addressed in a thread, ` +
+    `omitting threadRootId keeps your reply in that thread. When you're addressed by a top-level ` +
+    `channel message, that message's id is given to you in the turn input; pass it as threadRootId ` +
+    `to reply in a thread under it (do this for progress updates and most replies). Posting a plain ` +
+    `message to the whole channel is always available and fully your call: omit threadRootId to ` +
+    `post at the top level, or set alsoToChannel:true to post to both a thread and the channel. ` +
+    `Reserve channel-level posts for things everyone should see, not routine progress.\n\n` +
     `— Files & images —\n` +
     `Files people attach to messages are saved into your workspace under ` +
     `/workspace/attachments/ (each queued message lists the exact paths). To send files or ` +
