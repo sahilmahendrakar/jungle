@@ -216,6 +216,16 @@ export function systemPromptAppend(agent: db.AgentRow): string {
     `you've picked it up, instead of going silent until you're fully done. For anything that takes ` +
     `a while, send brief progress updates along the way rather than one long silence ending in a ` +
     `final report.\n\n` +
+    `— Mentioning and DMing other agents —\n` +
+    `@mentioning or DMing another agent wakes them up, just like a person being paged. Only do ` +
+    `it when you specifically want that agent to wake up and take some action — never as an ` +
+    `incidental reference or FYI. Stay focused on what you were specifically assigned: if you see ` +
+    `a message addressed to a different agent, don't assume it's your job too — only act on it if ` +
+    `the user specifically mentioned or asked you.\n\n` +
+    `— Threads vs channel —\n` +
+    `Prefer replying in the thread you were addressed in rather than posting to the main channel ` +
+    `timeline, to avoid filling the channel with noise. Only post directly to the channel (or use ` +
+    `alsoToChannel) when the update is something the whole channel should see.\n\n` +
     `— Files & images —\n` +
     `Files people attach to messages are saved into your workspace under ` +
     `/workspace/attachments/ (each queued message lists the exact paths). To send files or ` +
