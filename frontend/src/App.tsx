@@ -30,7 +30,6 @@ import {
   type ToolConfirm,
 } from "./lib/chat";
 import { SignIn } from "./SignIn";
-import { firebaseEnabled } from "./firebase";
 import { SettingsPanel } from "./Settings";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -60,27 +59,21 @@ import {
 import {
   ParticipantProfilePanel,
   ConfirmCard,
-  SectionHeader,
-  NavItem,
   PersonAvatar,
-  EmptyHint,
 } from "./components/chat/panels";
 import { AddAgentDialog } from "./components/chat/AddAgentDialog";
 import { Composer } from "./components/chat/Composer";
 import { MessageList } from "./components/chat/MessageList";
+import { Sidebar } from "./components/chat/Sidebar";
 import { ThreadPanel } from "./components/chat/ThreadPanel";
 import { NewChannelDialog } from "./components/chat/NewChannelDialog";
 import { MembersDialog } from "./components/chat/MembersDialog";
 import { DeleteChannelDialog } from "./components/chat/DeleteChannelDialog";
 import {
   Activity,
-  Bot,
   Hash,
-  LogOut,
-  MessagesSquare,
   MoreVertical,
   PanelLeft,
-  PanelLeftClose,
   Trash2,
   UserPlus,
   Users,
@@ -556,6 +549,15 @@ export function App({
     setThreadsListOpen(false);
     setDrawerOpen(false);
   }
+  // Open the Threads list in the right panel (takes over from a profile/settings/open-thread view).
+  function openThreadsList() {
+    setProfileId(null);
+    setSettingsPanelOpen(false);
+    setThreadRootId(null);
+    setThreadsListOpen(true);
+    refreshThreads();
+    setDrawerOpen(false);
+  }
 
   // Post a reply into the open thread. Round-trips over WS like send(); it reappears in
   // `messages` (thread_root_id set) and the pane re-derives. alsoToChannel echoes it to the
@@ -765,211 +767,36 @@ export function App({
         />
       )}
 
-      {/* ---------- Sidebar ----------
-          Desktop (md+): in-flow, collapsible via width transition (persisted preference).
-          Mobile (<md): fixed off-canvas drawer, slid in/out with `drawerOpen`. */}
-      <aside
-        data-testid="sidebar"
-        // Desktop width is driven by inline style (drag-resizable, persisted); collapsing sets
-        // it to 0. Mobile keeps the fixed w-72 off-canvas drawer, so the inline style is only
-        // applied at md+ (via isDesktop). The width transition is dropped mid-drag so the panel
-        // tracks the pointer instead of easing behind it.
-        style={isDesktop ? { width: sidebarOpen ? left.width : 0 } : undefined}
-        className={cn(
-          "shrink-0 overflow-hidden",
-          // Mobile: off-canvas fixed drawer.
-          "fixed inset-y-0 left-0 z-40 w-72 transition-transform duration-200 ease-in-out",
-          drawerOpen ? "translate-x-0" : "-translate-x-full",
-          // Desktop: in-flow (relative, so the resize handle anchors here) with the mobile
-          // transform reset.
-          "md:relative md:z-auto md:translate-x-0",
-          !resizing && "md:transition-[width] md:duration-200 md:ease-in-out",
-        )}
-      >
-        <div
-          className="flex h-full w-72 flex-col bg-sidebar text-sidebar-foreground"
-          style={isDesktop ? { width: left.width } : undefined}
-        >
-        {/* Workspace header */}
-        <div className="flex shrink-0 items-center gap-2.5 border-b border-sidebar-border px-4 py-3.5">
-          <img src="/icon-192.png" alt="Jungle" className="size-8 rounded-lg shadow-sm" />
-          <div className="min-w-0 flex-1">
-            <div className="truncate font-bold leading-tight">Jungle</div>
-          </div>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                data-testid="sidebar-collapse"
-                onClick={() => {
-                  setSidebarOpen(false); // desktop: collapse
-                  setDrawerOpen(false); // mobile: close the off-canvas drawer
-                }}
-                className="flex size-8 items-center justify-center rounded-md text-sidebar-foreground/60 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground md:size-7"
-              >
-                <PanelLeftClose className="size-4" />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent>Collapse sidebar (⌘\)</TooltipContent>
-          </Tooltip>
-        </div>
-
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          <div className="px-2 py-3">
-            {/* Threads: my followed threads with unread replies (participation-gated). */}
-            <NavItem
-              testId="threads-nav"
-              active={threadsListOpen}
-              onClick={() => {
-                // Threads take over the right panel from a profile/settings view.
-                setProfileId(null);
-                setSettingsPanelOpen(false);
-                setThreadRootId(null);
-                setThreadsListOpen(true);
-                refreshThreads();
-                setDrawerOpen(false);
-              }}
-              icon={<MessagesSquare className="size-4 opacity-70" />}
-              label="Threads"
-              unread={totalThreadUnread > 0}
-              badgeCount={totalThreadUnread}
-              badgeMention={totalThreadUnread > 0}
-            />
-
-            <div className="h-3" />
-            {/* Channels */}
-            <SectionHeader
-              label="Channels"
-              actionLabel="New channel"
-              onAction={() => setShowNew(true)}
-              actionTestId="new-channel-toggle"
-            />
-            {rooms.map((c) => {
-              const unread = (c.unread_count ?? 0) > 0;
-              return (
-                <NavItem
-                  key={c.id}
-                  testId="channel-item"
-                  active={c.id === selected}
-                  onClick={() => selectAndClose(c.id)}
-                  icon={<Hash className="size-4 opacity-70" />}
-                  label={c.name}
-                  status={rowAgentStatus(c.member_agent_ids)}
-                  unread={unread}
-                  // Slack: regular channel unreads are bold-only; only a mention shows a count badge.
-                  badgeCount={c.has_mention ? c.unread_count ?? 0 : 0}
-                  badgeMention={c.has_mention}
-                />
-              );
-            })}
-            {rooms.length === 0 && (
-              <EmptyHint>No channels yet.</EmptyHint>
-            )}
-
-            {/* Direct messages */}
-            {dms.length > 0 && (
-              <>
-                <div className="h-3" />
-                <SectionHeader label="Direct messages" />
-                {dms.map((c) => {
-                  const p = personByHandle(c.dm_with);
-                  const unread = (c.unread_count ?? 0) > 0;
-                  return (
-                    <NavItem
-                      key={c.id}
-                      testId="channel-item"
-                      active={c.id === selected}
-                      onClick={() => selectAndClose(c.id)}
-                      icon={
-                        <PersonAvatar
-                          name={p?.display_name ?? c.dm_with ?? "?"}
-                          handle={c.dm_with ?? "?"}
-                          size="sm"
-                        />
-                      }
-                      label={p?.display_name ?? c.dm_with ?? "dm"}
-                      title={c.dm_with ? `@${c.dm_with}` : undefined}
-                      status={p?.kind === "agent" ? p.status : undefined}
-                      unread={unread}
-                      // Slack: every DM unread shows a count badge (all DM messages are "to you").
-                      badgeCount={c.unread_count ?? 0}
-                      badgeMention={c.has_mention}
-                    />
-                  );
-                })}
-              </>
-            )}
-
-            {/* People */}
-            <div className="h-3" />
-            <SectionHeader
-              label="People"
-              actionLabel="Add agent"
-              onAction={() => setShowAddAgent(true)}
-              actionTestId="add-agent-toggle"
-            />
-            {others.map((p) => (
-              <NavItem
-                key={p.id}
-                testId="people-item"
-                active={false}
-                onClick={() => {
-                  const existing = dmChannelWith(p.handle);
-                  if (existing) selectAndClose(existing.id);
-                  else openDm(p.id);
-                }}
-                icon={
-                  <PersonAvatar
-                    name={p.display_name}
-                    handle={p.handle}
-                    size="sm"
-                  />
-                }
-                label={p.display_name}
-                title={`@${p.handle}`}
-                status={p.kind === "agent" ? p.status : undefined}
-                trailing={
-                  p.kind === "agent" ? (
-                    <Bot className="size-3.5 text-sidebar-foreground/50" />
-                  ) : undefined
-                }
-              />
-            ))}
-            {others.length === 0 && <EmptyHint>No one else yet.</EmptyHint>}
-          </div>
-        </div>
-
-        {/* User footer */}
-        {me && (
-          <div className="flex shrink-0 items-center gap-1 border-t border-sidebar-border px-2 py-2.5">
-            <button
-              data-testid="open-profile"
-              onClick={() => (firebaseEnabled ? openSettingsPanel() : openProfilePanel(me.id))}
-              title="Profile & settings"
-              className="flex min-w-0 flex-1 items-center gap-2.5 rounded-md px-1 py-1 text-left transition-colors hover:bg-sidebar-accent"
-            >
-              <PersonAvatar name={me.display_name} handle={me.handle} />
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-sm font-semibold">{me.display_name}</div>
-                <div className="truncate text-xs text-sidebar-foreground/50">@{me.handle}</div>
-              </div>
-            </button>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  data-testid="switch-user"
-                  onClick={signOut}
-                  title="Switch user"
-                  className="flex size-8 shrink-0 items-center justify-center rounded-md text-sidebar-foreground/70 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
-                >
-                  <LogOut className="size-4" />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>Switch user</TooltipContent>
-            </Tooltip>
-          </div>
-        )}
-        </div>
-      </aside>
+      {/* ---------- Sidebar ---------- */}
+      <Sidebar
+        rooms={rooms}
+        dms={dms}
+        others={others}
+        selected={selected}
+        me={me}
+        threadsListOpen={threadsListOpen}
+        totalThreadUnread={totalThreadUnread}
+        isDesktop={isDesktop}
+        sidebarOpen={sidebarOpen}
+        drawerOpen={drawerOpen}
+        resizing={resizing}
+        leftWidth={left.width}
+        rowAgentStatus={rowAgentStatus}
+        personByHandle={personByHandle}
+        dmChannelWith={dmChannelWith}
+        onSelectChannel={selectAndClose}
+        onOpenDm={openDm}
+        onOpenThreads={openThreadsList}
+        onNewChannel={() => setShowNew(true)}
+        onAddAgent={() => setShowAddAgent(true)}
+        onCollapse={() => {
+          setSidebarOpen(false); // desktop: collapse
+          setDrawerOpen(false); // mobile: close the off-canvas drawer
+        }}
+        onOpenProfile={openProfilePanel}
+        onOpenSettings={openSettingsPanel}
+        onSignOut={signOut}
+      />
 
       {/* Left sidebar resize divider (desktop, only while expanded). */}
       {isDesktop && sidebarOpen && (
