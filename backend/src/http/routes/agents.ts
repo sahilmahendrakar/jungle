@@ -24,6 +24,7 @@ const RUNNER_PROVIDER_DEFAULT = process.env.RUNNER_PROVIDER === "fly" ? "fly" : 
 router.post(
   "/api/agents",
   wrap(async (req, res) => {
+    await requireRequester(req);
     const { handle, displayName, repo } = req.body ?? {};
     if (!handle || !displayName) throw new ApiError(400, "handle, displayName required");
     const model = req.body?.model ? String(req.body.model) : null;

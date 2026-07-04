@@ -113,7 +113,11 @@ export function attachmentUrl(a: Attachment): string {
 }
 
 export function listParticipants(): Promise<Participant[]> {
-  return request<Participant[]>(`/api/participants`, { errorMessage: "failed to load participants" });
+  return request<Participant[]>(`/api/participants`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load participants",
+  });
 }
 
 // Create a human participant, or (kind "agent", optional repo/model/mode) a cloud agent.
@@ -136,7 +140,7 @@ export function createParticipant(p: {
           ...(p.mode ? { mode: p.mode } : {}),
         }
       : { kind: "human", handle: p.handle, displayName: p.displayName };
-  return request<Participant>(path, { json, errorMessage: "create failed" });
+  return request<Participant>(path, { json, auth: true, devAuth: true, errorMessage: "create failed" });
 }
 
 // Update an agent's editable config from its profile page. `mode` is applied live; for sdk
@@ -209,7 +213,10 @@ export function compactAgent(id: string): Promise<{ ok: boolean; error?: string 
 }
 
 export function listChannels(participantId: string): Promise<Channel[]> {
+  // participantId is the dev/no-token identity (read by the backend under DEV_BYPASS). In
+  // Firebase mode the bearer token identifies the requester and this query param is ignored.
   return request<Channel[]>(`/api/channels?participantId=${participantId}`, {
+    auth: true,
     errorMessage: "failed to load channels",
   });
 }
@@ -236,11 +243,18 @@ export function createChannel(c: {
   kind: "channel" | "dm";
   memberHandles: string[];
 }): Promise<Channel> {
-  return request<Channel>(`/api/channels`, { json: c, errorMessage: "failed to create channel" });
+  return request<Channel>(`/api/channels`, {
+    json: c,
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to create channel",
+  });
 }
 
 export function getMessages(channelId: string): Promise<Message[]> {
   return request<Message[]>(`/api/channels/${channelId}/messages`, {
+    auth: true,
+    devAuth: true,
     errorMessage: "failed to load messages",
   });
 }
@@ -283,7 +297,12 @@ export function listUnreadThreads(): Promise<UnreadThread[]> {
 
 // Find-or-create a 1:1 DM with another participant.
 export function createDm(participantId: string, otherId: string): Promise<{ id: string; kind: string }> {
-  return request(`/api/dms`, { json: { participantId, otherId }, errorMessage: "failed to open DM" });
+  return request(`/api/dms`, {
+    json: { participantId, otherId },
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to open DM",
+  });
 }
 
 // Approve or deny a pending tool confirmation from an always_ask agent.

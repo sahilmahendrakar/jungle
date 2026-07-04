@@ -1,15 +1,17 @@
 import { Router } from "express";
 import { HANDLE_RE } from "@jungle/shared";
 import * as db from "../../db";
+import * as auth from "../../auth";
 import * as runners from "../../runners";
 import { wrap, ApiError } from "../errors";
-import { publicParticipant } from "../guards";
+import { publicParticipant, requireRequester } from "../guards";
 
 const router = Router();
 
 router.get(
   "/api/participants",
-  wrap(async (_req, res) => {
+  wrap(async (req, res) => {
+    await requireRequester(req);
     res.json(
       (await db.listParticipants()).map((p) => ({
         ...publicParticipant(p),
@@ -19,9 +21,12 @@ router.get(
   }),
 );
 
+// Dev-only participant creation (the dev sign-in screen). In production humans are created via
+// onboarding/workspace flows; agents via POST /api/agents. 404 when not under dev bypass.
 router.post(
   "/api/participants",
   wrap(async (req, res) => {
+    if (!auth.DEV_BYPASS) throw new ApiError(404, "not found");
     const { kind, handle, displayName } = req.body ?? {};
     if (!kind || !handle || !displayName) {
       throw new ApiError(400, "kind, handle, displayName required");

@@ -47,6 +47,7 @@ async function main() {
   const agent = await api("POST", "/agents", {
     handle: HANDLE, displayName: "Integration Test",
     mode: "default", model: "claude-haiku-4-5-20251001",
+    participantId: HUMAN,
   });
   check("create sdk agent", agent.runtime === "sdk" && !agent.runner_token,
     `id=${agent.id} runtime=${agent.runtime} tokenLeaked=${!!agent.runner_token}`);

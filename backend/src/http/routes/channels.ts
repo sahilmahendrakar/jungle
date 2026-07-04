@@ -3,17 +3,19 @@ import * as db from "../../db";
 import * as att from "../../attachments";
 import { fanOut } from "../../ws/appSocket";
 import { wrap, ApiError } from "../errors";
-import { requireChannelMember } from "../guards";
+import { requireChannelMember, requireRequester } from "../guards";
 
 const router = Router();
 
-// Find-or-create the 1:1 DM channel between two participants (dedupes, unlike POST /channels).
+// Find-or-create the 1:1 DM channel between the requester and another participant (dedupes,
+// unlike POST /channels). The first party is always the authenticated requester.
 router.post(
   "/api/dms",
   wrap(async (req, res) => {
-    const { participantId, otherId } = req.body ?? {};
-    if (!participantId || !otherId) throw new ApiError(400, "participantId, otherId required");
-    const id = await db.findOrCreateDm(participantId, otherId);
+    const me = await requireRequester(req);
+    const { otherId } = req.body ?? {};
+    if (!otherId) throw new ApiError(400, "otherId required");
+    const id = await db.findOrCreateDm(me.id, String(otherId));
     res.status(201).json({ id, kind: "dm" });
   }),
 );
@@ -21,25 +23,30 @@ router.post(
 router.post(
   "/api/channels",
   wrap(async (req, res) => {
+    const me = await requireRequester(req);
     const { name, kind, memberHandles } = req.body ?? {};
     if (!name || !kind) throw new ApiError(400, "name, kind required");
-    res.status(201).json(await db.createChannel({ name, kind, memberHandles: memberHandles ?? [] }));
+    // The creator is always a member (even if their handle wasn't listed in the request).
+    const handles = Array.isArray(memberHandles) ? memberHandles.map(String) : [];
+    if (!handles.includes(me.handle)) handles.push(me.handle);
+    res.status(201).json(await db.createChannel({ name, kind, memberHandles: handles }));
   }),
 );
 
 router.get(
   "/api/channels",
   wrap(async (req, res) => {
-    const participantId = (req.query.participantId as string | undefined) || undefined;
-    res.json(await db.listChannels(participantId));
+    const me = await requireRequester(req);
+    res.json(await db.listChannels(me.id));
   }),
 );
 
 router.get(
   "/api/channels/:id/messages",
   wrap(async (req, res) => {
+    const ctx = await requireChannelMember(req);
     const afterSeq = Number(req.query.afterSeq ?? 0);
-    res.json((await db.getMessages(String(req.params.id), afterSeq)).map(att.withUrls));
+    res.json((await db.getMessages(ctx.channel.id, afterSeq)).map(att.withUrls));
   }),
 );
 
