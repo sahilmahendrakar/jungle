@@ -7,7 +7,6 @@ import {
   listParticipants,
   createChannel,
   createDm,
-  createParticipant,
   listChannelMembers,
   addChannelMember,
   removeChannelMember,
@@ -32,8 +31,6 @@ import {
   type UnreadThread,
 } from "./api";
 import {
-  MODEL_OPTIONS,
-  SDK_MODE_OPTIONS,
   MAX_ATTACHMENTS_PER_MESSAGE,
   MAX_ATTACHMENT_BYTES,
   INLINE_IMAGE_MIMES,
@@ -80,7 +77,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { RepoCombobox } from "./RepoCombobox";
 import { Markdown } from "./Markdown";
 import { AgentActivity } from "./AgentActivity";
 import {
@@ -101,6 +97,7 @@ import {
   PersonAvatar,
   EmptyHint,
 } from "./components/chat/panels";
+import { AddAgentDialog } from "./components/chat/AddAgentDialog";
 import {
   Activity,
   Bot,
@@ -159,12 +156,6 @@ export function App({
   const [creating, setCreating] = useState(false);
   // Add-agent form
   const [showAddAgent, setShowAddAgent] = useState(false);
-  const [agHandle, setAgHandle] = useState("");
-  const [agName, setAgName] = useState("");
-  const [agRepo, setAgRepo] = useState("");
-  const [agModel, setAgModel] = useState(MODEL_OPTIONS[0].id);
-  const [agMode, setAgMode] = useState(SDK_MODE_OPTIONS[0].id); // new agents are sdk runtime
-  const [addingAgent, setAddingAgent] = useState(false);
   // Pending tool-confirmation cards (always_ask agents), keyed by confirmId.
   const [confirms, setConfirms] = useState<ToolConfirm[]>([]);
 
@@ -856,35 +847,6 @@ export function App({
       }
     };
     trySend();
-  }
-
-  async function submitAddAgent() {
-    if (!agHandle.trim() || !agName.trim()) {
-      setNotice("Agent handle and name are required.");
-      return;
-    }
-    setAddingAgent(true);
-    try {
-      await createParticipant({
-        kind: "agent",
-        handle: agHandle.trim(),
-        displayName: agName.trim(),
-        repo: agRepo.trim() || undefined,
-        model: agModel,
-        mode: agMode,
-      });
-      setShowAddAgent(false);
-      setAgHandle("");
-      setAgName("");
-      setAgRepo("");
-      setAgModel(MODEL_OPTIONS[0].id);
-      setAgMode(SDK_MODE_OPTIONS[0].id);
-      listParticipants().then(setPeople).catch(() => {});
-    } catch (e) {
-      setNotice(String((e as Error).message ?? e));
-    } finally {
-      setAddingAgent(false);
-    }
   }
 
   async function decideConfirm(c: ToolConfirm, decision: "allow" | "deny") {
@@ -2125,82 +2087,12 @@ export function App({
       </Dialog>
 
       {/* ---------- Add agent dialog ---------- */}
-      <Dialog open={showAddAgent} onOpenChange={setShowAddAgent}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Bot className="size-5 text-primary" /> Add an agent
-            </DialogTitle>
-            <DialogDescription>
-              A persistent, cloud-living assistant. Give it a repo and it can open
-              real PRs.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div className="space-y-1.5">
-              <Label htmlFor="agent-handle">Handle</Label>
-              <Input
-                id="agent-handle"
-                data-testid="agent-handle"
-                value={agHandle}
-                onChange={(e) => setAgHandle(e.target.value)}
-                placeholder="e.g. deploy-bot"
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="agent-name">Display name</Label>
-              <Input
-                id="agent-name"
-                data-testid="agent-name"
-                value={agName}
-                onChange={(e) => setAgName(e.target.value)}
-                placeholder="e.g. Deploy Bot"
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label>
-                <GitBranch className="size-3.5" /> Repository{" "}
-                <span className="font-normal text-muted-foreground">(optional)</span>
-              </Label>
-              <RepoCombobox value={agRepo} onChange={setAgRepo} />
-              {agRepo.trim() && (
-                <p className="text-xs text-muted-foreground">
-                  With a repo this takes ~30s (clones it).
-                </p>
-              )}
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <Label>Model</Label>
-                <SelectMenu
-                  value={agModel}
-                  onChange={setAgModel}
-                  options={MODEL_OPTIONS}
-                  testId="agent-model"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label>Tool permissions</Label>
-                <SelectMenu
-                  value={agMode}
-                  onChange={setAgMode}
-                  options={SDK_MODE_OPTIONS}
-                  testId="agent-mode"
-                />
-              </div>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button
-              data-testid="add-agent-button"
-              onClick={submitAddAgent}
-              disabled={addingAgent}
-            >
-              {addingAgent ? "Adding…" : "Add agent"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <AddAgentDialog
+        open={showAddAgent}
+        onOpenChange={setShowAddAgent}
+        onCreated={() => listParticipants().then(setPeople).catch(() => {})}
+        onNotice={setNotice}
+      />
 
       {/* Live Claude-Code-style transcript for an sdk agent */}
       {activityAgent && (
