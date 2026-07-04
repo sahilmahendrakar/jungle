@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { ServerEvent } from "@jungle/shared";
 import {
   listChannels,
   markChannelRead,
@@ -636,7 +637,9 @@ export function App({
           );
       };
       ws.onmessage = (e) => {
-        const evt = JSON.parse(e.data);
+        // Typed against the shared ServerEvent union (same contract the backend emits), so each
+        // branch below is checked against the real frame shape instead of an untyped any.
+        const evt = JSON.parse(e.data) as ServerEvent;
         if (evt.type === "agent_status_changed") {
           setPeople((ps) => ps.map((p) => (p.id === evt.agentId ? { ...p, status: evt.status } : p)));
           return;
@@ -699,10 +702,9 @@ export function App({
           // the transcript backfills from the events API when reopened.
           if (evt.agentId !== activityIdRef.current) return;
           const e: AgentEvent = {
-            // WS frames carry the raw event; synthesize an id/turn shape matching AgentEvent.
-            // The events API assigns numeric ids; use event.id when present, else a monotonic
-            // fallback so dedupe/order stay stable within the live buffer.
-            id: typeof evt.id === "number" ? evt.id : Date.now() + Math.random(),
+            // WS frames carry the raw event but no id (the events API assigns numeric ids on
+            // reload); use a monotonic fallback so dedupe/order stay stable within the live buffer.
+            id: Date.now() + Math.random(),
             turn_id: evt.turnId,
             event: evt.event,
             created_at: new Date().toISOString(),
