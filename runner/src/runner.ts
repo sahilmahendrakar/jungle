@@ -130,17 +130,11 @@ export class Runner {
     (r: { allow: boolean; message?: string; updatedInput?: Record<string, unknown> }) => void
   >();
 
-  private mcpServer: ReturnType<typeof createJungleMcpServer>;
-
   // Backend HTTP origin for attachment transfer, derived from the WS URL.
   private readonly httpBase: string;
 
   constructor(private readonly env: RunnerEnv) {
     this.httpBase = httpBaseFromWsUrl(env.wsUrl);
-    this.mcpServer = createJungleMcpServer(
-      (id, input) => this.bridgeSendMessage(id, input),
-      (filePath) => uploadFile(this.httpBase, this.env.token, this.workspace, filePath),
-    );
     this.conn = new Connection(env.wsUrl, env.token, {
       onFrame: (f) => this.handleFrame(f),
       onOpen: () => this.onOpen(),
@@ -369,6 +363,16 @@ export class Runner {
     this.sendState();
 
     const resumeId = await this.resumableSessionId();
+    // Build a fresh in-process MCP server per turn. Each query() connects the server to its own
+    // in-memory transport; the SDK's per-query cleanup closes that transport on teardown, which
+    // (via the MCP Server's single-transport Protocol) nulls the server's transport binding. A
+    // server SHARED across turns therefore races: the previous turn's async cleanup can null the
+    // binding the current turn just established, leaving send_message with no transport — the CLI
+    // then surfaces "Stream closed" to the model. A per-turn server has no cross-turn aliasing.
+    const mcpServer = createJungleMcpServer(
+      (id, input) => this.bridgeSendMessage(id, input),
+      (filePath) => uploadFile(this.httpBase, this.env.token, this.workspace, filePath),
+    );
     const q = query({
       prompt: this.makeInputGenerator(firstBatch, turnId, compacting),
       options: {
@@ -382,7 +386,7 @@ export class Runner {
           preset: "claude_code",
           append: this.systemPromptAppend || undefined,
         },
-        mcpServers: { jungle: this.mcpServer },
+        mcpServers: { jungle: mcpServer },
         allowedTools: ["mcp__jungle__send_message"],
         // A PreToolUse hook returning permissionDecision "ask" is required to
         // route tool calls to canUseTool: in the non-interactive SDK, `default`
