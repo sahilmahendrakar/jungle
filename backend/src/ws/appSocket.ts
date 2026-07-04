@@ -15,18 +15,30 @@ export const DEFAULT_CASCADE_BUDGET = 3;
 
 // participantId -> open sockets (a participant may be connected from several devices).
 const sockets = new Map<string, Set<WebSocket>>();
+// workspaceId -> open sockets in that workspace (for workspace-scoped broadcasts). A socket lives
+// in exactly one workspace (the participant it authenticated as belongs to one workspace).
+const workspaceSockets = new Map<string, Set<WebSocket>>();
 
-function addSocket(pid: string, ws: WebSocket): void {
-  let set = sockets.get(pid);
-  if (!set) sockets.set(pid, (set = new Set()));
+function addToMap(map: Map<string, Set<WebSocket>>, key: string, ws: WebSocket): void {
+  let set = map.get(key);
+  if (!set) map.set(key, (set = new Set()));
   set.add(ws);
 }
-function removeSocket(pid: string, ws: WebSocket): void {
-  const set = sockets.get(pid);
+function removeFromMap(map: Map<string, Set<WebSocket>>, key: string, ws: WebSocket): void {
+  const set = map.get(key);
   if (set) {
     set.delete(ws);
-    if (!set.size) sockets.delete(pid);
+    if (!set.size) map.delete(key);
   }
+}
+
+function addSocket(pid: string, workspaceId: string, ws: WebSocket): void {
+  addToMap(sockets, pid, ws);
+  addToMap(workspaceSockets, workspaceId, ws);
+}
+function removeSocket(pid: string, workspaceId: string, ws: WebSocket): void {
+  removeFromMap(sockets, pid, ws);
+  removeFromMap(workspaceSockets, workspaceId, ws);
 }
 
 // Fan out a payload to every connected device of every member of a channel.
@@ -38,13 +50,14 @@ export async function fanOut(channelId: string, payload: unknown): Promise<void>
   }
 }
 
-// Broadcast to every connected socket (workspace-wide events, e.g. a participant's profile
-// changed — everyone's People list / open profile should reflect it).
-export function broadcastAll(payload: unknown): void {
+// Broadcast to every connected socket in ONE workspace (workspace-wide events, e.g. a
+// participant's profile changed, or an agent's live status/activity — everyone in that workspace
+// should see it, and NO ONE outside it). Replaces the old broadcast-to-all-tenants primitive.
+export function broadcastWorkspace(workspaceId: string, payload: unknown): void {
+  const set = workspaceSockets.get(workspaceId);
+  if (!set) return;
   const data = JSON.stringify(payload);
-  for (const set of sockets.values()) {
-    for (const ws of set) if (ws.readyState === WebSocket.OPEN) ws.send(data);
-  }
+  for (const ws of set) if (ws.readyState === WebSocket.OPEN) ws.send(data);
 }
 
 // Effects the socket needs from the orchestration layer (injected to avoid a ws<->service
@@ -70,27 +83,33 @@ export function initAppSocket(server: Server, hooks: AppSocketHooks): void {
 
   wss.on("connection", async (ws, req) => {
     const url = new URL(req.url ?? "/", "http://localhost");
-    // Real auth: a Firebase ID token (?token=) is verified and mapped to the user's participant.
+    // Real auth: a Firebase ID token (?token=) is verified and mapped to the user's participant in
+    // the active workspace (&workspaceId=, with a single-membership fallback during rollout).
     // Dev/test: when DEV_BYPASS is on, fall back to a trusted ?participantId=.
-    let participantId: string | null = null;
+    let participant: db.Participant | null = null;
     const token = url.searchParams.get("token");
     if (token && auth.firebaseConfigured()) {
       try {
         const u = await auth.verifyIdToken(token);
-        participantId = (await db.getParticipantByFirebaseUid(u.uid))?.id ?? null;
+        const wsId = url.searchParams.get("workspaceId");
+        participant = wsId
+          ? await db.getParticipantByUidAndWorkspace(u.uid, wsId)
+          : (await db.listParticipantsByUid(u.uid))[0] ?? null;
       } catch {
         /* invalid token — fall through to (possible) dev bypass / reject */
       }
     }
-    if (!participantId && auth.DEV_BYPASS) {
-      participantId = url.searchParams.get("participantId");
+    if (!participant && auth.DEV_BYPASS) {
+      const pid = url.searchParams.get("participantId");
+      if (pid) participant = await db.getParticipant(pid);
     }
-    if (!participantId) {
+    if (!participant) {
       ws.close(4001, "auth required");
       return;
     }
-    const pid = participantId;
-    addSocket(pid, ws);
+    const pid = participant.id;
+    const workspaceId = participant.workspace_id;
+    addSocket(pid, workspaceId, ws);
     ws.send(JSON.stringify({ type: "connected", participantId: pid }));
 
     ws.on("message", async (raw) => {
@@ -138,6 +157,6 @@ export function initAppSocket(server: Server, hooks: AppSocketHooks): void {
       }
     });
 
-    ws.on("close", () => removeSocket(pid, ws));
+    ws.on("close", () => removeSocket(pid, workspaceId, ws));
   });
 }

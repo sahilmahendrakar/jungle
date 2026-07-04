@@ -4,6 +4,7 @@ import { withTransaction } from "./tx";
 
 export interface AgentRow {
   id: string;
+  workspace_id: string;
   handle: string;
   display_name: string;
   repo: string | null;
@@ -17,8 +18,17 @@ export interface AgentRow {
 }
 
 // The column list backing every AgentRow query (kept in one place so the shape can't drift).
-const AGENT_COLUMNS = `id, handle, display_name, repo, model, mode, effort, runtime, runner_token,
-                       runner_provider, runner_meta`;
+const AGENT_COLUMNS = `id, workspace_id, handle, display_name, repo, model, mode, effort, runtime,
+                       runner_token, runner_provider, runner_meta`;
+
+// The workspace an agent belongs to (for scoping workspace-wide broadcasts of its events/status).
+export async function getAgentWorkspaceId(agentId: string): Promise<string | null> {
+  const { rows } = await pool.query<{ workspace_id: string }>(
+    `select workspace_id from participants where id = $1`,
+    [agentId],
+  );
+  return rows[0]?.workspace_id ?? null;
+}
 
 // Of the given participant ids, the ones that are agents.
 export async function agentsByIds(ids: string[]): Promise<AgentRow[]> {

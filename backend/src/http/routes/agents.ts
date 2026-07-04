@@ -5,7 +5,7 @@ import * as db from "../../db";
 import * as auth from "../../auth";
 import * as runners from "../../runners";
 import { provisionerFor } from "../../provisioner";
-import { broadcastAll } from "../../ws/appSocket";
+import { broadcastWorkspace } from "../../ws/appSocket";
 import { resolveConfirmDecision } from "../../services/confirmations";
 import { wrap, ApiError } from "../errors";
 import { optInt } from "../validate";
@@ -24,7 +24,7 @@ const RUNNER_PROVIDER_DEFAULT = process.env.RUNNER_PROVIDER === "fly" ? "fly" : 
 router.post(
   "/api/agents",
   wrap(async (req, res) => {
-    await requireRequester(req);
+    const me = await requireRequester(req);
     const { handle, displayName, repo } = req.body ?? {};
     if (!handle || !displayName) throw new ApiError(400, "handle, displayName required");
     const model = req.body?.model ? String(req.body.model) : null;
@@ -33,9 +33,10 @@ router.post(
     if (!isSdkMode(mode)) throw new ApiError(400, `unsupported mode: ${mode}`);
     const runnerToken = randomBytes(32).toString("hex");
     const runnerProvider = req.body?.runnerProvider === "fly" ? "fly" : RUNNER_PROVIDER_DEFAULT;
+    // The agent joins the creator's workspace.
     const participant = await db.createParticipant({
-      kind: "agent", handle, displayName, runtime: "sdk", runnerToken, repo: repo ?? null, model, mode,
-      runnerProvider,
+      kind: "agent", workspaceId: me.workspace_id, handle, displayName, runtime: "sdk", runnerToken,
+      repo: repo ?? null, model, mode, runnerProvider,
     });
     // Respond immediately — provisioning (esp. a Fly machine's first boot / image pull) can take
     // up to ~1min, and the row + status UI ("waking") already give the client what it needs.
@@ -59,7 +60,7 @@ router.post(
 router.patch(
   "/api/agents/:id",
   wrap(async (req, res) => {
-    const agent = await requireAgent(req);
+    const { agent } = await requireAgent(req);
     const patch: { displayName?: string; mode?: string; model?: string; effort?: string } = {};
     if (req.body?.displayName !== undefined) {
       const dn = String(req.body.displayName).trim();
@@ -86,7 +87,7 @@ router.patch(
     }
     const updated = await db.updateAgentConfig(agent.id, patch);
     const pub = updated ? publicParticipant(updated) : updated;
-    broadcastAll({ type: "participant_updated", participant: pub });
+    broadcastWorkspace(agent.workspace_id, { type: "participant_updated", participant: pub });
     res.json(pub);
   }),
 );
@@ -97,7 +98,7 @@ router.patch(
 router.delete(
   "/api/agents/:id",
   wrap(async (req, res) => {
-    const agent = await requireAgent(req);
+    const { agent } = await requireAgent(req);
     // Stop the runner working and close its socket so it can't reconnect mid-teardown.
     runners.disconnect(agent.id);
     // Remove the container + its workspace volume. Best-effort: log but don't fail the request.
@@ -107,7 +108,7 @@ router.delete(
       console.error("provisioner destroy:", e);
     }
     await db.deleteAgent(agent.id);
-    broadcastAll({ type: "participant_deleted", participantId: agent.id });
+    broadcastWorkspace(agent.workspace_id, { type: "participant_deleted", participantId: agent.id });
     res.json({ ok: true });
   }),
 );
@@ -117,7 +118,7 @@ router.delete(
 router.get(
   "/api/agents/:id/events",
   wrap(async (req, res) => {
-    const agent = await requireAgent(req);
+    const { agent } = await requireAgent(req);
     // Guard against NaN (e.g. ?before=abc) reaching the bigint bind / limit clamp.
     const before = optInt(req.query.before);
     const limit = optInt(req.query.limit);
@@ -157,7 +158,7 @@ router.post(
 router.post(
   "/api/agents/:id/interrupt",
   wrap(async (req, res) => {
-    const agent = await requireAgent(req);
+    const { agent } = await requireAgent(req);
     const delivered = runners.interrupt(agent.id);
     res.json({ ok: delivered, ...(delivered ? {} : { error: "runner not connected" }) });
   }),
@@ -167,7 +168,7 @@ router.post(
 router.post(
   "/api/agents/:id/compact",
   wrap(async (req, res) => {
-    const agent = await requireAgent(req);
+    const { agent } = await requireAgent(req);
     const delivered = runners.compact(agent.id);
     res.json({ ok: delivered, ...(delivered ? {} : { error: "runner not connected" }) });
   }),

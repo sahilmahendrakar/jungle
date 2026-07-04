@@ -3,10 +3,24 @@
 -- `participants`; a DM is just a channel with two members; messages reference a
 -- sender participant and carry a monotonic `seq` for ordering / reconnect sync.
 
+-- Slack-style multi-tenancy: everything (participants, channels, and all they own) is scoped to
+-- a workspace. See migrations/009_workspaces.sql.
+create table if not exists workspaces (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null,
+  max_agents  int,                                  -- null = env MAX_AGENTS_PER_WORKSPACE default
+  created_at  timestamptz not null default now()
+);
+-- The default workspace holds all rows created before multi-tenancy. Fixed id so dev-bypass,
+-- tests, and the 009 backfill all agree (mirrored as DEFAULT_WORKSPACE_ID in code).
+insert into workspaces (id, name)
+  values ('00000000-0000-0000-0000-000000000001', 'Jungle')
+  on conflict (id) do nothing;
+
 create table if not exists participants (
   id            uuid primary key default gen_random_uuid(),
   kind          text not null check (kind in ('human', 'agent')),
-  handle        text not null unique,                 -- for @mentions: @sahil, @deploybot
+  handle        text not null,                        -- for @mentions: @sahil, @deploybot (unique per workspace)
   display_name  text not null,
   created_at    timestamptz not null default now()
 );
@@ -17,7 +31,9 @@ alter table participants add column if not exists repo               text;
 
 -- Identity: a human participant is linked to a Firebase Auth user (Google sign-in). These
 -- are null for agents and for legacy/dev participants created via the ?as= dev path.
-alter table participants add column if not exists firebase_uid       text unique;
+-- (firebase_uid is unique PER WORKSPACE — the ws-scoped index below — so one Google account can
+-- map to a participant in each workspace it belongs to.)
+alter table participants add column if not exists firebase_uid       text;
 alter table participants add column if not exists email              text;
 alter table participants add column if not exists avatar_url         text;
 -- Agent config: model override (null = agent-config default) + tool permission mode
@@ -46,6 +62,33 @@ alter table participants add column if not exists context_updated_at timestamptz
 -- (Fly: {machineId, volumeId}); null for docker. See migrations/007_fly_provisioner.sql.
 alter table participants add column if not exists runner_provider text not null default 'docker';
 alter table participants add column if not exists runner_meta jsonb;
+
+-- Multi-tenancy: which workspace this participant belongs to, and their role in it. Membership is
+-- implicit (a participant row = a membership); 'admin' (workspace creator) gates invites + config.
+-- See migrations/009_workspaces.sql. Handles + firebase_uid are unique per workspace, not global.
+alter table participants add column if not exists workspace_id uuid references workspaces(id);
+alter table participants add column if not exists role text not null default 'member'
+  check (role in ('admin', 'member'));
+update participants set workspace_id = '00000000-0000-0000-0000-000000000001' where workspace_id is null;
+alter table participants alter column workspace_id set not null;
+alter table participants drop constraint if exists participants_handle_key;
+create unique index if not exists participants_ws_handle_idx on participants (workspace_id, lower(handle));
+alter table participants drop constraint if exists participants_firebase_uid_key;
+create unique index if not exists participants_ws_uid_idx
+  on participants (workspace_id, firebase_uid) where firebase_uid is not null;
+
+-- Shareable workspace invites: anyone who opens /join/<token> and signs in can join. Revocable
+-- (revoked_at) and optionally expiring (expires_at).
+create table if not exists workspace_invites (
+  id            uuid primary key default gen_random_uuid(),
+  workspace_id  uuid not null references workspaces(id) on delete cascade,
+  token         text not null unique,               -- randomBytes(32) hex; used in the /join link
+  created_by    uuid references participants(id) on delete set null,
+  created_at    timestamptz not null default now(),
+  expires_at    timestamptz,                        -- null = never expires
+  revoked_at    timestamptz                         -- non-null = revoked
+);
+create index if not exists workspace_invites_ws_idx on workspace_invites (workspace_id);
 
 -- Durable per-agent work queue for sdk runners. A dispatch inserts a row; the runner pulls it
 -- (`enqueue`) and acks it (`consumed`) -> delivered_at set. Undelivered rows survive the runner
@@ -77,6 +120,12 @@ create table if not exists channels (
   kind        text not null check (kind in ('channel', 'dm')),  -- dm = exactly 2 members
   created_at  timestamptz not null default now()
 );
+-- Multi-tenancy: the workspace this channel lives in. Members/messages/reads/mentions/attachments
+-- inherit scope through it. See migrations/009_workspaces.sql.
+alter table channels add column if not exists workspace_id uuid references workspaces(id);
+update channels set workspace_id = '00000000-0000-0000-0000-000000000001' where workspace_id is null;
+alter table channels alter column workspace_id set not null;
+create index if not exists channels_ws_idx on channels (workspace_id);
 
 create table if not exists channel_members (
   channel_id     uuid not null references channels(id) on delete cascade,

@@ -33,7 +33,7 @@ router.get(
       });
     }
     let suggested = suggestHandle(u);
-    if (!(await db.handleAvailable(suggested))) {
+    if (!(await db.handleAvailable(db.DEFAULT_WORKSPACE_ID, suggested))) {
       suggested = `${suggested}-${Math.random().toString(36).slice(2, 5)}`;
     }
     res.json({ onboarded: false, profile: u, suggestedHandle: suggested });
@@ -46,7 +46,7 @@ router.get(
   wrap(async (req, res) => {
     const handle = String(req.query.handle ?? "").trim();
     if (!HANDLE_RE.test(handle)) return res.json({ available: false, valid: false });
-    res.json({ available: await db.handleAvailable(handle), valid: true });
+    res.json({ available: await db.handleAvailable(db.DEFAULT_WORKSPACE_ID, handle), valid: true });
   }),
 );
 
@@ -63,11 +63,13 @@ router.post(
     if (!HANDLE_RE.test(handle)) {
       throw new ApiError(400, "handle must be 2–30 chars: lowercase letters, digits, - or _");
     }
-    if (!(await db.handleAvailable(handle))) {
+    if (!(await db.handleAvailable(db.DEFAULT_WORKSPACE_ID, handle))) {
       throw new ApiError(409, "that handle is taken");
     }
+    // Legacy onboarding lands humans in the default workspace (Phase 2 replaces this with the
+    // workspace-create / invite-accept flows).
     const p = await db.createParticipant({
-      kind: "human", handle, displayName,
+      kind: "human", workspaceId: db.DEFAULT_WORKSPACE_ID, handle, displayName,
       firebaseUid: u.uid, email: u.email, avatarUrl: u.picture,
     });
     res.status(201).json(p);

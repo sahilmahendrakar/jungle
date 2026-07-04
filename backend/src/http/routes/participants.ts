@@ -11,9 +11,9 @@ const router = Router();
 router.get(
   "/api/participants",
   wrap(async (req, res) => {
-    await requireRequester(req);
+    const me = await requireRequester(req);
     res.json(
-      (await db.listParticipants()).map((p) => ({
+      (await db.listParticipants(me.workspace_id)).map((p) => ({
         ...publicParticipant(p),
         ...(p.kind === "agent" ? { status: runners.agentStatus(p.id) } : {}),
       })),
@@ -23,6 +23,7 @@ router.get(
 
 // Dev-only participant creation (the dev sign-in screen). In production humans are created via
 // onboarding/workspace flows; agents via POST /api/agents. 404 when not under dev bypass.
+// Dev participants land in the default workspace (matching the dev-bypass ?participantId= path).
 router.post(
   "/api/participants",
   wrap(async (req, res) => {
@@ -34,7 +35,9 @@ router.post(
     if (!HANDLE_RE.test(String(handle))) {
       throw new ApiError(400, "handle must be 2–30 chars: lowercase letters, digits, - or _");
     }
-    res.status(201).json(await db.createParticipant({ kind, handle, displayName }));
+    res
+      .status(201)
+      .json(await db.createParticipant({ kind, workspaceId: db.DEFAULT_WORKSPACE_ID, handle, displayName }));
   }),
 );
 

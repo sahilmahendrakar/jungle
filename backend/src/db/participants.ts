@@ -7,10 +7,16 @@ export interface Participant extends ParticipantBase {
   runner_token: string | null; // per-agent runner secret — never reaches clients
 }
 
+// The default workspace (migrations/009_workspaces.sql) — holds all pre-multi-tenancy rows and is
+// where dev-bypass participants and the current onboarding flow land. Kept in sync with schema.sql.
+export const DEFAULT_WORKSPACE_ID = "00000000-0000-0000-0000-000000000001";
+
 export async function createParticipant(p: {
   kind: Kind;
+  workspaceId: string;
   handle: string;
   displayName: string;
+  role?: string | null; // 'admin' | 'member' (default 'member')
   repo?: string | null;
   firebaseUid?: string | null;
   email?: string | null;
@@ -23,13 +29,13 @@ export async function createParticipant(p: {
 }): Promise<Participant> {
   const { rows } = await pool.query<Participant>(
     `insert into participants
-       (kind, handle, display_name, repo, firebase_uid, email, avatar_url,
+       (kind, workspace_id, handle, display_name, role, repo, firebase_uid, email, avatar_url,
         model, mode, runtime, runner_token, runner_provider)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, coalesce($9, 'default'),
-             coalesce($10, 'sdk'), $11, coalesce($12, 'docker'))
+     values ($1, $2, $3, $4, coalesce($5, 'member'), $6, $7, $8, $9, $10, coalesce($11, 'default'),
+             coalesce($12, 'sdk'), $13, coalesce($14, 'docker'))
      returning *`,
     [
-      p.kind, p.handle, p.displayName, p.repo ?? null,
+      p.kind, p.workspaceId, p.handle, p.displayName, p.role ?? null, p.repo ?? null,
       p.firebaseUid ?? null, p.email ?? null, p.avatarUrl ?? null,
       p.model ?? null, p.mode ?? null, p.runtime ?? null, p.runnerToken ?? null,
       p.runnerProvider ?? null,
@@ -88,37 +94,67 @@ export async function updateAgentContextUsage(
   );
 }
 
-// Look up the human participant linked to a Firebase Auth uid (null if not onboarded yet).
-export async function getParticipantByFirebaseUid(uid: string): Promise<Participant | null> {
+// Every workspace membership for a Firebase Auth uid (one participant row per workspace joined),
+// oldest first. A Google account maps to at most one participant per workspace.
+export async function listParticipantsByUid(uid: string): Promise<Participant[]> {
   const { rows } = await pool.query<Participant>(
-    `select * from participants where firebase_uid = $1`,
+    `select * from participants where firebase_uid = $1 order by created_at`,
     [uid],
-  );
-  return rows[0] ?? null;
-}
-
-// Is a handle free? (case-insensitive; handles are unique). Used to validate onboarding.
-export async function handleAvailable(handle: string): Promise<boolean> {
-  const { rows } = await pool.query(`select 1 from participants where lower(handle) = lower($1)`, [handle]);
-  return rows.length === 0;
-}
-
-// Resolve the @handles mentioned in a message body to participant ids.
-export async function resolveMentions(body: string): Promise<{ id: string; handle: string }[]> {
-  // Handles may contain hyphens (e.g. "sahils-agent"), so include "-" in the mention charset.
-  const handles = [...new Set([...body.matchAll(/@([a-zA-Z0-9_-]+)/g)].map((m) => m[1]))];
-  if (!handles.length) return [];
-  const { rows } = await pool.query<{ id: string; handle: string }>(
-    `select id, handle from participants where handle = any($1)`,
-    [handles],
   );
   return rows;
 }
 
-// All participants, for the dev sign-in screen (newest last).
-export async function listParticipants(): Promise<Participant[]> {
+// The participant a Firebase uid maps to within a specific workspace (null if not a member).
+export async function getParticipantByUidAndWorkspace(
+  uid: string,
+  workspaceId: string,
+): Promise<Participant | null> {
   const { rows } = await pool.query<Participant>(
-    `select * from participants order by created_at`,
+    `select * from participants where firebase_uid = $1 and workspace_id = $2`,
+    [uid, workspaceId],
+  );
+  return rows[0] ?? null;
+}
+
+// Back-compat single-membership lookup: the first workspace a uid belongs to. Used by GitHub
+// routes (GitHub is per-participant) and as the pre-multi-workspace fallback. With one workspace
+// this is exactly the row it always returned.
+export async function getParticipantByFirebaseUid(uid: string): Promise<Participant | null> {
+  return (await listParticipantsByUid(uid))[0] ?? null;
+}
+
+// Is a handle free within a workspace? (case-insensitive; handles are unique per workspace).
+export async function handleAvailable(workspaceId: string, handle: string): Promise<boolean> {
+  const { rows } = await pool.query(
+    `select 1 from participants where workspace_id = $1 and lower(handle) = lower($2)`,
+    [workspaceId, handle],
+  );
+  return rows.length === 0;
+}
+
+// Resolve the @handles mentioned in a message body to participant ids — scoped to the channel's
+// workspace, so a mention can never reach (or summon) a participant in another workspace.
+export async function resolveMentions(
+  channelId: string,
+  body: string,
+): Promise<{ id: string; handle: string }[]> {
+  // Handles may contain hyphens (e.g. "sahils-agent"), so include "-" in the mention charset.
+  const handles = [...new Set([...body.matchAll(/@([a-zA-Z0-9_-]+)/g)].map((m) => m[1]))];
+  if (!handles.length) return [];
+  const { rows } = await pool.query<{ id: string; handle: string }>(
+    `select id, handle from participants
+     where handle = any($1)
+       and workspace_id = (select workspace_id from channels where id = $2)`,
+    [handles, channelId],
+  );
+  return rows;
+}
+
+// All participants in a workspace (People list + dev sign-in screen), newest last.
+export async function listParticipants(workspaceId: string): Promise<Participant[]> {
+  const { rows } = await pool.query<Participant>(
+    `select * from participants where workspace_id = $1 order by created_at`,
+    [workspaceId],
   );
   return rows;
 }
@@ -128,7 +164,13 @@ export async function getParticipant(id: string): Promise<Participant | null> {
   return rows[0] ?? null;
 }
 
-export async function getParticipantByHandle(handle: string): Promise<Participant | null> {
-  const { rows } = await pool.query<Participant>(`select * from participants where handle = $1`, [handle]);
+export async function getParticipantByHandle(
+  workspaceId: string,
+  handle: string,
+): Promise<Participant | null> {
+  const { rows } = await pool.query<Participant>(
+    `select * from participants where workspace_id = $1 and handle = $2`,
+    [workspaceId, handle],
+  );
   return rows[0] ?? null;
 }

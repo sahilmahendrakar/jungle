@@ -14,6 +14,8 @@ export type AgentStatus = "working" | "idle" | "sleeping" | "waking";
 export interface ParticipantBase {
   id: string;
   kind: Kind;
+  workspace_id: string; // the workspace this participant belongs to (Slack-style multi-tenancy)
+  role: string; // membership role within the workspace: 'admin' | 'member'
   handle: string;
   display_name: string;
   repo: string | null;

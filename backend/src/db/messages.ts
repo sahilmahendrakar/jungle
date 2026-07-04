@@ -80,7 +80,7 @@ export async function persistMessage(args: {
   threadRootId?: string | null;
   alsoToChannel?: boolean;
 }): Promise<PersistedMessage> {
-  const mentions = await resolveMentions(args.body);
+  const mentions = await resolveMentions(args.channelId, args.body);
   const { msg, attachments } = await withTransaction(async (client) => {
     const rootId = args.threadRootId
       ? await resolveThreadRoot(client, args.channelId, args.threadRootId)

@@ -29,7 +29,9 @@ router.post(
     // The creator is always a member (even if their handle wasn't listed in the request).
     const handles = Array.isArray(memberHandles) ? memberHandles.map(String) : [];
     if (!handles.includes(me.handle)) handles.push(me.handle);
-    res.status(201).json(await db.createChannel({ name, kind, memberHandles: handles }));
+    res
+      .status(201)
+      .json(await db.createChannel({ workspaceId: me.workspace_id, name, kind, memberHandles: handles }));
   }),
 );
 
@@ -77,7 +79,8 @@ router.post(
     const ctx = await requireChannelMember(req);
     if (ctx.channel.kind === "dm") throw new ApiError(400, "cannot change members of a DM");
     const handle = String(req.body?.handle ?? "").trim().replace(/^@/, "");
-    const target = await db.getParticipantByHandle(handle);
+    // Scope the handle lookup to the channel's workspace — you can't pull in someone from another.
+    const target = await db.getParticipantByHandle(ctx.channel.workspace_id, handle);
     if (!target) throw new ApiError(404, `no participant @${handle}`);
     await db.addChannelMember(ctx.channel.id, target.id);
     await fanOut(ctx.channel.id, { type: "members_changed", channelId: ctx.channel.id });

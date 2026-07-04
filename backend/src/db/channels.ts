@@ -4,21 +4,23 @@ import { withTransaction } from "./tx";
 import type { Participant } from "./participants";
 
 export async function createChannel(c: {
+  workspaceId: string;
   name: string;
   kind: "channel" | "dm";
   memberHandles: string[];
 }): Promise<{ id: string; name: string; kind: string }> {
   return withTransaction(async (client) => {
     const { rows } = await client.query(
-      `insert into channels (name, kind) values ($1, $2) returning *`,
-      [c.name, c.kind],
+      `insert into channels (workspace_id, name, kind) values ($1, $2, $3) returning *`,
+      [c.workspaceId, c.name, c.kind],
     );
     const channel = rows[0];
     if (c.memberHandles.length) {
+      // Only members from THIS workspace can be added — a handle in another workspace is ignored.
       await client.query(
         `insert into channel_members (channel_id, participant_id)
-         select $1, id from participants where handle = any($2)`,
-        [channel.id, c.memberHandles],
+         select $1, id from participants where handle = any($2) and workspace_id = $3`,
+        [channel.id, c.memberHandles, c.workspaceId],
       );
     }
     return channel;
@@ -53,8 +55,11 @@ export async function isMember(channelId: string, participantId: string): Promis
 
 export async function getChannel(
   id: string,
-): Promise<{ id: string; name: string; kind: string } | null> {
-  const { rows } = await pool.query(`select id, name, kind from channels where id = $1`, [id]);
+): Promise<{ id: string; name: string; kind: string; workspace_id: string } | null> {
+  const { rows } = await pool.query(
+    `select id, name, kind, workspace_id from channels where id = $1`,
+    [id],
+  );
   return rows[0] ?? null;
 }
 
@@ -185,7 +190,8 @@ export async function deleteChannel(channelId: string): Promise<void> {
   await pool.query(`delete from channels where id = $1`, [channelId]);
 }
 
-// Find the 1:1 DM channel between two participants, creating it if needed.
+// Find the 1:1 DM channel between two participants, creating it if needed. Both parties must be
+// in the same workspace (a DM never spans workspaces); the channel is stamped with that workspace.
 export async function findOrCreateDm(aId: string, bId: string): Promise<string> {
   const found = await pool.query(
     `select c.id from channels c
@@ -198,7 +204,19 @@ export async function findOrCreateDm(aId: string, bId: string): Promise<string> 
   );
   if (found.rows[0]) return found.rows[0].id;
   return withTransaction(async (client) => {
-    const { rows } = await client.query(`insert into channels (name, kind) values ('dm', 'dm') returning id`);
+    // Resolve + assert a shared workspace before creating the DM.
+    const { rows: parts } = await client.query<{ id: string; workspace_id: string }>(
+      `select id, workspace_id from participants where id = any($1)`,
+      [[aId, bId]],
+    );
+    if (parts.length !== 2) throw new Error("both participants must exist");
+    if (parts[0].workspace_id !== parts[1].workspace_id) {
+      throw new Error("cannot DM a participant in another workspace");
+    }
+    const { rows } = await client.query(
+      `insert into channels (workspace_id, name, kind) values ($1, 'dm', 'dm') returning id`,
+      [parts[0].workspace_id],
+    );
     const cid = rows[0].id;
     await client.query(
       `insert into channel_members (channel_id, participant_id) values ($1, $2), ($1, $3)`,

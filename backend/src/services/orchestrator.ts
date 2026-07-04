@@ -3,8 +3,25 @@ import type { PersistedMessage } from "../db";
 import * as att from "../attachments";
 import * as runners from "../runners";
 import { provisionerFor } from "../provisioner";
-import { fanOut, broadcastAll } from "../ws/appSocket";
+import { fanOut, broadcastWorkspace } from "../ws/appSocket";
 import { surfaceConfirmCard } from "./confirmations";
+
+// Agent -> workspace id, memoized. An agent's workspace never changes, so this is a permanent
+// cache. Used to scope the workspace-wide broadcasts (event/context/status) whose runner hooks
+// only carry an agentId.
+const agentWorkspaceCache = new Map<string, string>();
+async function wsOf(agentId: string): Promise<string | null> {
+  const cached = agentWorkspaceCache.get(agentId);
+  if (cached) return cached;
+  const ws = await db.getAgentWorkspaceId(agentId);
+  if (ws) agentWorkspaceCache.set(agentId, ws);
+  return ws;
+}
+function broadcastAgentWorkspace(agentId: string, payload: unknown): void {
+  void wsOf(agentId).then((ws) => {
+    if (ws) broadcastWorkspace(ws, payload);
+  });
+}
 
 // The agent-cascade engine: when a message addresses agents, run their turns and post replies
 // back (which may re-enter the cascade, bounded by cascade_budget). Also builds the RunnerHooks
@@ -127,7 +144,7 @@ async function runAgentReply(
 // Execute one send_message tool call from an agent: resolve the destination (#channel or @handle),
 // post via the routing rule (persist + fan out + cascade), and report back.
 async function deliverAgentMessage(
-  agent: { id: string; handle: string },
+  agent: { id: string; handle: string; workspace_id: string },
   toolInput: runners.SendMessageInput,
   budget: number,
   dispatch: { channelId?: string; threadRootId: string | null },
@@ -147,7 +164,8 @@ async function deliverAgentMessage(
     if (!ch) return { ok: false, error: `you are not a member of channel ${to} (or it doesn't exist)` };
     channelId = ch.id;
   } else if (to.startsWith("@")) {
-    const other = await db.getParticipantByHandle(to.slice(1));
+    // Scope the handle lookup to the agent's workspace — an agent can only DM its own workspace.
+    const other = await db.getParticipantByHandle(agent.workspace_id, to.slice(1));
     if (!other) return { ok: false, error: `no participant named ${to}` };
     channelId = await db.findOrCreateDm(agent.id, other.id);
   } else {
@@ -201,18 +219,24 @@ export function buildRunnerHooks(): runners.RunnerHooks {
       }
       return surfaceConfirmCard(agent, channelId, confirm.toolName, confirm.input);
     },
-    // A runner's SDK stream event -> persist for the Activity feed + broadcast to app sockets.
+    // A runner's SDK stream event -> persist for the Activity feed + broadcast to the agent's
+    // workspace (raw tool output must never leak to other workspaces).
     onAgentEvent: (agentId, turnId, event) => {
       void db.insertAgentEvent(agentId, turnId, event).catch((e) => console.error("insertAgentEvent:", e));
-      broadcastAll({ type: "agent_event", agentId, turnId, event });
+      broadcastAgentWorkspace(agentId, { type: "agent_event", agentId, turnId, event });
     },
     // Per-turn context-window occupancy -> persist on the participant row + broadcast so an open
-    // profile dialog's meter live-updates.
+    // profile dialog's meter live-updates (workspace-scoped).
     onContextUsage: (agentId, usage) => {
       void db
         .updateAgentContextUsage(agentId, usage.tokens, usage.maxTokens)
         .catch((e) => console.error("updateAgentContextUsage:", e));
-      broadcastAll({ type: "agent_context", agentId, tokens: usage.tokens, maxTokens: usage.maxTokens });
+      broadcastAgentWorkspace(agentId, {
+        type: "agent_context",
+        agentId,
+        tokens: usage.tokens,
+        maxTokens: usage.maxTokens,
+      });
     },
     // A turn crashed -> post a notice from the agent into the channel that triggered it so the
     // humans waiting aren't ghosted. cascadeBudget 0: a crash notice must never trigger others.
@@ -229,9 +253,9 @@ export function buildRunnerHooks(): runners.RunnerHooks {
         await fanOut(channelId, { type: "message", message: att.withUrls(msg) });
       })().catch((e) => console.error("onTurnFailed:", e));
     },
-    // The agent's live status changed -> broadcast workspace-wide so every client's dot updates.
+    // The agent's live status changed -> broadcast to its workspace so every client's dot updates.
     onStatusChanged: (agentId, status) => {
-      broadcastAll({ type: "agent_status_changed", agentId, status });
+      broadcastAgentWorkspace(agentId, { type: "agent_status_changed", agentId, status });
     },
   };
 }

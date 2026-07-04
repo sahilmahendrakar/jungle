@@ -52,7 +52,7 @@ export type ConfirmDecision = { result: "allow" | "deny"; denyMessage?: string; 
 export interface RunnerHooks {
   // Post a message the agent asked to send (same routing/cascade as the MA path's onSend).
   deliverAgentMessage: (
-    agent: { id: string; handle: string },
+    agent: { id: string; handle: string; workspace_id: string },
     input: SendMessageInput,
   ) => Promise<SendMessageResult>;
   // Surface a tool-confirmation to humans and resolve when one decides. `agentId`+`id`
@@ -586,7 +586,7 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         } else {
           try {
             result = await hooks.deliverAgentMessage(
-              { id: agent.id, handle: agent.handle },
+              { id: agent.id, handle: agent.handle, workspace_id: agent.workspace_id },
               (frame.input ?? {}) as SendMessageInput,
             );
           } catch (e) {
