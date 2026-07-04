@@ -24,6 +24,8 @@ alter table participants add column if not exists avatar_url         text;
 -- (SDK permission mode: default|acceptEdits|plan|bypassPermissions|dontAsk).
 alter table participants add column if not exists model              text;
 alter table participants add column if not exists mode               text not null default 'default';
+-- Reasoning effort (Agent SDK `effort`): low|medium|high|xhigh. Default 'medium'. See migrations/008_agent_effort.sql.
+alter table participants add column if not exists effort             text not null default 'medium';
 
 -- Agents run on a per-agent SDK runner container that dials into /api/runner with runner_token
 -- and speaks docs/runner-protocol.md. See migrations 001_sdk_runtime.sql + 002_drop_ma_columns.sql.

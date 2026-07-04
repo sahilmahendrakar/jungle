@@ -9,7 +9,12 @@
 //     turn boundary (after the previous turn's `result`). Otherwise the
 //     generator returns, the query ends, and the loop restarts (used to apply
 //     a pending model change via query restart with resume).
-import { query, type Query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import {
+  query,
+  type EffortLevel,
+  type Query,
+  type SDKUserMessage,
+} from "@anthropic-ai/claude-agent-sdk";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -92,9 +97,12 @@ export class Runner {
   // host testing and future sandbox providers via JUNGLE_WORKSPACE.
   private readonly workspace: string = process.env.JUNGLE_WORKSPACE ?? "/workspace";
 
-  // Config (from `configure`; updated by set_model / set_permission_mode).
+  // Config (from `configure`; updated by set_model / set_permission_mode / set_effort).
   private model: string | null = null;
   private permissionMode: PermissionMode = "default";
+  // Reasoning effort passed to query(). undefined = let the SDK/CLI use its default (the backend
+  // always sends one post-migration, so this is only undefined against an old backend).
+  private effort: EffortLevel | undefined = undefined;
   private systemPromptAppend = "";
   private configured = false;
 
@@ -206,6 +214,9 @@ export class Runner {
       case "set_model":
         this.handleSetModel(frame.model);
         break;
+      case "set_effort":
+        this.handleSetEffort(frame.effort);
+        break;
       case "send_message_result": {
         const resolve = this.pendingSendMessages.get(frame.id);
         if (resolve) {
@@ -237,6 +248,7 @@ export class Runner {
   private async handleConfigure(frame: ConfigureFrame): Promise<void> {
     this.model = frame.model;
     this.permissionMode = frame.permissionMode;
+    this.effort = frame.effort as EffortLevel | undefined;
     this.systemPromptAppend = frame.systemPromptAppend ?? "";
     if (frame.git) {
       // Finish repo/credential setup BEFORE allowing turns: the system prompt tells the
@@ -301,6 +313,15 @@ export class Runner {
     this.sendState();
   }
 
+  // Effort is read fresh when each turn's query() is built, so a change applies at the next turn
+  // with no query restart (unlike model, which binds the CLI subprocess). Idle: next turn. Running:
+  // the turn after the current one.
+  private handleSetEffort(effort: string): void {
+    this.effort = effort as EffortLevel;
+    log.info("set effort", { effort });
+    this.sendState();
+  }
+
   private handleSetModel(model: string): void {
     log.info("set model requested", { model });
     if (!this.running) {
@@ -353,6 +374,7 @@ export class Runner {
       options: {
         cwd: this.workspace,
         model: this.model ?? undefined,
+        effort: this.effort,
         permissionMode: this.permissionMode,
         resume: resumeId ?? undefined,
         systemPrompt: {

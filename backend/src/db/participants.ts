@@ -42,7 +42,7 @@ export async function createParticipant(p: {
 // updated row (null if the id isn't an agent). No-op patches just return the current row.
 export async function updateAgentConfig(
   id: string,
-  patch: { displayName?: string; mode?: string; model?: string },
+  patch: { displayName?: string; mode?: string; model?: string; effort?: string },
 ): Promise<Participant | null> {
   const sets: string[] = [];
   const vals: unknown[] = [];
@@ -57,6 +57,10 @@ export async function updateAgentConfig(
   if (patch.model !== undefined) {
     vals.push(patch.model);
     sets.push(`model = $${vals.length}`);
+  }
+  if (patch.effort !== undefined) {
+    vals.push(patch.effort);
+    sets.push(`effort = $${vals.length}`);
   }
   if (!sets.length) {
     const p = await getParticipant(id);

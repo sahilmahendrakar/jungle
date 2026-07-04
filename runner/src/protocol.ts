@@ -117,6 +117,7 @@ export interface ConfigureFrame {
   type: "configure";
   model: string | null; // null = let the runner use the SDK/agent-config default model
   permissionMode: PermissionMode;
+  effort?: string; // reasoning effort (low|medium|high|xhigh); omitted = SDK/CLI default
   systemPromptAppend?: string;
   git?: { token: string; login: string; repoUrl?: string };
 }
@@ -156,6 +157,11 @@ export interface SetModelFrame {
   model: string;
 }
 
+export interface SetEffortFrame {
+  type: "set_effort";
+  effort: string; // low|medium|high|xhigh; applies at the agent's next turn
+}
+
 export interface SendMessageResultFrame {
   type: "send_message_result";
   id: string;
@@ -183,6 +189,7 @@ export type BackendToRunner =
   | CompactFrame
   | SetPermissionModeFrame
   | SetModelFrame
+  | SetEffortFrame
   | SendMessageResultFrame
   | ConfirmResultFrame
   | GitCredentialsFrame;

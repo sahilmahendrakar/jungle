@@ -9,6 +9,7 @@ export interface AgentRow {
   repo: string | null;
   model: string | null;
   mode: string;
+  effort: string; // reasoning effort: low|medium|high|xhigh (default 'medium')
   runtime: string; // 'sdk'
   runner_token: string | null;
   runner_provider: string;
@@ -16,7 +17,7 @@ export interface AgentRow {
 }
 
 // The column list backing every AgentRow query (kept in one place so the shape can't drift).
-const AGENT_COLUMNS = `id, handle, display_name, repo, model, mode, runtime, runner_token,
+const AGENT_COLUMNS = `id, handle, display_name, repo, model, mode, effort, runtime, runner_token,
                        runner_provider, runner_meta`;
 
 // Of the given participant ids, the ones that are agents.

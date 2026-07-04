@@ -26,6 +26,19 @@ export function isAllowedModel(model: string): model is AllowedModel {
   return (ALLOWED_MODELS as readonly string[]).includes(model);
 }
 
+// Reasoning-effort levels an agent may run at (maps to the Agent SDK `effort` option, which
+// guides thinking depth and how many tool-call iterations a turn takes). Lower effort = fewer
+// thinking tokens and fewer round-trips = less context re-read = cheaper. `medium` is the default
+// for new/existing agents; bump repo/coding agents to `high`/`xhigh`. Models without effort
+// support (e.g. Haiku 4.5) silently ignore it — the CLI downgrades for the selected model.
+export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh"] as const;
+export type EffortLevel = (typeof EFFORT_LEVELS)[number];
+export const DEFAULT_EFFORT: EffortLevel = "medium";
+
+export function isAllowedEffort(effort: string): effort is EffortLevel {
+  return (EFFORT_LEVELS as readonly string[]).includes(effort);
+}
+
 export function isSdkMode(mode: string): mode is PermissionMode {
   return (SDK_MODES as readonly string[]).includes(mode);
 }

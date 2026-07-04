@@ -19,6 +19,7 @@ import { updateAgent, deleteAgent, compactAgent, attachmentUrl } from "../../api
 import type { Attachment, Participant, AgentStatus } from "../../api";
 import {
   fmtBytes,
+  EFFORT_OPTIONS,
   fmtTokens,
   INLINE_IMAGE_MIMES,
   MODEL_OPTIONS,
@@ -149,6 +150,7 @@ export function ParticipantProfilePanel({
   const [name, setName] = useState(person.display_name);
   const [mode, setMode] = useState(person.mode ?? "default");
   const [model, setModel] = useState(person.model ?? MODEL_OPTIONS[0].id);
+  const [effort, setEffort] = useState(person.effort ?? EFFORT_OPTIONS[1].id);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [err, setErr] = useState("");
@@ -172,17 +174,19 @@ export function ParticipantProfilePanel({
   const dirty =
     name.trim() !== person.display_name ||
     mode !== (person.mode ?? "default") ||
-    model !== (person.model ?? MODEL_OPTIONS[0].id);
+    model !== (person.model ?? MODEL_OPTIONS[0].id) ||
+    effort !== (person.effort ?? EFFORT_OPTIONS[1].id);
 
   async function save() {
     if (!dirty || saving || !name.trim()) return;
     setSaving(true);
     setErr("");
     try {
-      const patch: { displayName?: string; mode?: string; model?: string } = {
+      const patch: { displayName?: string; mode?: string; model?: string; effort?: string } = {
         displayName: name.trim(),
         mode,
         model,
+        effort,
       };
       const updated = await updateAgent(person.id, patch);
       onSaved(updated);
@@ -272,6 +276,18 @@ export function ParticipantProfilePanel({
               />
               <p className="text-[11px] leading-tight text-muted-foreground">
                 Applies at the agent's next turn.
+              </p>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Reasoning effort</Label>
+              <SelectMenu
+                value={effort}
+                onChange={setEffort}
+                options={EFFORT_OPTIONS}
+                testId="agent-effort-select"
+              />
+              <p className="text-[11px] leading-tight text-muted-foreground">
+                Lower effort spends fewer tokens. Applies at the agent's next turn.
               </p>
             </div>
             {person.repo && (

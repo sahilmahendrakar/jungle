@@ -244,6 +244,7 @@ async function buildConfigure(agent: db.AgentRow): Promise<ConfigureFrame> {
     type: "configure",
     model: agent.model ?? null,
     permissionMode: toPermissionMode(agent.mode),
+    effort: agent.effort,
     systemPromptAppend: systemPromptAppend(agent),
   };
   if (agent.repo && gh.appAuthConfigured()) {
@@ -385,6 +386,10 @@ export function setPermissionMode(agentId: string, mode: PermissionMode): void {
 export function setModel(agentId: string, model: string): void {
   const conn = conns.get(agentId);
   if (conn) send(conn, { type: "set_model", model });
+}
+export function setEffort(agentId: string, effort: string): void {
+  const conn = conns.get(agentId);
+  if (conn) send(conn, { type: "set_effort", effort });
 }
 
 // Interrupt the agent's running turn (queued inbox items are untouched — they'll be

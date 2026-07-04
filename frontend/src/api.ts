@@ -143,7 +143,7 @@ export function createParticipant(p: {
 // agents `model` is applied at the agent's next turn boundary.
 export function updateAgent(
   id: string,
-  patch: { displayName?: string; mode?: string; model?: string },
+  patch: { displayName?: string; mode?: string; model?: string; effort?: string },
 ): Promise<Participant> {
   return request<Participant>(`/api/agents/${id}`, {
     method: "PATCH",

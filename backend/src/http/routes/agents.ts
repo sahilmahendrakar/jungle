@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { randomBytes } from "node:crypto";
-import { isAllowedModel, isSdkMode } from "@jungle/shared";
+import { isAllowedEffort, isAllowedModel, isSdkMode } from "@jungle/shared";
 import * as db from "../../db";
 import * as auth from "../../auth";
 import * as runners from "../../runners";
@@ -59,7 +59,7 @@ router.patch(
   "/api/agents/:id",
   wrap(async (req, res) => {
     const agent = await requireAgent(req);
-    const patch: { displayName?: string; mode?: string; model?: string } = {};
+    const patch: { displayName?: string; mode?: string; model?: string; effort?: string } = {};
     if (req.body?.displayName !== undefined) {
       const dn = String(req.body.displayName).trim();
       if (!dn) throw new ApiError(400, "display name cannot be empty");
@@ -76,6 +76,12 @@ router.patch(
       if (!isAllowedModel(model)) throw new ApiError(400, `unsupported model: ${model}`);
       if (model !== agent.model) runners.setModel(agent.id, model);
       patch.model = model;
+    }
+    if (req.body?.effort !== undefined) {
+      const effort = String(req.body.effort);
+      if (!isAllowedEffort(effort)) throw new ApiError(400, `unsupported effort: ${effort}`);
+      if (effort !== agent.effort) runners.setEffort(agent.id, effort);
+      patch.effort = effort;
     }
     const updated = await db.updateAgentConfig(agent.id, patch);
     const pub = updated ? publicParticipant(updated) : updated;

@@ -22,6 +22,7 @@ export interface ParticipantBase {
   avatar_url: string | null;
   model: string | null; // agent model override (null = agent-config default)
   mode: string; // an SDK permission mode: default|acceptEdits|plan|bypassPermissions|dontAsk
+  effort: string; // reasoning effort: low|medium|high|xhigh (default 'medium'); see EFFORT_LEVELS
   runtime: string; // 'sdk' (all agents; legacy 'ma' rows may exist on old databases)
   // Context-window occupancy reported by the runner after each turn (null = no report yet).
   context_tokens: number | null;

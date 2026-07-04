@@ -20,6 +20,15 @@ export const SDK_MODE_OPTIONS = [
   { id: "bypassPermissions", label: "Full autonomy", hint: "Never asks" },
   { id: "dontAsk", label: "Deny unapproved", hint: "Deny anything not pre-approved" },
 ];
+// Reasoning effort (SDK `effort`). Ids must match the backend's EFFORT_LEVELS; `medium` is the
+// default. Lower = cheaper/faster (fewer thinking tokens + tool-call round-trips); bump repo/
+// coding agents up. Haiku ignores effort. Ordered low→high so the default sits mid-list.
+export const EFFORT_OPTIONS = [
+  { id: "low", label: "Low", hint: "Fastest, cheapest — simple chat/triage" },
+  { id: "medium", label: "Medium", hint: "Balanced (default)" },
+  { id: "high", label: "High", hint: "Deeper reasoning — harder tasks" },
+  { id: "xhigh", label: "Extra high", hint: "Most thorough — heavy coding/agentic work" },
+];
 
 // A pending tool-call confirmation surfaced by an always_ask agent.
 export interface ToolConfirm {
