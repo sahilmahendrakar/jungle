@@ -89,7 +89,7 @@ export interface Channel {
   dm_with?: string | null; // for dm channels: the other member's handle
   unread_count?: number; // messages after my last_read_seq, excluding my own
   has_mention?: boolean; // any unread message @mentions me
-  member_agent_ids?: string[]; // agent members (drives the row's status dot)
+  member_agent_ids?: string[]; // agent members of this channel
 }
 
 // Upload a file (upload-first, Slack-style): returns the stored Attachment whose id is
