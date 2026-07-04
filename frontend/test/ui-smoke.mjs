@@ -77,6 +77,16 @@ try {
     }
   }
 
+  // Threads panel: open the Threads nav -> right panel renders in list mode, then close it.
+  await page.locator('[data-testid="threads-nav"]').first().click();
+  await page.waitForTimeout(600);
+  check("threads panel opens", (await page.locator('[data-testid="right-panel"]').count()) > 0);
+  const threadClose = page.locator('[data-testid="thread-close"]').first();
+  if (await threadClose.count()) {
+    await threadClose.click();
+    await page.waitForTimeout(300);
+  }
+
   // Profile dialog via People -> DM -> profile (existing participant; no agent created).
   const person = page.locator('[data-testid="people-item"]').first();
   if (await person.count()) {

@@ -26,7 +26,6 @@ import {
 import {
   mergeById,
   newId,
-  fmtTime,
   STATUS_RANK,
   type ToolConfirm,
 } from "./lib/chat";
@@ -35,7 +34,6 @@ import { firebaseEnabled } from "./firebase";
 import { SettingsPanel } from "./Settings";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
 import {
   Tooltip,
   TooltipContent,
@@ -50,7 +48,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Markdown } from "./Markdown";
 import { AgentActivity } from "./AgentActivity";
 import {
   WorkingDots,
@@ -61,7 +58,6 @@ import {
   RIGHT_WIDTH,
 } from "./components/chat/layout";
 import {
-  AttachmentList,
   ParticipantProfilePanel,
   ConfirmCard,
   SectionHeader,
@@ -72,21 +68,19 @@ import {
 import { AddAgentDialog } from "./components/chat/AddAgentDialog";
 import { Composer } from "./components/chat/Composer";
 import { MessageList } from "./components/chat/MessageList";
+import { ThreadPanel } from "./components/chat/ThreadPanel";
 import { NewChannelDialog } from "./components/chat/NewChannelDialog";
 import { MembersDialog } from "./components/chat/MembersDialog";
 import { DeleteChannelDialog } from "./components/chat/DeleteChannelDialog";
 import {
   Activity,
   Bot,
-  Check,
   Hash,
   LogOut,
   MessagesSquare,
   MoreVertical,
   PanelLeft,
   PanelLeftClose,
-  SendHorizonal,
-  Sparkles,
   Trash2,
   UserPlus,
   Users,
@@ -126,8 +120,6 @@ export function App({
   // client already holds the whole open channel), so there's no separate thread cache.
   const [threadRootId, setThreadRootId] = useState<string | null>(null);
   const [threadsListOpen, setThreadsListOpen] = useState(false);
-  const [threadDraft, setThreadDraft] = useState("");
-  const [alsoToChannel, setAlsoToChannel] = useState(false);
   const [unreadThreads, setUnreadThreads] = useState<UnreadThread[]>([]);
   const threadRootIdRef = useRef<string | null>(null);
   useEffect(() => {
@@ -528,8 +520,6 @@ export function App({
     setSettingsPanelOpen(false);
     setThreadsListOpen(false);
     setThreadRootId(rootId);
-    setThreadDraft("");
-    setAlsoToChannel(false);
     markThreadRead(rootId)
       .then(() => refreshThreads())
       .catch(() => {});
@@ -570,12 +560,13 @@ export function App({
   // Post a reply into the open thread. Round-trips over WS like send(); it reappears in
   // `messages` (thread_root_id set) and the pane re-derives. alsoToChannel echoes it to the
   // main timeline too.
-  function sendThreadReply() {
-    const body = threadDraft.trim();
-    if (!body || !threadRootId || !threadRoot) return;
+  // Post a reply into the open thread over WS. Returns false (with a notice) when it can't send,
+  // so ThreadPanel keeps the draft. The reply reappears in `messages` and the pane re-derives.
+  function sendThreadReply(body: string, alsoToChannel: boolean): boolean {
+    if (!threadRootId || !threadRoot) return false;
     if (wsRef.current?.readyState !== WebSocket.OPEN) {
       setNotice("Connecting to the server… try again in a moment.");
-      return;
+      return false;
     }
     wsRef.current.send(
       JSON.stringify({
@@ -587,8 +578,7 @@ export function App({
         ...(alsoToChannel ? { alsoToChannel: true } : {}),
       }),
     );
-    setThreadDraft("");
-    setAlsoToChannel(false);
+    return true;
   }
 
   function signOut() {
@@ -741,43 +731,6 @@ export function App({
   const totalThreadUnread = unreadThreads.reduce((n, t) => n + t.unread_count, 0);
 
   // Compact message row for the thread panel (root + replies), not sender-grouped.
-  const ThreadMessageRow = ({ m }: { m: Message }) => {
-    const sender = personByHandle(m.sender_handle);
-    const isAgent = sender?.kind === "agent";
-    return (
-      <div className="flex gap-2.5">
-        <button
-          onClick={() => sender && openProfilePanel(sender.id)}
-          disabled={!sender}
-          className="h-fit shrink-0 rounded-md transition-opacity hover:opacity-80 disabled:cursor-default"
-        >
-          <PersonAvatar
-            name={sender?.display_name ?? m.sender_handle}
-            handle={m.sender_handle}
-            size="sm"
-          />
-        </button>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-baseline gap-2">
-            <span className="text-sm font-semibold">
-              {sender?.display_name ?? m.sender_handle}
-            </span>
-            {isAgent && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
-                <Sparkles className="size-2.5" /> agent
-              </span>
-            )}
-            <span className="text-xs text-muted-foreground">{fmtTime(m.created_at)}</span>
-          </div>
-          <div className="break-words text-sm">
-            {m.body && <Markdown>{m.body}</Markdown>}
-            {(m.attachments?.length ?? 0) > 0 && <AttachmentList attachments={m.attachments!} />}
-          </div>
-        </div>
-      </div>
-    );
-  };
-
   const threadPanelOpen = !!threadRootId || threadsListOpen;
   const closeThreadPanel = () => {
     setThreadRootId(null);
@@ -1262,150 +1215,18 @@ export function App({
 
           {/* Threads view */}
           {rightMode === "threads" && (
-            <>
-          <header className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
-            <MessagesSquare className="size-4 text-muted-foreground" />
-            <h2 className="min-w-0 flex-1 truncate font-semibold">
-              {threadRootId ? "Thread" : "Threads"}
-              {threadRootId && sel && (
-                <span className="ml-1.5 font-normal text-muted-foreground">
-                  {sel.kind === "dm" ? `@${sel.dm_with}` : `#${sel.name}`}
-                </span>
-              )}
-            </h2>
-            <Button
-              variant="ghost"
-              size="icon"
-              data-testid="thread-close"
-              aria-label="Close thread panel"
-              onClick={closeThreadPanel}
-              className="size-8 shrink-0 text-muted-foreground"
-            >
-              <X className="size-4" />
-            </Button>
-          </header>
-
-          {/* Threads list mode */}
-          {!threadRootId && (
-            <div className="min-h-0 flex-1 overflow-y-auto p-2">
-              {unreadThreads.length === 0 ? (
-                <div className="flex flex-col items-center justify-center gap-2 px-6 pt-16 text-center">
-                  <div className="flex size-12 items-center justify-center rounded-2xl bg-muted">
-                    <MessagesSquare className="size-6 text-muted-foreground" />
-                  </div>
-                  <p className="text-sm text-muted-foreground">
-                    No unread threads. Replies to threads you follow show up here.
-                  </p>
-                </div>
-              ) : (
-                unreadThreads.map((t) => (
-                  <button
-                    key={t.root_id}
-                    data-testid="thread-list-item"
-                    onClick={() => openThreadFromList(t)}
-                    className="flex w-full flex-col gap-1 rounded-lg border border-transparent px-2.5 py-2 text-left transition-colors hover:border-border hover:bg-accent"
-                  >
-                    <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                      <Hash className="size-3" />
-                      <span className="truncate">{t.channel_name}</span>
-                      <span className="ml-auto shrink-0 rounded-full bg-primary px-1.5 text-[10px] font-semibold text-primary-foreground">
-                        {t.unread_count} new
-                      </span>
-                    </div>
-                    <div className="line-clamp-2 text-sm">
-                      <span className="font-semibold">@{t.root_sender_handle}</span>{" "}
-                      <span className="text-muted-foreground">{t.root_body || "(no text)"}</span>
-                    </div>
-                    <div className="text-[11px] text-muted-foreground">
-                      {t.reply_count} {t.reply_count === 1 ? "reply" : "replies"}
-                    </div>
-                  </button>
-                ))
-              )}
-            </div>
-          )}
-
-          {/* Open-thread mode */}
-          {threadRootId && (
-            <>
-              <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
-                {threadRoot ? (
-                  <div className="flex flex-col gap-4">
-                    <ThreadMessageRow m={threadRoot} />
-                    {threadReplies.length > 0 && (
-                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                        <span className="h-px flex-1 bg-border" />
-                        {threadReplies.length}{" "}
-                        {threadReplies.length === 1 ? "reply" : "replies"}
-                        <span className="h-px flex-1 bg-border" />
-                      </div>
-                    )}
-                    {threadReplies.map((m) => (
-                      <ThreadMessageRow key={m.id} m={m} />
-                    ))}
-                  </div>
-                ) : (
-                  <div className="pt-10 text-center text-sm text-muted-foreground">
-                    Loading thread…
-                  </div>
-                )}
-              </div>
-
-              {/* Thread composer */}
-              <div className="shrink-0 px-3 pb-3 pt-1">
-                <div className="rounded-xl border bg-card p-2 shadow-sm focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/20">
-                  <div className="flex items-end gap-2">
-                    <Textarea
-                      data-testid="thread-composer-input"
-                      value={threadDraft}
-                      onChange={(e) => setThreadDraft(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && !e.shiftKey) {
-                          e.preventDefault();
-                          sendThreadReply();
-                        }
-                      }}
-                      rows={1}
-                      placeholder="Reply in thread…"
-                      className="max-h-32 min-h-9 resize-none overflow-y-auto border-0 bg-transparent px-2 py-1.5 shadow-none focus-visible:ring-0"
-                    />
-                    <Button
-                      data-testid="thread-send-button"
-                      onClick={sendThreadReply}
-                      size="icon"
-                      className="shrink-0"
-                      aria-label="Send reply"
-                    >
-                      <SendHorizonal className="size-4" />
-                    </Button>
-                  </div>
-                  {/* Also send to channel (Slack) */}
-                  <label
-                    data-testid="also-to-channel"
-                    className="mt-1 flex cursor-pointer select-none items-center gap-2 px-2 py-1 text-xs text-muted-foreground"
-                  >
-                    <button
-                      type="button"
-                      role="checkbox"
-                      aria-checked={alsoToChannel}
-                      onClick={() => setAlsoToChannel((v) => !v)}
-                      className={cn(
-                        "flex size-4 shrink-0 items-center justify-center rounded border transition-colors",
-                        alsoToChannel
-                          ? "border-primary bg-primary text-primary-foreground"
-                          : "border-input bg-background",
-                      )}
-                    >
-                      {alsoToChannel && <Check className="size-3" />}
-                    </button>
-                    Also send to{" "}
-                    {sel ? (sel.kind === "dm" ? `@${sel.dm_with}` : `#${sel.name}`) : "channel"}
-                  </label>
-                </div>
-              </div>
-            </>
-          )}
-            </>
+            <ThreadPanel
+              threadRootId={threadRootId}
+              threadRoot={threadRoot}
+              threadReplies={threadReplies}
+              unreadThreads={unreadThreads}
+              channel={sel}
+              personByHandle={personByHandle}
+              onOpenProfile={openProfilePanel}
+              onClose={closeThreadPanel}
+              onOpenThreadFromList={openThreadFromList}
+              onSendReply={sendThreadReply}
+            />
           )}
         </aside>
       )}
