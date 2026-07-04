@@ -485,6 +485,15 @@ export class Runner {
     this.conn.send({ type: "context_usage", tokens, maxTokens, percent });
   }
 
+  // Emit a synthetic "jungle_inbound" event through the existing event-frame path (the same
+  // one that carries SDK stream messages), so the backend persists it into agent_events and
+  // broadcasts it exactly like any other turn event — no protocol/backend changes needed. This
+  // is what lets the Activity transcript show what actually fed the agent: the message that
+  // woke it, a mid-turn inbox delivery, or a `/compact`.
+  private sendInboundEvent(turnId: string, source: "trigger" | "inbox" | "compact", text: string): void {
+    this.conn.send({ type: "event", turnId, event: { type: "jungle_inbound", source, text } });
+  }
+
   // Streaming-input generator. Yields the first batch, then awaits follow-up
   // batches at each turn boundary until told to stop (null).
   private async *makeInputGenerator(
@@ -494,13 +503,16 @@ export class Runner {
   ): AsyncGenerator<SDKUserMessage> {
     // A compact turn's only input is the `/compact` slash command; the CLI runs
     // compaction, emits a compact_boundary + result, and the query ends.
-    yield compacting
-      ? ({
-          type: "user",
-          message: { role: "user", content: "/compact" },
-          parent_tool_use_id: null,
-        } as SDKUserMessage)
-      : await this.toUserMessage(firstBatch);
+    if (compacting) {
+      this.sendInboundEvent(turnId, "compact", "/compact");
+      yield {
+        type: "user",
+        message: { role: "user", content: "/compact" },
+        parent_tool_use_id: null,
+      } as SDKUserMessage;
+    } else {
+      yield await this.toUserMessageAndNotify(firstBatch, turnId, "trigger");
+    }
 
     while (true) {
       // If a model change is pending, end the query so it can restart with the new model.
@@ -519,7 +531,7 @@ export class Runner {
       });
 
       if (batch === null || batch.length === 0) return;
-      yield await this.toUserMessage(batch);
+      yield await this.toUserMessageAndNotify(batch, turnId, "inbox");
     }
   }
 
@@ -601,6 +613,23 @@ export class Runner {
       message: { role: "user", content },
       parent_tool_use_id: null,
     } as SDKUserMessage;
+  }
+
+  // toUserMessage, plus a jungle_inbound event carrying the same text so the Activity
+  // transcript can show what fed this turn (the trigger, or a mid-turn inbox delivery).
+  private async toUserMessageAndNotify(
+    batch: QueueItem[],
+    turnId: string,
+    source: "trigger" | "inbox",
+  ): Promise<SDKUserMessage> {
+    const msg = await this.toUserMessage(batch);
+    const content = msg.message.content;
+    const text =
+      typeof content === "string"
+        ? content
+        : ((content.find((b) => b.type === "text") as { text?: string } | undefined)?.text ?? "");
+    this.sendInboundEvent(turnId, source, text);
+    return msg;
   }
 
   // ---- PreToolUse hook: force prompting modes through canUseTool ----
