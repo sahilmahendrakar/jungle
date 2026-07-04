@@ -31,6 +31,8 @@ import {
   type UnreadThread,
 } from "./api";
 import { SignIn } from "./SignIn";
+import { firebaseEnabled } from "./firebase";
+import { SettingsPanel } from "./Settings";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -62,7 +64,6 @@ import {
 import { RepoCombobox } from "./RepoCombobox";
 import { Markdown } from "./Markdown";
 import { AgentActivity } from "./AgentActivity";
-import { navigate } from "./route";
 import {
   Activity,
   Bot,
@@ -86,6 +87,7 @@ import {
   Sparkles,
   Trash2,
   UserPlus,
+  UserRound,
   Users,
   X,
 } from "lucide-react";
@@ -218,6 +220,129 @@ function WorkingDots() {
   );
 }
 
+// --- Resizable sidebars ------------------------------------------------------
+// Both the left nav and the right panel are drag-resizable on desktop (md+). We
+// keep pixel widths (not percentages) so the layout is stable as the window
+// resizes, and persist them per-side to localStorage.
+
+const LEFT_WIDTH = { key: "jungle.leftWidth", default: 288, min: 216, max: 480 };
+const RIGHT_WIDTH = { key: "jungle.rightWidth", default: 380, min: 320, max: 620 };
+
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() =>
+    typeof window !== "undefined" ? window.matchMedia(query).matches : false,
+  );
+  useEffect(() => {
+    const m = window.matchMedia(query);
+    const on = () => setMatches(m.matches);
+    on();
+    m.addEventListener("change", on);
+    return () => m.removeEventListener("change", on);
+  }, [query]);
+  return matches;
+}
+
+function usePersistedWidth(cfg: { key: string; default: number; min: number; max: number }) {
+  const clamp = (n: number) => Math.min(cfg.max, Math.max(cfg.min, n));
+  const [width, setWidthRaw] = useState<number>(() => {
+    const raw = typeof window !== "undefined" ? localStorage.getItem(cfg.key) : null;
+    const n = raw ? parseInt(raw, 10) : NaN;
+    return Number.isFinite(n) ? clamp(n) : cfg.default;
+  });
+  const setWidth = (n: number) => setWidthRaw(clamp(n));
+  useEffect(() => {
+    localStorage.setItem(cfg.key, String(width));
+  }, [cfg.key, width]);
+  return { width, setWidth, reset: () => setWidth(cfg.default) };
+}
+
+// A thin, keyboard-accessible drag divider. Rendered in-flow as a flex sibling *between* two
+// columns (not inside a panel), so an overflow-hidden panel can't clip its hit area. `edge`
+// says which side the resized panel is on: for a panel on the left of the divider ("left"),
+// dragging right grows it; for a panel on the right ("right"), dragging right shrinks it.
+function ResizeHandle({
+  edge,
+  width,
+  min,
+  max,
+  onResize,
+  onResizeStart,
+  onResizeEnd,
+  onReset,
+  testId,
+  label,
+}: {
+  edge: "left" | "right";
+  width: number;
+  min: number;
+  max: number;
+  onResize: (next: number) => void;
+  onResizeStart?: () => void;
+  onResizeEnd?: () => void;
+  onReset?: () => void;
+  testId?: string;
+  label: string;
+}) {
+  const delta = (dx: number) => (edge === "left" ? width + dx : width - dx);
+  const onPointerDown = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = width;
+    onResizeStart?.();
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const move = (ev: PointerEvent) => {
+      const dx = ev.clientX - startX;
+      onResize(edge === "left" ? startW + dx : startW - dx);
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      onResizeEnd?.();
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    const step = e.shiftKey ? 32 : 8;
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      onResize(delta(-step));
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      onResize(delta(step));
+    }
+  };
+
+  return (
+    <div
+      data-testid={testId}
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={label}
+      aria-valuenow={width}
+      aria-valuemin={min}
+      aria-valuemax={max}
+      tabIndex={0}
+      onPointerDown={onPointerDown}
+      onDoubleClick={() => onReset?.()}
+      onKeyDown={onKeyDown}
+      className={cn(
+        "group relative z-30 hidden w-1.5 shrink-0 cursor-col-resize touch-none select-none md:block",
+        "focus-visible:outline-none",
+      )}
+    >
+      {/* Visible hairline centered in the hit strip: subtle by default, brand-colored on
+          hover / focus / drag. */}
+      <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border transition-colors group-hover:bg-primary/60 group-focus-visible:bg-primary/70" />
+    </div>
+  );
+}
+
 export function App({
   authParticipantId,
   getWsToken,
@@ -288,6 +413,15 @@ export function App({
   // Off-canvas drawer state (mobile only; independent of the desktop persisted preference).
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [profileId, setProfileId] = useState<string | null>(null);
+  // Self settings live in the right panel (firebase mode); mutually exclusive with a profile.
+  const [settingsPanelOpen, setSettingsPanelOpen] = useState(false);
+
+  // Drag-resizable widths for the two sidebars (desktop only). `resizing` suppresses the
+  // width transition mid-drag so the panel tracks the pointer instead of easing behind it.
+  const isDesktop = useMediaQuery("(min-width: 768px)");
+  const left = usePersistedWidth(LEFT_WIDTH);
+  const right = usePersistedWidth(RIGHT_WIDTH);
+  const [resizing, setResizing] = useState(false);
   // Activity view: the sdk agent whose transcript is open, plus a live event buffer for it.
   // We only buffer while a view is open (activityIdRef gates the WS handler), so idle agents
   // don't accumulate unbounded memory.
@@ -742,6 +876,9 @@ export function App({
   // the panel only when navigating somewhere else.
   function openThread(rootId: string, channelId: string | null = selectedRef.current) {
     threadChannelRef.current = channelId;
+    // The right panel shows one thing at a time — a thread takes over from a profile/settings.
+    setProfileId(null);
+    setSettingsPanelOpen(false);
     setThreadsListOpen(false);
     setThreadRootId(rootId);
     setThreadDraft("");
@@ -763,6 +900,24 @@ export function App({
         .catch(() => {});
     }
     openThread(t.root_id, t.channel_id);
+  }
+
+  // The right panel is shared by three views — a participant profile, self settings, and the
+  // threads pane. Opening any one clears the others so they never fight over the panel, and
+  // closes the mobile nav drawer so the panel isn't hidden behind it.
+  function openProfilePanel(id: string) {
+    setProfileId(id);
+    setSettingsPanelOpen(false);
+    setThreadRootId(null);
+    setThreadsListOpen(false);
+    setDrawerOpen(false);
+  }
+  function openSettingsPanel() {
+    setSettingsPanelOpen(true);
+    setProfileId(null);
+    setThreadRootId(null);
+    setThreadsListOpen(false);
+    setDrawerOpen(false);
   }
 
   // Post a reply into the open thread. Round-trips over WS like send(); it reappears in
@@ -1098,7 +1253,7 @@ export function App({
     return (
       <div className="flex gap-2.5">
         <button
-          onClick={() => sender && setProfileId(sender.id)}
+          onClick={() => sender && openProfilePanel(sender.id)}
           disabled={!sender}
           className="h-fit shrink-0 rounded-md transition-opacity hover:opacity-80 disabled:cursor-default"
         >
@@ -1135,6 +1290,23 @@ export function App({
     setThreadsListOpen(false);
   };
 
+  // The right panel hosts one of three views at a time. Profile/settings win over the threads
+  // pane (opening either already cleared the others via the openers above).
+  const rightMode: "profile" | "settings" | "threads" | null = profilePerson
+    ? "profile"
+    : settingsPanelOpen
+      ? "settings"
+      : threadPanelOpen
+        ? "threads"
+        : null;
+  const rightOpen = rightMode !== null;
+  const closeRightPanel = () => {
+    setProfileId(null);
+    setSettingsPanelOpen(false);
+    setThreadRootId(null);
+    setThreadsListOpen(false);
+  };
+
   return (
     <div className="relative flex h-screen-dvh w-full overflow-hidden bg-background text-foreground">
       {/* Mobile backdrop: tapping it closes the off-canvas drawer. Desktop (md+) never shows it. */}
@@ -1151,17 +1323,26 @@ export function App({
           Mobile (<md): fixed off-canvas drawer, slid in/out with `drawerOpen`. */}
       <aside
         data-testid="sidebar"
+        // Desktop width is driven by inline style (drag-resizable, persisted); collapsing sets
+        // it to 0. Mobile keeps the fixed w-72 off-canvas drawer, so the inline style is only
+        // applied at md+ (via isDesktop). The width transition is dropped mid-drag so the panel
+        // tracks the pointer instead of easing behind it.
+        style={isDesktop ? { width: sidebarOpen ? left.width : 0 } : undefined}
         className={cn(
           "shrink-0 overflow-hidden",
           // Mobile: off-canvas fixed drawer.
           "fixed inset-y-0 left-0 z-40 w-72 transition-transform duration-200 ease-in-out",
           drawerOpen ? "translate-x-0" : "-translate-x-full",
-          // Desktop: in-flow width-collapse; reset the mobile transform/positioning.
-          "md:static md:z-auto md:translate-x-0 md:transition-[width] md:duration-200 md:ease-in-out",
-          sidebarOpen ? "md:w-72" : "md:w-0",
+          // Desktop: in-flow (relative, so the resize handle anchors here) with the mobile
+          // transform reset.
+          "md:relative md:z-auto md:translate-x-0",
+          !resizing && "md:transition-[width] md:duration-200 md:ease-in-out",
         )}
       >
-        <div className="flex h-full w-72 flex-col bg-sidebar text-sidebar-foreground">
+        <div
+          className="flex h-full w-72 flex-col bg-sidebar text-sidebar-foreground"
+          style={isDesktop ? { width: left.width } : undefined}
+        >
         {/* Workspace header */}
         <div className="flex shrink-0 items-center gap-2.5 border-b border-sidebar-border px-4 py-3.5">
           <img src="/icon-192.png" alt="Jungle" className="size-8 rounded-lg shadow-sm" />
@@ -1192,6 +1373,9 @@ export function App({
               testId="threads-nav"
               active={threadsListOpen}
               onClick={() => {
+                // Threads take over the right panel from a profile/settings view.
+                setProfileId(null);
+                setSettingsPanelOpen(false);
                 setThreadRootId(null);
                 setThreadsListOpen(true);
                 refreshThreads();
@@ -1312,7 +1496,7 @@ export function App({
           <div className="flex shrink-0 items-center gap-1 border-t border-sidebar-border px-2 py-2.5">
             <button
               data-testid="open-profile"
-              onClick={() => navigate("/settings")}
+              onClick={() => (firebaseEnabled ? openSettingsPanel() : openProfilePanel(me.id))}
               title="Profile & settings"
               className="flex min-w-0 flex-1 items-center gap-2.5 rounded-md px-1 py-1 text-left transition-colors hover:bg-sidebar-accent"
             >
@@ -1339,6 +1523,22 @@ export function App({
         )}
         </div>
       </aside>
+
+      {/* Left sidebar resize divider (desktop, only while expanded). */}
+      {isDesktop && sidebarOpen && (
+        <ResizeHandle
+          edge="left"
+          testId="sidebar-resize"
+          label="Resize sidebar"
+          width={left.width}
+          min={LEFT_WIDTH.min}
+          max={LEFT_WIDTH.max}
+          onResize={left.setWidth}
+          onReset={left.reset}
+          onResizeStart={() => setResizing(true)}
+          onResizeEnd={() => setResizing(false)}
+        />
+      )}
 
       {/* ---------- Main ---------- */}
       <main className="flex min-w-0 flex-1 flex-col bg-background">
@@ -1379,7 +1579,7 @@ export function App({
                   data-testid="dm-header-profile"
                   onClick={() => {
                     const other = personByHandle(sel.dm_with);
-                    if (other) setProfileId(other.id);
+                    if (other) openProfilePanel(other.id);
                   }}
                   className="flex min-w-0 items-center gap-2.5 rounded-md px-1.5 py-1 -mx-1.5 transition-colors hover:bg-accent"
                   title="View profile"
@@ -1474,7 +1674,7 @@ export function App({
               return (
                 <div key={lead.id} className="flex gap-3">
                   <button
-                    onClick={() => sender && setProfileId(sender.id)}
+                    onClick={() => sender && openProfilePanel(sender.id)}
                     disabled={!sender}
                     className="h-fit shrink-0 rounded-md transition-opacity hover:opacity-80 disabled:cursor-default"
                     title={sender ? `View @${sender.handle}` : undefined}
@@ -1488,7 +1688,7 @@ export function App({
                     <div className="flex items-baseline gap-2">
                       <button
                         data-testid="message-sender"
-                        onClick={() => sender && setProfileId(sender.id)}
+                        onClick={() => sender && openProfilePanel(sender.id)}
                         disabled={!sender}
                         className="font-semibold hover:underline disabled:no-underline"
                       >
@@ -1737,15 +1937,60 @@ export function App({
         </div>
       </main>
 
-      {/* ---------- Thread panel (right sidebar) ----------
-          Desktop (md+): in-flow third column. Mobile: fixed right overlay. Two modes: the
-          Threads list (my followed threads with unread) or an open thread (root + replies +
-          its own composer). */}
-      {threadPanelOpen && (
+      {/* ---------- Right panel (contextual sidebar) ----------
+          Desktop (md+): in-flow, drag-resizable third column. Mobile: fixed right overlay.
+          Hosts one of three views at a time — a participant profile, self settings, or the
+          Threads pane (its own list / open-thread sub-modes). */}
+      {/* Right panel resize divider (desktop only; sits between main and the panel). */}
+      {rightOpen && isDesktop && (
+        <ResizeHandle
+          edge="right"
+          testId="right-panel-resize"
+          label="Resize panel"
+          width={right.width}
+          min={RIGHT_WIDTH.min}
+          max={RIGHT_WIDTH.max}
+          onResize={right.setWidth}
+          onReset={right.reset}
+          onResizeStart={() => setResizing(true)}
+          onResizeEnd={() => setResizing(false)}
+        />
+      )}
+
+      {rightOpen && (
         <aside
-          data-testid="thread-panel"
-          className="fixed inset-y-0 right-0 z-40 flex w-full max-w-[420px] flex-col border-l bg-background shadow-xl md:static md:z-auto md:w-[380px] md:shadow-none"
+          data-testid="right-panel"
+          style={isDesktop ? { width: right.width } : undefined}
+          className={cn(
+            "fixed inset-y-0 right-0 z-40 flex w-full max-w-[440px] flex-col border-l bg-background shadow-xl",
+            "md:relative md:z-auto md:shadow-none",
+            !resizing && "md:transition-[width] md:duration-200 md:ease-in-out",
+          )}
         >
+          {/* Profile view (agent / human / self) */}
+          {rightMode === "profile" && profilePerson && (
+            <ParticipantProfilePanel
+              key={profilePerson.id}
+              person={profilePerson}
+              isSelf={profilePerson.id === participantId}
+              onClose={closeRightPanel}
+              onSaved={(u) =>
+                setPeople((ps) => ps.map((p) => (p.id === u.id ? { ...p, ...u } : p)))
+              }
+              onOpenActivity={() => openActivity(profilePerson.id)}
+              onDeleted={(id) => {
+                setPeople((ps) => ps.filter((p) => p.id !== id));
+                closeRightPanel();
+              }}
+            />
+          )}
+
+          {/* Self settings view (account + GitHub); firebase mode only */}
+          {rightMode === "settings" && <SettingsPanel onClose={closeRightPanel} />}
+
+          {/* Threads view */}
+          {rightMode === "threads" && (
+            <>
           <header className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
             <MessagesSquare className="size-4 text-muted-foreground" />
             <h2 className="min-w-0 flex-1 truncate font-semibold">
@@ -1886,6 +2131,8 @@ export function App({
                   </label>
                 </div>
               </div>
+            </>
+          )}
             </>
           )}
         </aside>
@@ -2166,28 +2413,6 @@ export function App({
         </DialogContent>
       </Dialog>
 
-      {/* Viewing another participant: human = read-only alias; agent = editable config */}
-      {profilePerson && (
-        <ParticipantProfileDialog
-          key={profilePerson.id}
-          person={profilePerson}
-          isSelf={profilePerson.id === participantId}
-          onClose={() => setProfileId(null)}
-          onSaved={(u) =>
-            setPeople((ps) => ps.map((p) => (p.id === u.id ? { ...p, ...u } : p)))
-          }
-          onOpenActivity={() => {
-            openActivity(profilePerson.id);
-            setProfileId(null);
-          }}
-          onDeleted={(id) => {
-            // Optimistic local cleanup; the participant_deleted WS event is idempotent.
-            setPeople((ps) => ps.filter((p) => p.id !== id));
-            setProfileId(null);
-          }}
-        />
-      )}
-
       {/* Live Claude-Code-style transcript for an sdk agent */}
       {activityAgent && (
         <AgentActivity
@@ -2298,7 +2523,7 @@ function SelectMenu({
 // for now). Agents expose an editable config: display name + tool-permission mode (applied live),
 // model (applied at the next turn), and an Activity view.
 // (The current user's own settings — email, GitHub, sign out — live at the /settings route.)
-function ParticipantProfileDialog({
+function ParticipantProfilePanel({
   person,
   isSelf,
   onClose,
@@ -2364,11 +2589,31 @@ function ParticipantProfileDialog({
   }
 
   return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent data-testid="profile-dialog" className="sm:max-w-md">
-        <DialogHeader className="sr-only">
-          <DialogTitle>{person.display_name}'s profile</DialogTitle>
-        </DialogHeader>
+    <div data-testid="profile-panel" className="flex h-full flex-col">
+      {/* Panel header */}
+      <header className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
+        {isAgent ? (
+          <Sparkles className="size-4 text-muted-foreground" />
+        ) : (
+          <UserRound className="size-4 text-muted-foreground" />
+        )}
+        <h2 className="min-w-0 flex-1 truncate font-semibold">
+          {isSelf ? "Your profile" : isAgent ? "Agent" : "Profile"}
+        </h2>
+        <Button
+          variant="ghost"
+          size="icon"
+          data-testid="profile-close"
+          aria-label="Close profile"
+          onClick={onClose}
+          className="size-8 shrink-0 text-muted-foreground"
+        >
+          <X className="size-4" />
+        </Button>
+      </header>
+
+      {/* Scrollable body */}
+      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4">
         {/* Identity header */}
         <div className="flex items-center gap-4">
           <Avatar className="size-16 rounded-xl">
@@ -2497,28 +2742,29 @@ function ParticipantProfileDialog({
               : `${person.display_name} is a member of the workspace.`}
           </div>
         )}
+      </div>
 
-        {isAgent && (
-          <DialogFooter>
-            {saved && (
-              <span className="mr-auto flex items-center gap-1 text-sm text-emerald-600">
-                <Check className="size-4" /> Saved
-              </span>
-            )}
-            <Button variant="ghost" onClick={onClose}>
-              Close
-            </Button>
-            <Button
-              data-testid="profile-save"
-              onClick={save}
-              disabled={!dirty || saving || !name.trim()}
-            >
-              {saving ? "Saving…" : "Save changes"}
-            </Button>
-          </DialogFooter>
-        )}
-      </DialogContent>
-    </Dialog>
+      {/* Sticky footer: save controls (agent config only) */}
+      {isAgent && (
+        <div className="flex shrink-0 items-center justify-end gap-2 border-t px-4 py-3">
+          {saved && (
+            <span className="mr-auto flex items-center gap-1 text-sm text-emerald-600">
+              <Check className="size-4" /> Saved
+            </span>
+          )}
+          <Button variant="ghost" onClick={onClose}>
+            Close
+          </Button>
+          <Button
+            data-testid="profile-save"
+            onClick={save}
+            disabled={!dirty || saving || !name.trim()}
+          >
+            {saving ? "Saving…" : "Save changes"}
+          </Button>
+        </div>
+      )}
+    </div>
   );
 }
 

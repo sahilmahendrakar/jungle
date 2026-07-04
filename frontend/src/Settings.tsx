@@ -18,7 +18,9 @@ import {
   Loader2,
   LogOut,
   Mail,
+  Settings as SettingsIcon,
   Unlink,
+  X,
 } from "lucide-react";
 
 function GithubMark({ className }: { className?: string }) {
@@ -29,7 +31,10 @@ function GithubMark({ className }: { className?: string }) {
   );
 }
 
-export function Settings() {
+// The account + GitHub settings body, shared by the right-panel `SettingsPanel` and the legacy
+// full-page `/settings` route. Pulls the current user from the auth context, so it must render
+// under an AuthProvider (i.e. only in Firebase mode).
+function SettingsContent() {
   const { me, refreshMe, signOut } = useAuth();
   const participant = me?.participant;
   const profile = me?.profile;
@@ -90,7 +95,7 @@ export function Settings() {
 
   if (!participant) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-background">
+      <div className="flex items-center justify-center py-16">
         <Loader2 className="size-6 animate-spin text-muted-foreground" />
       </div>
     );
@@ -98,6 +103,202 @@ export function Settings() {
 
   const needsAppInstall = connected && ghStatus && ghStatus.repoCount === 0;
 
+  return (
+    <div className="mx-auto w-full max-w-lg px-4 py-6">
+      {/* Account */}
+      <section className="space-y-3">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Account
+        </h2>
+        <div className="flex items-center gap-3 rounded-xl border bg-card p-4">
+          <Avatar className="size-14 rounded-xl">
+            {profile?.picture && <AvatarImage src={profile.picture} alt={participant.display_name} />}
+            <AvatarFallback className={cn(avatarClass(participant.handle), "rounded-xl text-base")}>
+              {initials(participant.display_name)}
+            </AvatarFallback>
+          </Avatar>
+          <div className="min-w-0">
+            <div className="truncate text-base font-semibold">{participant.display_name}</div>
+            <div className="truncate text-sm text-muted-foreground">@{participant.handle}</div>
+            {profile?.email && (
+              <div className="mt-0.5 flex items-center gap-1 truncate text-xs text-muted-foreground">
+                <Mail className="size-3 shrink-0" />
+                {profile.email}
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
+
+      {/* GitHub OAuth */}
+      <section className="mt-8 space-y-3">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          GitHub
+        </h2>
+        <div className="rounded-xl border bg-card p-4">
+          <div className="flex items-center gap-3">
+            <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-foreground text-background">
+              <GithubMark className="size-5" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-medium">Connect account</div>
+              {connected ? (
+                <div className="flex items-center gap-1 text-xs text-emerald-600">
+                  <Check className="size-3 shrink-0" />
+                  <span className="truncate">Connected{login ? ` as @${login}` : ""}</span>
+                </div>
+              ) : (
+                <div className="text-xs text-muted-foreground">
+                  Link your GitHub identity so Jungle can see your installations.
+                </div>
+              )}
+            </div>
+            {connected ? (
+              <Button
+                data-testid="settings-disconnect-github"
+                onClick={unlinkGithub}
+                disabled={busy}
+                size="icon"
+                variant="ghost"
+                title="Disconnect GitHub"
+                aria-label="Disconnect GitHub"
+                className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
+              >
+                <Unlink className="size-4" />
+              </Button>
+            ) : (
+              <Button
+                data-testid="settings-connect-github"
+                onClick={connectGithub}
+                disabled={busy}
+                size="sm"
+                className="shrink-0 gap-1.5 bg-foreground text-background hover:bg-foreground/90"
+              >
+                <GithubMark className="size-3.5" />
+                {busy ? "Redirecting…" : "Connect"}
+              </Button>
+            )}
+          </div>
+        </div>
+      </section>
+
+      {/* GitHub App installation — required for agent repo picker */}
+      <section className="mt-8 space-y-3">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          GitHub App
+        </h2>
+        <div className="rounded-xl border bg-card p-4" data-testid="settings-github-app">
+          {!connected ? (
+            <p className="text-sm text-muted-foreground">
+              Connect GitHub above first, then install the Jungle GitHub App to grant access to
+              your repositories.
+            </p>
+          ) : ghLoading ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" />
+              Checking installations…
+            </div>
+          ) : needsAppInstall ? (
+            <div className="space-y-3">
+              <p className="text-sm text-muted-foreground">
+                Your agents can only work on repositories where the{" "}
+                <span className="font-medium text-foreground">Jungle GitHub App</span> is installed.
+                {ghStatus!.installationCount > 0
+                  ? " You have an installation, but no repositories are granted yet."
+                  : " Install the app on your personal account or organization to add repos."}
+              </p>
+              {ghStatus?.installUrl && (
+                <Button asChild className="gap-2">
+                  <a
+                    href={ghStatus.installUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    data-testid="settings-install-github-app"
+                  >
+                    <GithubMark className="size-4" />
+                    Install GitHub App
+                    <ExternalLink className="size-3.5 opacity-60" />
+                  </a>
+                </Button>
+              )}
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <div className="flex items-center gap-1 text-sm text-emerald-600">
+                <Check className="size-4 shrink-0" />
+                {ghStatus!.repoCount} repositor{ghStatus!.repoCount === 1 ? "y" : "ies"} available
+                for agents
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {ghStatus!.installationCount} app installation
+                {ghStatus!.installationCount === 1 ? "" : "s"} on your account.
+              </p>
+              {ghStatus?.installUrl && (
+                <Button variant="outline" size="sm" asChild className="gap-2">
+                  <a
+                    href={ghStatus.installUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    data-testid="settings-manage-github-app"
+                  >
+                    Manage app access
+                    <ExternalLink className="size-3 opacity-60" />
+                  </a>
+                </Button>
+              )}
+            </div>
+          )}
+        </div>
+      </section>
+
+      {error && (
+        <p className="mt-4 text-sm text-destructive" data-testid="settings-error">
+          {error}
+        </p>
+      )}
+
+      <section className="mt-10 border-t pt-6">
+        <Button
+          data-testid="settings-sign-out"
+          onClick={() => signOut()}
+          variant="ghost"
+          className="w-full justify-start gap-2 text-destructive hover:bg-destructive/10 hover:text-destructive"
+        >
+          <LogOut className="size-4" />
+          Sign out
+        </Button>
+      </section>
+    </div>
+  );
+}
+
+// Settings as a right-panel view (contextual sidebar). Shares its body with the full-page route.
+export function SettingsPanel({ onClose }: { onClose: () => void }) {
+  return (
+    <div data-testid="settings-panel" className="flex h-full flex-col">
+      <header className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
+        <SettingsIcon className="size-4 text-muted-foreground" />
+        <h2 className="min-w-0 flex-1 truncate font-semibold">Settings</h2>
+        <Button
+          variant="ghost"
+          size="icon"
+          data-testid="settings-close"
+          aria-label="Close settings"
+          onClick={onClose}
+          className="size-8 shrink-0 text-muted-foreground"
+        >
+          <X className="size-4" />
+        </Button>
+      </header>
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <SettingsContent />
+      </div>
+    </div>
+  );
+}
+
+// Full-page settings route (kept for deep links / non-panel navigation).
+export function Settings() {
   return (
     <main className="min-h-screen bg-background">
       <header className="sticky top-0 z-10 flex h-14 items-center gap-3 border-b bg-background/95 px-4 backdrop-blur supports-[backdrop-filter]:bg-background/80">
@@ -113,174 +314,7 @@ export function Settings() {
         </Button>
         <h1 className="text-base font-semibold">Settings</h1>
       </header>
-
-      <div className="mx-auto w-full max-w-lg px-4 py-6">
-        {/* Account */}
-        <section className="space-y-3">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            Account
-          </h2>
-          <div className="flex items-center gap-3 rounded-xl border bg-card p-4">
-            <Avatar className="size-14 rounded-xl">
-              {profile?.picture && <AvatarImage src={profile.picture} alt={participant.display_name} />}
-              <AvatarFallback
-                className={cn(avatarClass(participant.handle), "rounded-xl text-base")}
-              >
-                {initials(participant.display_name)}
-              </AvatarFallback>
-            </Avatar>
-            <div className="min-w-0">
-              <div className="truncate text-base font-semibold">{participant.display_name}</div>
-              <div className="truncate text-sm text-muted-foreground">@{participant.handle}</div>
-              {profile?.email && (
-                <div className="mt-0.5 flex items-center gap-1 truncate text-xs text-muted-foreground">
-                  <Mail className="size-3 shrink-0" />
-                  {profile.email}
-                </div>
-              )}
-            </div>
-          </div>
-        </section>
-
-        {/* GitHub OAuth */}
-        <section className="mt-8 space-y-3">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            GitHub
-          </h2>
-          <div className="rounded-xl border bg-card p-4">
-            <div className="flex items-center gap-3">
-              <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-foreground text-background">
-                <GithubMark className="size-5" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="text-sm font-medium">Connect account</div>
-                {connected ? (
-                  <div className="flex items-center gap-1 text-xs text-emerald-600">
-                    <Check className="size-3 shrink-0" />
-                    <span className="truncate">Connected{login ? ` as @${login}` : ""}</span>
-                  </div>
-                ) : (
-                  <div className="text-xs text-muted-foreground">
-                    Link your GitHub identity so Jungle can see your installations.
-                  </div>
-                )}
-              </div>
-              {connected ? (
-                <Button
-                  data-testid="settings-disconnect-github"
-                  onClick={unlinkGithub}
-                  disabled={busy}
-                  size="icon"
-                  variant="ghost"
-                  title="Disconnect GitHub"
-                  aria-label="Disconnect GitHub"
-                  className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
-                >
-                  <Unlink className="size-4" />
-                </Button>
-              ) : (
-                <Button
-                  data-testid="settings-connect-github"
-                  onClick={connectGithub}
-                  disabled={busy}
-                  size="sm"
-                  className="shrink-0 gap-1.5 bg-foreground text-background hover:bg-foreground/90"
-                >
-                  <GithubMark className="size-3.5" />
-                  {busy ? "Redirecting…" : "Connect"}
-                </Button>
-              )}
-            </div>
-          </div>
-        </section>
-
-        {/* GitHub App installation — required for agent repo picker */}
-        <section className="mt-8 space-y-3">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            GitHub App
-          </h2>
-          <div className="rounded-xl border bg-card p-4" data-testid="settings-github-app">
-            {!connected ? (
-              <p className="text-sm text-muted-foreground">
-                Connect GitHub above first, then install the Jungle GitHub App to grant access to
-                your repositories.
-              </p>
-            ) : ghLoading ? (
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <Loader2 className="size-4 animate-spin" />
-                Checking installations…
-              </div>
-            ) : needsAppInstall ? (
-              <div className="space-y-3">
-                <p className="text-sm text-muted-foreground">
-                  Your agents can only work on repositories where the{" "}
-                  <span className="font-medium text-foreground">Jungle GitHub App</span> is installed.
-                  {ghStatus!.installationCount > 0
-                    ? " You have an installation, but no repositories are granted yet."
-                    : " Install the app on your personal account or organization to add repos."}
-                </p>
-                {ghStatus?.installUrl && (
-                  <Button asChild className="gap-2">
-                    <a
-                      href={ghStatus.installUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      data-testid="settings-install-github-app"
-                    >
-                      <GithubMark className="size-4" />
-                      Install GitHub App
-                      <ExternalLink className="size-3.5 opacity-60" />
-                    </a>
-                  </Button>
-                )}
-              </div>
-            ) : (
-              <div className="space-y-2">
-                <div className="flex items-center gap-1 text-sm text-emerald-600">
-                  <Check className="size-4 shrink-0" />
-                  {ghStatus!.repoCount} repositor{ghStatus!.repoCount === 1 ? "y" : "ies"} available
-                  for agents
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  {ghStatus!.installationCount} app installation
-                  {ghStatus!.installationCount === 1 ? "" : "s"} on your account.
-                </p>
-                {ghStatus?.installUrl && (
-                  <Button variant="outline" size="sm" asChild className="gap-2">
-                    <a
-                      href={ghStatus.installUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      data-testid="settings-manage-github-app"
-                    >
-                      Manage app access
-                      <ExternalLink className="size-3 opacity-60" />
-                    </a>
-                  </Button>
-                )}
-              </div>
-            )}
-          </div>
-        </section>
-
-        {error && (
-          <p className="mt-4 text-sm text-destructive" data-testid="settings-error">
-            {error}
-          </p>
-        )}
-
-        <section className="mt-10 border-t pt-6">
-          <Button
-            data-testid="settings-sign-out"
-            onClick={() => signOut()}
-            variant="ghost"
-            className="w-full justify-start gap-2 text-destructive hover:bg-destructive/10 hover:text-destructive"
-          >
-            <LogOut className="size-4" />
-            Sign out
-          </Button>
-        </section>
-      </div>
+      <SettingsContent />
     </main>
   );
 }
