@@ -97,13 +97,11 @@ export function ChannelHeader({
                 handle={channel.dm_with ?? "?"}
                 size="sm"
               />
-              <div className="min-w-0">
-                <h2 className="truncate font-semibold leading-tight">
+              <div className="flex min-w-0 items-baseline gap-1.5">
+                <h2 className="truncate font-semibold">
                   {personByHandle(channel.dm_with)?.display_name ?? headerTitle}
                 </h2>
-                <div className="truncate text-xs leading-tight text-muted-foreground">
-                  {headerTitle}
-                </div>
+                <span className="shrink-0 text-xs text-muted-foreground">{headerTitle}</span>
               </div>
             </button>
           ) : (
