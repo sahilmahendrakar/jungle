@@ -31,6 +31,7 @@ import { SettingsPanel } from "./Settings";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { AgentActivity } from "./AgentActivity";
+import { DmActivityView } from "./components/chat/DmActivityView";
 import {
   WorkingDots,
   ResizeHandle,
@@ -126,11 +127,16 @@ export function App({
   const [resizing, setResizing] = useState(false);
   // Activity view: the sdk agent whose transcript is open, plus a live event buffer for it.
   // We only buffer while a view is open (activityIdRef gates the WS handler), so idle agents
-  // don't accumulate unbounded memory.
+  // don't accumulate unbounded memory. `activityMode` picks how it's rendered: "modal" for the
+  // full-screen dialog (opened from the profile panel), "inline" for the DM header's
+  // "View activity" toggle, which swaps the DM's message list for the same transcript in place.
   const [activityId, setActivityId] = useState<string | null>(null);
+  const [activityMode, setActivityMode] = useState<"modal" | "inline">("modal");
   const [activityEvents, setActivityEvents] = useState<AgentEvent[]>([]);
   const activityIdRef = useRef<string | null>(null);
   activityIdRef.current = activityId;
+  const activityModeRef = useRef<"modal" | "inline">("modal");
+  activityModeRef.current = activityMode;
   const selectedRef = useRef<string | null>(null);
   selectedRef.current = selected;
   // Whether this tab is focused/visible — a message for the open channel only auto-marks-read
@@ -235,6 +241,9 @@ export function App({
       setThreadRootId(null);
       setThreadsListOpen(false);
     }
+    // Leaving the DM whose activity was open inline closes that view too — it's specific to
+    // that conversation, not a standing app mode.
+    if (activityModeRef.current === "inline") setActivityId(null);
     if (!selected) return;
     getMessages(selected).then(setMessages);
     markRead(selected);
@@ -438,10 +447,25 @@ export function App({
     }
   }
 
-  // Open an sdk agent's Activity view. Reset the live buffer so it only holds frames that
-  // arrive while this view is open (history is fetched inside AgentActivity).
+  // Open an sdk agent's Activity view as a full-screen dialog (from the profile panel). Reset
+  // the live buffer so it only holds frames that arrive while this view is open (history is
+  // fetched inside AgentActivity).
   function openActivity(agentId: string) {
     setActivityEvents([]);
+    setActivityMode("modal");
+    setActivityId(agentId);
+  }
+
+  // The DM header's "View activity"/"View chat" toggle: swaps the message list for the same
+  // live transcript, in place, instead of a dialog. Toggling off just clears activityId, same
+  // as closing the modal.
+  function toggleInlineActivity(agentId: string) {
+    if (activityId === agentId && activityMode === "inline") {
+      setActivityId(null);
+      return;
+    }
+    setActivityEvents([]);
+    setActivityMode("inline");
     setActivityId(agentId);
   }
 
@@ -546,6 +570,12 @@ export function App({
     ? people.find((p) => p.id === profileId) ?? (me?.id === profileId ? me : undefined)
     : undefined;
   const activityAgent = activityId ? people.find((p) => p.id === activityId) : undefined;
+  // The other side of the open DM, when it's an sdk agent — drives the header's activity toggle.
+  const dmAgent =
+    sel?.kind === "dm" ? personByHandle(sel.dm_with) : undefined;
+  const dmAgentIsSdk = dmAgent?.kind === "agent" && dmAgent?.runtime === "sdk" ? dmAgent : undefined;
+  const inlineActivityOpen =
+    activityMode === "inline" && !!dmAgentIsSdk && activityId === dmAgentIsSdk.id;
 
   const headerTitle = sel
     ? sel.kind === "dm"
@@ -650,28 +680,38 @@ export function App({
           sidebarOpen={sidebarOpen}
           memberCount={members.length}
           personByHandle={personByHandle}
+          dmAgent={dmAgentIsSdk}
+          activityOpen={inlineActivityOpen}
           onOpenDrawer={() => setDrawerOpen(true)}
           onExpandSidebar={() => setSidebarOpen(true)}
           onOpenProfile={openProfilePanel}
           onOpenMembers={() => setShowMembers(true)}
           onDeleteChannel={() => setShowDeleteConfirm(true)}
+          onToggleActivity={() => dmAgentIsSdk && toggleInlineActivity(dmAgentIsSdk.id)}
         />
 
-        {/* Messages */}
-        <MessageList
-          grouped={grouped}
-          hasChannel={!!sel}
-          channelId={selected}
-          headerTitle={headerTitle}
-          personByHandle={personByHandle}
-          onOpenProfile={openProfilePanel}
-          replyCounts={replyCounts}
-          unreadByRoot={unreadByRoot}
-          onOpenThread={openThread}
-        />
+        {/* Messages, or — in an agent DM with "View activity" toggled on — that agent's live
+            transcript in place of the message list. */}
+        {inlineActivityOpen && dmAgentIsSdk ? (
+          <DmActivityView agent={dmAgentIsSdk} events={activityEvents} />
+        ) : (
+          <MessageList
+            grouped={grouped}
+            hasChannel={!!sel}
+            channelId={selected}
+            headerTitle={headerTitle}
+            personByHandle={personByHandle}
+            onOpenProfile={openProfilePanel}
+            replyCounts={replyCounts}
+            unreadByRoot={unreadByRoot}
+            onOpenThread={openThread}
+          />
+        )}
 
-        {/* Working / waking indicator (conditionally rendered: absent when everyone's idle) */}
-        {busyMembers.length > 0 && (
+        {/* Working / waking indicator — DMs only; in a multi-member channel this fires for every
+            agent's every turn and mostly reads as noise. Hidden while viewing the activity
+            transcript, which already shows live status in its own header. */}
+        {sel?.kind === "dm" && !inlineActivityOpen && busyMembers.length > 0 && (
           <div
             data-testid="working-indicator"
             className="flex items-center gap-2 px-3 py-1.5 text-sm text-muted-foreground md:px-5"
@@ -831,8 +871,9 @@ export function App({
         <InviteDialog open={showInvite} onOpenChange={setShowInvite} workspaceId={workspaceId} />
       )}
 
-      {/* Live Claude-Code-style transcript for an sdk agent */}
-      {activityAgent && (
+      {/* Live Claude-Code-style transcript for an sdk agent (full-screen dialog, opened from the
+          profile panel — the DM header's inline toggle renders DmActivityView instead). */}
+      {activityMode === "modal" && activityAgent && (
         <AgentActivity
           key={activityAgent.id}
           agent={activityAgent}

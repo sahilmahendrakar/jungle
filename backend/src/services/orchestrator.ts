@@ -32,27 +32,50 @@ function broadcastAgentWorkspace(agentId: string, payload: unknown): void {
 // destination). Overwritten each dispatch; sdk turns are serialized per agent by the runner.
 const sdkContext = new Map<string, { budget: number; channelId: string; threadRootId: string | null }>();
 
-// Compose the turn-input prompt for a dispatched agent. In a thread the agent gets the THREAD
-// transcript and is told its reply is auto-placed in the thread; otherwise recent channel context.
+// Compose the turn-input prompt for a dispatched agent. There are three shapes:
+//  - Existing thread: the agent gets the THREAD transcript; omitting threadRootId keeps its reply
+//    in that thread (it can pass threadRootId:null / alsoToChannel to reach the whole channel).
+//  - Top-level channel message: the agent gets recent channel context AND the triggering message's
+//    id, and decides — pass that id as threadRootId to reply in a thread under it (encouraged, keeps
+//    the channel tidy), or omit it to post a plain message to the channel.
+//  - DM: recent context; reply goes top-level (DMs don't thread).
 async function buildAgentTurnInput(
   agent: db.AgentRow,
   triggerChannelId: string,
   triggerChannelName: string,
-  threadRootId: string | null,
+  existingThreadRootId: string | null,
+  topLevelChannelMessageId: string | null,
 ): Promise<string> {
-  if (threadRootId) {
+  if (existingThreadRootId) {
     return (
-      `You are @${agent.handle} in Jungle. You were addressed in a THREAD in #${triggerChannelName}.\n\n` +
-      `Thread so far:\n${await db.getThreadContext(threadRootId)}\n\n` +
-      `Reply by calling send_message with to:"#${triggerChannelName}" — your reply is automatically ` +
-      `placed in this thread. Set alsoToChannel:true if it should also appear in the main channel. ` +
-      `You may also DM someone with to:"@handle".`
+      `You are @${agent.handle} in Jungle. You were addressed in a thread in #${triggerChannelName}.\n\n` +
+      `Thread so far:\n${await db.getThreadContext(existingThreadRootId)}\n\n` +
+      `Reply by calling send_message with to:"#${triggerChannelName}" — your reply stays in this ` +
+      `thread automatically, which is where your progress updates and results should go. Post ` +
+      `frequent short updates as you work (e.g. "On it", your plan, what you're starting on). If a ` +
+      `message is meant for the whole channel instead, set alsoToChannel:true (posts to both) or ` +
+      `pass threadRootId:null (posts to the channel only). You may also DM someone with to:"@handle".`
+    );
+  }
+  if (topLevelChannelMessageId) {
+    return (
+      `You are @${agent.handle} in Jungle. You were addressed in #${triggerChannelName} by message ` +
+      `id ${topLevelChannelMessageId}.\n\n` +
+      `Recent conversation:\n${await db.getRecentContext(triggerChannelId, 20)}\n\n` +
+      `Reply by calling send_message with to:"#${triggerChannelName}". You decide where it lands: ` +
+      `to reply in a THREAD under the message that addressed you (preferred — keeps the channel ` +
+      `tidy, and where your progress updates should go), pass threadRootId:"${topLevelChannelMessageId}". ` +
+      `To post a plain message to the whole channel instead, just omit threadRootId. Either way, ` +
+      `send frequent short updates as you work (e.g. "On it — looking into this", "Here's my ` +
+      `plan …", "Starting on the refactor …") rather than going silent until you're done. You may ` +
+      `also DM someone with to:"@handle", or post in another channel you belong to.`
     );
   }
   return (
     `You are @${agent.handle} in Jungle. You were addressed in #${triggerChannelName}.\n\n` +
     `Recent conversation:\n${await db.getRecentContext(triggerChannelId, 20)}\n\n` +
-    `Respond by calling send_message — to reply in this channel use to:"#${triggerChannelName}". ` +
+    `Respond by calling send_message — to reply here use to:"#${triggerChannelName}". Send a short ` +
+    `update as soon as you pick up non-trivial work, then brief progress notes as you go. ` +
     `You may also DM someone with to:"@handle", or post in another channel you belong to.`
   );
 }
@@ -91,12 +114,20 @@ export async function triggerMentionedAgents(
       if (threadAgents.length === 1) candidateIds = threadAgents;
     }
 
+    // A top-level channel message the agent can choose to reply under as a thread root. We surface
+    // this id to the agent (buildAgentTurnInput) and let it decide: pass it as threadRootId to
+    // thread, or omit for a plain channel post. Null for DMs and for replies already in a thread
+    // (those default back into the existing thread via rootId below).
+    const topLevelChannelMessageId = rootId || channel.kind === "dm" ? null : message.id;
+
     const agents = await db.agentsByIds(candidateIds);
     for (const agent of agents) {
       // Summon the @mentioned agent into the channel so its reply (to:"#channel") succeeds
       // — otherwise mentioning an agent that isn't a member triggers it but it can't respond.
       await db.addChannelMember(channelId, agent.id);
-      void runAgentReply(channelId, channel.name, agent, budget - 1, message.attachments, rootId);
+      void runAgentReply(
+        channelId, channel.name, agent, budget - 1, message.attachments, rootId, topLevelChannelMessageId,
+      );
     }
   } catch (e) {
     console.error("triggerMentionedAgents:", e);
@@ -109,20 +140,32 @@ async function runAgentReply(
   agent: db.AgentRow,
   replyBudget: number,
   attachments: db.AttachmentMeta[] = [],
-  threadRootId: string | null = null,
+  existingThreadRootId: string | null = null,
+  topLevelChannelMessageId: string | null = null,
 ): Promise<void> {
   // The agent's working/idle status is tracked from the runner's real turn lifecycle and
   // broadcast as agent_status_changed (see runners.ts) — no per-dispatch flash.
   try {
-    const input = await buildAgentTurnInput(agent, triggerChannelId, triggerChannelName, threadRootId);
+    const input = await buildAgentTurnInput(
+      agent,
+      triggerChannelId,
+      triggerChannelName,
+      existingThreadRootId,
+      topLevelChannelMessageId,
+    );
     // Repo-specific working instructions live in the runner's systemPromptAppend (runners.ts).
 
     // Delivery is durable + asynchronous. Remember the reply budget + the channel this dispatch
-    // came from (so a send_message with no explicit destination, and the confirm card, land in
-    // the right place) + the thread it was triggered in (so the agent's reply defaults back into
-    // that thread), enqueue the composed input, and push it to the runner if one is connected.
-    // If not, it waits in the inbox until the runner's next `hello`.
-    sdkContext.set(agent.id, { budget: replyBudget, channelId: triggerChannelId, threadRootId });
+    // came from (so a send_message with no explicit destination, and the confirm card, land in the
+    // right place) + the EXISTING thread it was triggered in, if any (so that when the agent omits
+    // threadRootId its reply defaults back into that thread; for a top-level trigger there's no
+    // default thread — the agent chooses by passing the message id). Enqueue the composed input and
+    // push it to the runner if one is connected. If not, it waits in the inbox until the next `hello`.
+    sdkContext.set(agent.id, {
+      budget: replyBudget,
+      channelId: triggerChannelId,
+      threadRootId: existingThreadRootId,
+    });
     await db.enqueueInboxItem(agent.id, input, attachments);
     await runners.drain(agent.id);
     // Wake-on-message: if the agent's machine is stopped/absent (idle-stop, or never started), a

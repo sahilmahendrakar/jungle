@@ -135,9 +135,15 @@ export function ResizeHandle({
         "focus-visible:outline-none",
       )}
     >
-      {/* Visible hairline centered in the hit strip: subtle by default, brand-colored on
-          hover / focus / drag. */}
-      <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border transition-colors group-hover:bg-primary/60 group-focus-visible:bg-primary/70" />
+      {/* Visible hairline flush against the resized panel's edge (not centered in the hit
+          strip), so it reads as that panel's border rather than floating a few px off it:
+          left edge of the strip for the left sidebar, right edge for the right panel. */}
+      <div
+        className={cn(
+          "absolute inset-y-0 w-px bg-border transition-colors group-hover:bg-primary/60 group-focus-visible:bg-primary/70",
+          edge === "left" ? "left-0" : "right-0",
+        )}
+      />
     </div>
   );
 }

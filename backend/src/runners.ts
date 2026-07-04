@@ -210,12 +210,30 @@ export function systemPromptAppend(agent: db.AgentRow): string {
     `(mcp__jungle__send_message): to reply in a channel use to:"#channel-name", to DM someone ` +
     `use to:"@handle". Plain assistant text is NEVER shown to anyone. ` +
     `Each queued message tells you which channel it came from — reply there unless asked otherwise.\n\n` +
-    `— Be responsive —\n` +
-    `People are waiting on you in real time, like a Slack channel. Send a short send_message ` +
-    `as soon as you start non-trivial work (e.g. "On it — looking into this now.") so people know ` +
-    `you've picked it up, instead of going silent until you're fully done. For anything that takes ` +
-    `a while, send brief progress updates along the way rather than one long silence ending in a ` +
-    `final report.\n\n` +
+    `— Be responsive: narrate your work —\n` +
+    `People are waiting on you in real time, like a Slack channel. Send a short send_message as ` +
+    `soon as you pick up non-trivial work (e.g. "On it — looking into this now.") so people know ` +
+    `you've got it, instead of going silent until you're fully done. Then keep them posted as you ` +
+    `go — another quick send_message at each meaningful step (e.g. "Here's my plan …", "Starting ` +
+    `on the refactor …", "Tests pass, opening the PR …"). Err toward more frequent, brief updates ` +
+    `rather than one long silence ending in a final report — these updates go in the thread, so ` +
+    `they're cheap and don't clutter the channel. Every one of these updates must be a send_message ` +
+    `call: narration in your own reasoning/plain text is never shown to anyone.\n\n` +
+    `— Mentioning and DMing other agents —\n` +
+    `@mentioning or DMing another agent wakes them up, just like a person being paged. Only do ` +
+    `it when you specifically want that agent to wake up and take some action — never as an ` +
+    `incidental reference or FYI. Stay focused on what you were specifically assigned: if you see ` +
+    `a message addressed to a different agent, don't assume it's your job too — only act on it if ` +
+    `the user specifically mentioned or asked you.\n\n` +
+    `— Threads vs channel —\n` +
+    `You choose where each reply lands, and for most cases you should choose a thread rather than ` +
+    `the main channel timeline — it keeps the channel tidy. When you're addressed in a thread, ` +
+    `omitting threadRootId keeps your reply in that thread. When you're addressed by a top-level ` +
+    `channel message, that message's id is given to you in the turn input; pass it as threadRootId ` +
+    `to reply in a thread under it (do this for progress updates and most replies). Posting a plain ` +
+    `message to the whole channel is always available and fully your call: omit threadRootId to ` +
+    `post at the top level, or set alsoToChannel:true to post to both a thread and the channel. ` +
+    `Reserve channel-level posts for things everyone should see, not routine progress.\n\n` +
     `— Files & images —\n` +
     `Files people attach to messages are saved into your workspace under ` +
     `/workspace/attachments/ (each queued message lists the exact paths). To send files or ` +
@@ -417,6 +435,29 @@ export function compact(agentId: string): boolean {
   return true;
 }
 
+// agentId -> a compact request made while the machine was asleep/waking, to be delivered the
+// moment its runner says `hello` (see the "hello" case below).
+const pendingCompact = new Set<string>();
+
+// Compact-button entry point: sends immediately if a runner is connected; otherwise wakes the
+// agent's machine (same wake-on-message path as a triggering chat message) and remembers the
+// request so it's delivered on the runner's next `hello` instead of failing with "offline".
+export async function compactOrWake(
+  agent: db.Participant,
+): Promise<"sent" | "waking" | "wake_failed"> {
+  if (compact(agent.id)) return "sent";
+  pendingCompact.add(agent.id);
+  try {
+    await provisionerFor(agent).start(agent.id);
+    noteProvisionerStart(agent.id);
+    return "waking";
+  } catch (e) {
+    pendingCompact.delete(agent.id);
+    console.error(`compactOrWake: wake failed for ${agent.id}:`, e);
+    return "wake_failed";
+  }
+}
+
 // Runner liveness/state for the UI (Activity header, profile status dot).
 export function runnerState(
   agentId: string,
@@ -544,8 +585,10 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         clearMachine(agentId); // a live hello always wins over stale starting/stopped state
         emitStatus(agentId);
         send(conn, await buildConfigure(agent));
-        // Runner is idle after configure — push any queued work.
+        // Runner is idle after configure — push any queued work, plus a compact requested
+        // while this agent was asleep/waking (see compactOrWake).
         await drain(agentId);
+        if (pendingCompact.delete(agentId)) send(conn, { type: "compact" });
         break;
       }
       case "state": {

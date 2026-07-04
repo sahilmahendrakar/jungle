@@ -7,7 +7,7 @@ import {
   type ReactNode,
 } from "react";
 import { auth, onIdTokenChanged, signInWithGoogle, signOutUser, type User } from "./firebase";
-import { getMe, setAuthToken, type Me } from "./api";
+import { getMe, setAuthToken, setTokenGetter, type Me } from "./api";
 
 interface AuthCtx {
   user: User | null;
@@ -38,7 +38,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  // Fires on sign-in, sign-out, and hourly token refresh — keeps the API bearer token current.
+  // Let authed HTTP requests mint a fresh token per call (getIdToken refreshes an expired one),
+  // instead of relying on the possibly-stale snapshot pushed below. Mirrors the WS handshake.
+  useEffect(() => {
+    const a = auth;
+    if (!a) return;
+    setTokenGetter(() => (a.currentUser ? a.currentUser.getIdToken() : Promise.resolve(null)));
+    return () => setTokenGetter(null);
+  }, []);
+
+  // Fires on sign-in, sign-out, and hourly token refresh — keeps the cached bearer snapshot current.
   useEffect(() => {
     if (!auth) {
       setReady(true);
