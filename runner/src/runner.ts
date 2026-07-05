@@ -29,6 +29,7 @@ import {
   type SendMessageResult,
   type ReadHistoryResult,
 } from "./send-message-tool.js";
+import { createGmailMcpServer } from "./gmail-tool.js";
 import { applyGitCredentials, cloneRepoIfNeeded, getGhToken } from "./git.js";
 import { loadState, saveState } from "./state.js";
 import {
@@ -64,6 +65,17 @@ const SAFE_TOOLS = new Set([
   "ToolSearch", "Read", "Glob", "Grep", "WebSearch", "WebFetch",
   "TodoWrite", "Task", "NotebookRead", "BashOutput", "TaskOutput",
   "ListMcpResources", "ReadMcpResource", "mcp__jungle__read_history",
+  // Gmail read/search: never mutate the mailbox, so no confirmation.
+  "mcp__gmail__gmail_search", "mcp__gmail__gmail_read_message",
+]);
+
+// Gmail write tools: gated through the human confirmation card when the integration's
+// requireSendApproval is on, auto-allowed when the user turned that off (see preToolUseHook).
+const GMAIL_READ_TOOLS = ["mcp__gmail__gmail_search", "mcp__gmail__gmail_read_message"];
+const GMAIL_WRITE_TOOLS = new Set([
+  "mcp__gmail__gmail_send",
+  "mcp__gmail__gmail_create_draft",
+  "mcp__gmail__gmail_modify_labels",
 ]);
 
 // Fallback context reading derived from a `result` SDK message when the
@@ -129,6 +141,12 @@ export class Runner {
   private effort: EffortLevel | undefined = undefined;
   private systemPromptAppend = "";
   private configured = false;
+
+  // Gmail integration state (from `configure`; token refreshed by `gmail_credentials`). null =
+  // no Gmail attached. Read fresh by the gmail MCP server on each tool call, so a mid-turn refresh
+  // is picked up without rebuilding the server.
+  private gmailToken: string | null = null;
+  private gmailSettings: { email: string; requireSendApproval: boolean } | null = null;
 
   // Session persistence.
   private sessionId: string | null = null;
@@ -267,6 +285,10 @@ export class Runner {
       case "git_credentials":
         void applyGitCredentials(frame.token, frame.login);
         break;
+      case "gmail_credentials":
+        // A running turn's gmail server reads this via getToken on its next call — no rebuild.
+        this.gmailToken = frame.accessToken;
+        break;
       default:
         log.warn("unknown frame from backend", { type: (frame as any).type });
     }
@@ -284,6 +306,16 @@ export class Runner {
       // reconnects the clone is a fast already-present check.
       await applyGitCredentials(frame.git.token, frame.git.login);
       if (frame.git.repoUrl) await cloneRepoIfNeeded(frame.git.repoUrl);
+    }
+    // Gmail needs no filesystem setup — just hold the token/settings; the gmail MCP server is
+    // built per turn (and only when a token is present). Absent frame.gmail clears it (integration
+    // removed / backing account disconnected).
+    if (frame.gmail) {
+      this.gmailToken = frame.gmail.accessToken;
+      this.gmailSettings = { email: frame.gmail.email, requireSendApproval: frame.gmail.requireSendApproval };
+    } else {
+      this.gmailToken = null;
+      this.gmailSettings = null;
     }
     this.configured = true;
     void saveState({ sessionId: this.sessionId, model: this.model });
@@ -403,6 +435,17 @@ export class Runner {
     // binding the current turn just established, leaving send_message with no transport — the CLI
     // then surfaces "Stream closed" to the model. A per-turn server has no cross-turn aliasing.
     const mcpServer = this.buildJungleServer();
+    // Attach the gmail server only when a Gmail integration is connected. Read/search tools are
+    // auto-allowed; write tools are auto-allowed only when the user turned approval off — otherwise
+    // they're left off allowedTools so they route through the confirmation card (preToolUseHook).
+    const gmailServer = this.gmailToken ? this.buildGmailServer() : null;
+    const allowedTools = ["mcp__jungle__send_message", "mcp__jungle__read_history"];
+    if (gmailServer) {
+      allowedTools.push(...GMAIL_READ_TOOLS);
+      if (this.gmailSettings && !this.gmailSettings.requireSendApproval) {
+        allowedTools.push(...GMAIL_WRITE_TOOLS);
+      }
+    }
     const q = query({
       prompt: this.makeInputGenerator(firstBatch, turnId, compacting),
       options: {
@@ -416,8 +459,8 @@ export class Runner {
           preset: "claude_code",
           append: this.systemPromptAppend || undefined,
         },
-        mcpServers: { jungle: mcpServer },
-        allowedTools: ["mcp__jungle__send_message", "mcp__jungle__read_history"],
+        mcpServers: gmailServer ? { jungle: mcpServer, gmail: gmailServer } : { jungle: mcpServer },
+        allowedTools,
         // A PreToolUse hook returning permissionDecision "ask" is required to
         // route tool calls to canUseTool: in the non-interactive SDK, `default`
         // mode otherwise auto-approves built-in tools and the callback never
@@ -524,6 +567,13 @@ export class Runner {
     );
   }
 
+  // The in-process "gmail" SDK-MCP server (gmail_search/read/send/draft/modify), reading the
+  // current OAuth access token fresh on each call so a mid-turn `gmail_credentials` refresh applies
+  // without a rebuild. Built per turn (and per reconnect) alongside the jungle server.
+  private buildGmailServer() {
+    return createGmailMcpServer(() => this.gmailToken);
+  }
+
   // Rebuild the CLI's connection to our in-process "jungle" SDK-MCP server after a mid-turn
   // session re-init (see the reconnect comment in runTurn). reconnectMcpServer() rejects for
   // in-process (sdk) servers, so we cycle setMcpServers instead: removing 'jungle' tears down the
@@ -533,9 +583,13 @@ export class Runner {
   // failure here must never break the turn.
   private async reconnectJungleMcp(q: Query): Promise<void> {
     try {
+      const servers: Record<string, ReturnType<typeof this.buildJungleServer>> = {
+        jungle: this.buildJungleServer(),
+      };
+      if (this.gmailToken) servers.gmail = this.buildGmailServer();
       await q.setMcpServers({});
-      await q.setMcpServers({ jungle: this.buildJungleServer() });
-      log.info("rebuilt jungle MCP connection after mid-turn session re-init");
+      await q.setMcpServers(servers);
+      log.info("rebuilt MCP connections after mid-turn session re-init");
     } catch (err) {
       log.warn("failed to rebuild jungle MCP connection", { err: String(err) });
     }
@@ -733,6 +787,12 @@ export class Runner {
   }> {
     // Always let the auto-allowed send_message tool through untouched.
     if (input.tool_name === "mcp__jungle__send_message") return { continue: true };
+    // Gmail write tools honor the integration's explicit send-approval toggle, independent of the
+    // agent's permission mode: gated (ask) when requireSendApproval is on, auto-allowed when off.
+    if (GMAIL_WRITE_TOOLS.has(input.tool_name ?? "")) {
+      if (!this.gmailSettings?.requireSendApproval) return { continue: true };
+      return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "ask" } };
+    }
     // In default mode, ask a human only for tools that can change something. Read-only and
     // SDK-internal tools (ToolSearch loads MCP schemas, TodoWrite is bookkeeping, …) run
     // freely — a confirmation card for "ToolSearch" is meaningless noise to users.

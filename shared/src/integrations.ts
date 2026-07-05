@@ -28,6 +28,15 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     configFields: [{ key: "repo", label: "Repository", placeholder: "owner/name" }],
   },
   {
+    key: "gmail",
+    name: "Gmail",
+    description: "Read, search & send email from your connected Gmail. Sending can require your approval.",
+    // Connection-based, not a typed field: the mailbox comes from the attaching user's connected
+    // Google account (see Settings → Connections), so there are no free-text config fields. The
+    // frontend renders this card specially (connection status + a send-approval toggle).
+    configFields: [],
+  },
+  {
     key: "linear",
     name: "Linear",
     description: "Read & update issues in a chosen Linear team via Linear's MCP server.",
@@ -63,4 +72,15 @@ export interface AgentIntegration {
   agent_id: string;
   integration_key: string;
   config: Record<string, unknown>;
+}
+
+// The `config` stored on an agent's `gmail` integration row. Holds NO secrets — the OAuth
+// tokens live in the per-user google_identities table; this only records which connected
+// account backs the agent ("creator mailbox") and how to gate writes. `backingParticipantId`
+// is the human who attached it; `email` is that account's address (display); the backend mints
+// access tokens from that participant's google_identities row at runtime (see backend/src/google.ts).
+export interface GmailIntegrationConfig {
+  backingParticipantId: string;
+  email: string;
+  requireSendApproval: boolean;
 }

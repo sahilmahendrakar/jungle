@@ -238,3 +238,18 @@ create table if not exists agent_integrations (
   created_at      timestamptz not null default now(),
   primary key (agent_id, integration_key)
 );
+
+-- A participant's connected Google account (Gmail OAuth, offline access). One per participant,
+-- mirroring github_identities. An agent's `gmail` integration references the connecting user by
+-- id and mints access tokens from this row at runtime (see migrations/011_google_identities.sql
+-- and backend/src/google.ts). MVP: plaintext on the box; encrypt at rest before real multi-tenant.
+create table if not exists google_identities (
+  participant_id    uuid primary key references participants(id) on delete cascade,
+  email             text not null,
+  access_token      text not null,
+  refresh_token     text,
+  access_expires_at timestamptz,
+  scopes            text,
+  created_at        timestamptz not null default now(),
+  updated_at        timestamptz not null default now()
+);

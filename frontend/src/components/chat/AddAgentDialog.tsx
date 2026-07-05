@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Bot } from "lucide-react";
-import { createParticipant } from "../../api";
+import { createParticipant, getGoogleStatus, type GoogleStatus } from "../../api";
 import { MODEL_OPTIONS, SDK_MODE_OPTIONS } from "../../lib/chat";
 import { SelectMenu } from "./panels";
 import { IntegrationsEditor, type IntegrationDraft } from "./IntegrationsEditor";
@@ -35,6 +35,19 @@ export function AddAgentDialog({
   const [agModel, setAgModel] = useState(MODEL_OPTIONS[0].id);
   const [agMode, setAgMode] = useState(SDK_MODE_OPTIONS[0].id); // new agents are sdk runtime
   const [addingAgent, setAddingAgent] = useState(false);
+  const [google, setGoogle] = useState<GoogleStatus | null>(null);
+
+  // The creator's Google connection gates the Gmail integration (attached to their account).
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    getGoogleStatus()
+      .then((s) => !cancelled && setGoogle(s))
+      .catch(() => !cancelled && setGoogle(null));
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
 
   async function submitAddAgent() {
     if (!agHandle.trim() || !agName.trim()) {
@@ -47,7 +60,11 @@ export function AddAgentDialog({
         kind: "agent",
         handle: agHandle.trim(),
         displayName: agName.trim(),
-        integrations: integrations.filter((i) => Object.values(i.config).some((v) => v.trim())),
+        // Keep gmail only when the creator has a Google account connected (it binds to it);
+        // keep other integrations only when they have some config filled in.
+        integrations: integrations.filter((i) =>
+          i.key === "gmail" ? !!google?.connected : Object.values(i.config).some((v) => v.trim()),
+        ),
         model: agModel,
         mode: agMode,
       });
@@ -98,7 +115,11 @@ export function AddAgentDialog({
               placeholder="e.g. Deploy Bot"
             />
           </div>
-          <IntegrationsEditor value={integrations} onChange={setIntegrations} />
+          <IntegrationsEditor
+            value={integrations}
+            onChange={setIntegrations}
+            google={google ?? undefined}
+          />
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <Label>Model</Label>

@@ -132,6 +132,11 @@ export interface ConfigureFrame {
   effort?: string; // reasoning effort (low|medium|high|xhigh); omitted = SDK/CLI default
   systemPromptAppend?: string;
   git?: { token: string; login: string; repoUrl?: string };
+  // The agent's attached Gmail integration, if any: a fresh OAuth access token for the
+  // backing ("creator") mailbox, that account's address, and whether writes need a human.
+  // Read/search Gmail tools run freely; send/modify go through the confirmation card when
+  // requireSendApproval is set (see runner.ts). Refreshed mid-session via GmailCredentialsFrame.
+  gmail?: { accessToken: string; email: string; requireSendApproval: boolean };
 }
 
 // A file attached to the message that produced an inbox item. `url` is an origin-relative
@@ -200,6 +205,14 @@ export interface GitCredentialsFrame {
   login: string;
 }
 
+// Mid-session refresh of the Gmail OAuth access token (Google access tokens last ~1h). Pushed
+// before each drain like GitCredentialsFrame, so a long-lived runner never begins a turn with an
+// expired token. No-op for agents without a Gmail integration attached.
+export interface GmailCredentialsFrame {
+  type: "gmail_credentials";
+  accessToken: string;
+}
+
 export type BackendToRunner =
   | ConfigureFrame
   | EnqueueFrame
@@ -211,4 +224,5 @@ export type BackendToRunner =
   | SendMessageResultFrame
   | ReadHistoryResultFrame
   | ConfirmResultFrame
-  | GitCredentialsFrame;
+  | GitCredentialsFrame
+  | GmailCredentialsFrame;

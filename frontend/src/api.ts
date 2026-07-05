@@ -543,6 +543,37 @@ export function getGithubStatus(): Promise<GithubStatus> {
   });
 }
 
+// --- Google (Gmail) connection: per-user OAuth, mirrors the GitHub connect flow above. Backs
+// the Gmail agent integration; surfaced in Settings → Connections. ---
+
+export function googleConnectUrl(): Promise<{ url: string }> {
+  return request(`/api/google/connect-url`, {
+    method: "POST",
+    auth: true,
+    errorMessage: "failed to start Google connect",
+  });
+}
+
+export function disconnectGoogle(): Promise<{ ok: boolean }> {
+  return request(`/api/google/connection`, {
+    method: "DELETE",
+    auth: true,
+    errorMessage: "failed to disconnect Google",
+  });
+}
+
+export interface GoogleStatus {
+  connected: boolean;
+  email?: string;
+}
+
+export function getGoogleStatus(): Promise<GoogleStatus> {
+  return request<GoogleStatus>(`/api/google/status`, {
+    auth: true,
+    errorMessage: "failed to load Google status",
+  });
+}
+
 export interface Repo {
   full_name: string;
   private: boolean;
