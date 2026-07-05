@@ -7,7 +7,6 @@ import {
   ChevronDown,
   FileText,
   FoldVertical,
-  GitBranch,
   Plus,
   ShieldQuestion,
   Sparkles,
@@ -15,8 +14,17 @@ import {
   X,
   UserRound,
 } from "lucide-react";
-import { updateAgent, deleteAgent, compactAgent, attachmentUrl } from "../../api";
+import {
+  updateAgent,
+  deleteAgent,
+  compactAgent,
+  attachmentUrl,
+  listAgentIntegrations,
+  setAgentIntegration,
+  removeAgentIntegration,
+} from "../../api";
 import type { Attachment, Participant, AgentStatus } from "../../api";
+import { IntegrationsEditor, type IntegrationDraft } from "./IntegrationsEditor";
 import {
   fmtBytes,
   EFFORT_OPTIONS,
@@ -156,6 +164,22 @@ export function ParticipantProfilePanel({
   const [err, setErr] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [integrations, setIntegrations] = useState<IntegrationDraft[]>([]);
+  const [origIntegrations, setOrigIntegrations] = useState<IntegrationDraft[]>([]);
+
+  useEffect(() => {
+    if (!isAgent) return;
+    let cancelled = false;
+    listAgentIntegrations(person.id).then((rows) => {
+      if (cancelled) return;
+      const draft = rows.map((r) => ({ key: r.integration_key, config: r.config as Record<string, string> }));
+      setIntegrations(draft);
+      setOrigIntegrations(draft);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isAgent, person.id]);
 
   async function del() {
     if (deleting) return;
@@ -171,11 +195,18 @@ export function ParticipantProfilePanel({
     }
   }
 
+  const integrationsKey = (list: IntegrationDraft[]) =>
+    [...list]
+      .sort((a, b) => a.key.localeCompare(b.key))
+      .map((v) => `${v.key}:${JSON.stringify(v.config)}`)
+      .join("|");
+
   const dirty =
     name.trim() !== person.display_name ||
     mode !== (person.mode ?? "default") ||
     model !== (person.model ?? MODEL_OPTIONS[0].id) ||
-    effort !== (person.effort ?? EFFORT_OPTIONS[1].id);
+    effort !== (person.effort ?? EFFORT_OPTIONS[1].id) ||
+    integrationsKey(integrations) !== integrationsKey(origIntegrations);
 
   async function save() {
     if (!dirty || saving || !name.trim()) return;
@@ -189,6 +220,17 @@ export function ParticipantProfilePanel({
         effort,
       };
       const updated = await updateAgent(person.id, patch);
+      const nextKeys = new Set(integrations.map((v) => v.key));
+      for (const orig of origIntegrations) {
+        if (!nextKeys.has(orig.key)) await removeAgentIntegration(person.id, orig.key);
+      }
+      for (const entry of integrations) {
+        const prev = origIntegrations.find((v) => v.key === entry.key);
+        if (!prev || JSON.stringify(prev.config) !== JSON.stringify(entry.config)) {
+          await setAgentIntegration(person.id, entry.key, entry.config);
+        }
+      }
+      setOrigIntegrations(integrations);
       onSaved(updated);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
@@ -300,20 +342,7 @@ export function ParticipantProfilePanel({
                 Lower effort spends fewer tokens. Applies at the agent's next turn.
               </p>
             </div>
-            {person.repo && (
-              <div className="min-w-0 space-y-0.5 rounded-lg border bg-muted/30 p-3">
-                <div className="text-xs font-medium text-muted-foreground">Repository</div>
-                <a
-                  href={`https://github.com/${person.repo}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="flex items-center gap-1 truncate text-sm text-primary hover:underline"
-                >
-                  <GitBranch className="size-3.5 shrink-0" />
-                  <span className="truncate">{person.repo}</span>
-                </a>
-              </div>
-            )}
+            <IntegrationsEditor value={integrations} onChange={setIntegrations} />
             <ContextUsageCard person={person} />
             <Button
               variant="outline"

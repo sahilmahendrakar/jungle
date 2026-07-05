@@ -221,7 +221,9 @@ function send(conn: RunnerConn, frame: BackendToRunner): void {
 // Compose the systemPromptAppend for an sdk agent: persona, behavior, and environment. Per-turn
 // routing/context (which channel, recent messages) is NOT here — that's built fresh per dispatch
 // in orchestrator.ts's buildAgentTurnInput and rides in each enqueue item instead.
-export function systemPromptAppend(agent: db.AgentRow): string {
+// `githubRepo` is the agent's attached GitHub integration's repo, if any (db.getAgentGithubRepo) —
+// an agent with no integrations attached is a blank chat agent and gets no repo instructions.
+export function systemPromptAppend(agent: db.AgentRow, githubRepo: string | null): string {
   let s =
     `You are @${agent.handle} (${agent.display_name || agent.handle}) in Jungle, a Slack-style ` +
     `workspace. You are a chat participant.\n` +
@@ -259,11 +261,11 @@ export function systemPromptAppend(agent: db.AgentRow): string {
     `images to people, pass workspace file paths in send_message's \`files\` parameter, e.g. ` +
     `files:["/workspace/repo/screenshot.png"] — images render inline in the chat, other file ` +
     `types become downloads. Max 10 files, 25MB each.`;
-  if (agent.repo) {
+  if (githubRepo) {
     const gitName = agent.display_name || agent.handle;
     const gitEmail = `${agent.handle}@agents.jungle.dev`;
     s +=
-      `\n\n— Working on ${agent.repo} —\n` +
+      `\n\n— Working on ${githubRepo} —\n` +
       `The repo is already cloned at /workspace/repo with git credentials configured ` +
       `(if it's ever missing, clone it yourself with gh). Make and COMMIT changes with git so ` +
       `commits are authored as you. Before committing, run once:\n` +
@@ -283,19 +285,20 @@ export function systemPromptAppend(agent: db.AgentRow): string {
 // Build the `configure` reply to a runner's `hello`: model, permission mode, persona, and
 // (for GitHub-capable agents) a fresh installation token so the runner can authenticate git.
 async function buildConfigure(agent: db.AgentRow): Promise<ConfigureFrame> {
+  const githubRepo = await db.getAgentGithubRepo(agent.id);
   const frame: ConfigureFrame = {
     type: "configure",
     model: agent.model ?? null,
     permissionMode: toPermissionMode(agent.mode),
     effort: agent.effort,
-    systemPromptAppend: systemPromptAppend(agent),
+    systemPromptAppend: systemPromptAppend(agent, githubRepo),
   };
-  if (agent.repo && gh.appAuthConfigured()) {
+  if (githubRepo && gh.appAuthConfigured()) {
     try {
-      const token = await gh.installationTokenForRepo(agent.repo);
+      const token = await gh.installationTokenForRepo(githubRepo);
       const login = agent.handle; // git identity/login the runner presents
       // repoUrl makes the runner clone into /workspace/repo before its first turn.
-      frame.git = { token, login, repoUrl: `https://github.com/${agent.repo}.git` };
+      frame.git = { token, login, repoUrl: `https://github.com/${githubRepo}.git` };
     } catch (e) {
       console.error(`runner[${agent.id}] configure: could not mint git token:`, e);
     }
@@ -311,11 +314,12 @@ async function buildConfigure(agent: db.AgentRow): Promise<ConfigureFrame> {
 // `configure` (its `git push`/`gh` share that token and 401 together). installationTokenForRepo
 // caches until ~5 min before expiry, so this is ~free until a refresh is actually needed. We
 // call it before each drain so every turn starts with a valid token — no timers, no background
-// state. No-op for agents without a repo or when App auth isn't configured.
+// state. No-op for agents without a GitHub integration attached or when App auth isn't configured.
 async function refreshGitCredentials(conn: RunnerConn, agent: db.AgentRow): Promise<void> {
-  if (!agent.repo || !gh.appAuthConfigured()) return;
+  const githubRepo = await db.getAgentGithubRepo(agent.id);
+  if (!githubRepo || !gh.appAuthConfigured()) return;
   try {
-    const token = await gh.installationTokenForRepo(agent.repo);
+    const token = await gh.installationTokenForRepo(githubRepo);
     send(conn, { type: "git_credentials", token, login: agent.handle });
   } catch (e) {
     console.error(`runner[${agent.id}] could not refresh git token:`, e);

@@ -45,7 +45,10 @@ export function SignIn() {
         kind,
         handle: handle.trim(),
         displayName: displayName.trim(),
-        repo: kind === "agent" && repo.trim() ? repo.trim() : undefined,
+        integrations:
+          kind === "agent" && repo.trim()
+            ? [{ key: "github", config: { repo: repo.trim() } }]
+            : undefined,
       });
       if (kind === "human") {
         signInAs(p.id); // creating a human signs you straight in

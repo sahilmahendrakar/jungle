@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { randomBytes } from "node:crypto";
-import { isAllowedEffort, isAllowedModel, isSdkMode } from "@jungle/shared";
+import { isAllowedEffort, isAllowedModel, isSdkMode, getIntegrationType } from "@jungle/shared";
 import * as db from "../../db";
 import * as auth from "../../auth";
 import * as runners from "../../runners";
@@ -17,20 +17,40 @@ const router = Router();
 // override lets a single test agent opt in early (see POST /api/agents).
 const RUNNER_PROVIDER_DEFAULT = process.env.RUNNER_PROVIDER === "fly" ? "fly" : "docker";
 
+// An agent is a blank chat agent by default: `integrations` (optional) attaches one or more
+// integrations at creation time, e.g. [{key: "github", config: {repo: "owner/name"}}]. Unknown
+// or comingSoon integration keys are rejected — only fully-wired-up types can actually be attached.
+function validateIntegrations(
+  input: unknown,
+): Array<{ key: string; config: Record<string, unknown> }> {
+  if (input === undefined) return [];
+  if (!Array.isArray(input)) throw new ApiError(400, "integrations must be an array");
+  return input.map((entry) => {
+    const key = String(entry?.key ?? "");
+    const type = getIntegrationType(key);
+    if (!type || type.comingSoon) throw new ApiError(400, `unsupported integration: ${key}`);
+    const config = entry?.config && typeof entry.config === "object" ? entry.config : {};
+    return { key, config };
+  });
+}
+
 // Create an agent = a participant of kind 'agent' running on the SDK runner: mint a per-agent
-// runner token and provision its container. If `repo` ("owner/name") is given, the runner clones
-// it and gets a fresh GitHub installation token in each `configure` (see runners.ts). Allowed
-// models / SDK permission modes live in @jungle/shared; keep the UI dropdown in sync.
+// runner token and provision its container. It starts as a blank chat agent; `integrations`
+// (optional) attaches integrations like GitHub (see validateIntegrations above and
+// backend/src/db/integrations.ts) — the runner then gets whatever that integration grants
+// (git credentials, MCP servers, ...) in each `configure` (see runners.ts). Allowed models / SDK
+// permission modes live in @jungle/shared; keep the UI dropdown in sync.
 router.post(
   "/api/agents",
   wrap(async (req, res) => {
     const me = await requireRequester(req);
-    const { handle, displayName, repo } = req.body ?? {};
+    const { handle, displayName } = req.body ?? {};
     if (!handle || !displayName) throw new ApiError(400, "handle, displayName required");
     const model = req.body?.model ? String(req.body.model) : null;
     if (model && !isAllowedModel(model)) throw new ApiError(400, `unsupported model: ${model}`);
     const mode = req.body?.mode ? String(req.body.mode) : "default";
     if (!isSdkMode(mode)) throw new ApiError(400, `unsupported mode: ${mode}`);
+    const integrations = validateIntegrations(req.body?.integrations);
     const runnerToken = randomBytes(32).toString("hex");
     const runnerProvider = req.body?.runnerProvider === "fly" ? "fly" : RUNNER_PROVIDER_DEFAULT;
     // The agent joins the creator's workspace, subject to the workspace's agent cap. The cap check
@@ -41,12 +61,15 @@ router.post(
       if (count >= cap) throw new ApiError(409, `this workspace has reached its agent limit (${cap})`);
       return db.createParticipant({
         kind: "agent", workspaceId: me.workspace_id, handle, displayName, runtime: "sdk", runnerToken,
-        repo: repo ?? null, model, mode, runnerProvider,
+        model, mode, runnerProvider,
       }, client);
     });
+    for (const { key, config } of integrations) {
+      await db.setAgentIntegration(participant.id, key, config);
+    }
     // Respond immediately — provisioning (esp. a Fly machine's first boot / image pull) can take
     // up to ~1min, and the row + status UI ("waking") already give the client what it needs.
-    res.status(201).json(publicParticipant(participant));
+    res.status(201).json({ ...publicParticipant(participant), integrations });
     // Provision + start in the background. Best-effort: if the provisioner isn't available the
     // agent row still exists and a runner can be started later; just log the failure.
     void (async () => {
@@ -95,6 +118,43 @@ router.patch(
     const pub = updated ? publicParticipant(updated) : updated;
     broadcastWorkspace(agent.workspace_id, { type: "participant_updated", participant: pub });
     res.json(pub);
+  }),
+);
+
+// This agent's attached integrations (github's repo, etc.) — the settings page's integrations list.
+router.get(
+  "/api/agents/:id/integrations",
+  wrap(async (req, res) => {
+    const { agent } = await requireAgent(req);
+    res.json(await db.listAgentIntegrations(agent.id));
+  }),
+);
+
+// Attach (or reconfigure) one integration on an agent. `config` must match that integration
+// type's configFields (e.g. github: {repo: "owner/name"}) — validated only for presence here;
+// the integration itself (e.g. installationTokenForRepo) surfaces a bad value at connect time.
+router.put(
+  "/api/agents/:id/integrations/:key",
+  wrap(async (req, res) => {
+    const { agent } = await requireAgent(req);
+    const key = String(req.params.key);
+    const type = getIntegrationType(key);
+    if (!type || type.comingSoon) throw new ApiError(400, `unsupported integration: ${key}`);
+    const config = req.body?.config && typeof req.body.config === "object" ? req.body.config : {};
+    for (const field of type.configFields) {
+      if (!config[field.key]) throw new ApiError(400, `${field.label} is required`);
+    }
+    const row = await db.setAgentIntegration(agent.id, key, config);
+    res.json(row);
+  }),
+);
+
+router.delete(
+  "/api/agents/:id/integrations/:key",
+  wrap(async (req, res) => {
+    const { agent } = await requireAgent(req);
+    await db.removeAgentIntegration(agent.id, String(req.params.key));
+    res.json({ ok: true });
   }),
 );
 
