@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import cronstrue from "cronstrue";
 import { ArrowLeft, CalendarClock, Loader2, Pause, Pencil, Play, Plus, Trash2 } from "lucide-react";
 import { useAuth } from "./auth";
 import { navigate } from "./route";
@@ -32,8 +33,17 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
-// Human-readable cadence for a schedule row. The raw cron is shown deliberately (no cronstrue
-// dependency); paired with the "Next run" relative time it reads unambiguously.
+// Human-readable cadence for a schedule row: one-shots as an absolute date, recurring crons via
+// cronstrue ("At 09:00 AM, Monday through Friday · America/Los_Angeles"), falling back to the raw
+// expression if cronstrue can't parse it.
+function humanizeCron(cron: string): string {
+  try {
+    return cronstrue.toString(cron, { verbose: false, throwExceptionOnParseError: true });
+  } catch {
+    return `cron "${cron}"`;
+  }
+}
+
 function describeCadence(s: Schedule): string {
   if (s.run_at) {
     return `Once · ${new Date(s.run_at).toLocaleString([], {
@@ -43,7 +53,7 @@ function describeCadence(s: Schedule): string {
       minute: "2-digit",
     })}`;
   }
-  return `cron "${s.cron}" · ${s.timezone}`;
+  return `${humanizeCron(s.cron ?? "")} · ${s.timezone}`;
 }
 
 const TIMEZONES: string[] = (() => {
@@ -476,31 +486,35 @@ function ScheduleFormDialog({
           </div>
 
           {mode === "recurring" ? (
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="sched-cron">Cron (5-field)</Label>
-                <Input
-                  id="sched-cron"
-                  value={cron}
-                  onChange={(e) => setCron(e.target.value)}
-                  placeholder="0 9 * * 1-5"
-                />
+            <div className="space-y-2">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor="sched-cron">Cron (5-field)</Label>
+                  <Input
+                    id="sched-cron"
+                    value={cron}
+                    onChange={(e) => setCron(e.target.value)}
+                    placeholder="0 9 * * 1-5"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="sched-tz">Timezone</Label>
+                  <select
+                    id="sched-tz"
+                    className="h-9 w-full rounded-md border bg-background px-2 text-sm"
+                    value={timezone}
+                    onChange={(e) => setTimezone(e.target.value)}
+                  >
+                    {TIMEZONES.map((tz) => (
+                      <option key={tz} value={tz}>
+                        {tz}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="sched-tz">Timezone</Label>
-                <select
-                  id="sched-tz"
-                  className="h-9 w-full rounded-md border bg-background px-2 text-sm"
-                  value={timezone}
-                  onChange={(e) => setTimezone(e.target.value)}
-                >
-                  {TIMEZONES.map((tz) => (
-                    <option key={tz} value={tz}>
-                      {tz}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              {/* Live plain-English preview of the cron expression. */}
+              <p className="text-xs text-muted-foreground">{humanizeCron(cron)}</p>
             </div>
           ) : (
             <div className="space-y-1.5">
