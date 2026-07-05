@@ -24,6 +24,48 @@ export interface ResolveConfigCtx {
   existing: Record<string, unknown> | null;
 }
 
+// --- OAuth connection lifecycle (connection-based integrations: linear, notion, granola, drive) ---
+
+export interface ConnectionStartCtx {
+  agentId: string;
+  // The human clicking "Connect" from the agent's profile (their workspace-scoped participant).
+  me: db.Participant;
+  // The absolute callback URL the provider must redirect back to (built by the route from the
+  // backend's public origin). Adapters echo it into the authorize request verbatim.
+  redirectUri: string;
+}
+
+export interface ConnectionStart {
+  // Where to send the browser to authorize.
+  authorizeUrl: string;
+  // Opaque per-attempt state the route stashes (keyed by the OAuth `state`) and hands back to
+  // complete(): PKCE verifier, discovered token endpoint, DCR client id, requested scopes, …
+  // Must be JSON-serializable.
+  pending: Record<string, unknown>;
+}
+
+export interface ConnectionResult {
+  externalAccount: string | null; // display label (email, workspace, provider name)
+  accessToken: string;
+  refreshToken: string | null;
+  accessExpiresAt: Date | null;
+  scopes: string | null;
+  extra?: Record<string, unknown>; // persisted on the connection row for later refreshes
+}
+
+// Connection-based integrations implement this. The generic routes in http/routes/integrations.ts
+// drive it: start() → redirect the browser; on callback, complete() → persist the grant into
+// integration_connections. Status and disconnect are generic (read/delete the row) and need no
+// per-adapter code.
+export interface IntegrationConnection {
+  start(ctx: ConnectionStartCtx): Promise<ConnectionStart>;
+  complete(
+    ctx: ConnectionStartCtx,
+    pending: Record<string, unknown>,
+    code: string,
+  ): Promise<ConnectionResult>;
+}
+
 export interface IntegrationAdapter {
   key: string;
 
@@ -52,4 +94,8 @@ export interface IntegrationAdapter {
     config: Record<string, unknown>,
     send: (frame: BackendToRunner) => void,
   ): Promise<void>;
+
+  // OAuth connect/callback lifecycle for connection-based integrations. Omitted for integrations
+  // configured with plain fields (github) or backed by a per-participant identity (gmail).
+  connection?: IntegrationConnection;
 }

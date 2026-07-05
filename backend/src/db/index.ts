@@ -13,6 +13,7 @@ export * from "./agents";
 export * from "./github";
 export * from "./google";
 export * from "./integrations";
+export * from "./connections";
 export * from "./schedules";
 
 // Wire/domain type aliases used across the backend via the db namespace (db.PersistedMessage, …).

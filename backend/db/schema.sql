@@ -254,6 +254,36 @@ create table if not exists google_identities (
   updated_at        timestamptz not null default now()
 );
 
+-- Per-AGENT OAuth connections for the connection-based integrations (Linear/Notion/Granola via
+-- their remote MCP servers, Google Drive). A human authorizes from the agent's profile; the grant
+-- belongs to the agent (unlike Gmail's per-participant google_identities). `extra` holds per-
+-- provider refresh material. mcp_oauth_clients stores the OAuth client registered (once, via DCR)
+-- with each remote MCP provider. See migrations/014_integration_connections.sql and
+-- backend/src/db/connections.ts. MVP: plaintext; encrypt at rest before real multi-tenant.
+create table if not exists integration_connections (
+  agent_id          uuid not null references participants(id) on delete cascade,
+  integration_key   text not null,
+  external_account  text,
+  access_token      text not null,
+  refresh_token     text,
+  access_expires_at timestamptz,
+  scopes            text,
+  extra             jsonb not null default '{}'::jsonb,
+  created_by        uuid references participants(id) on delete set null,
+  created_at        timestamptz not null default now(),
+  updated_at        timestamptz not null default now(),
+  primary key (agent_id, integration_key)
+);
+
+create table if not exists mcp_oauth_clients (
+  provider_key      text primary key,
+  issuer            text not null,
+  client_id         text not null,
+  client_secret     text,
+  metadata          jsonb not null default '{}'::jsonb,
+  registered_at     timestamptz not null default now()
+);
+
 -- Per-dispatch context (cascade budget, trigger channel/thread, firing schedule id) rides on
 -- each inbox item; the agent's active context = its most recently consumed item's context.
 -- Replaces orchestrator.ts's in-memory sdkContext map (raced across queued dispatches, lost on
