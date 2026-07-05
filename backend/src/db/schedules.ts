@@ -131,10 +131,12 @@ export async function setSchedulePaused(
   nextRunAt?: string | null,
 ): Promise<ScheduleRow | null> {
   const { rows } = await pool.query<ScheduleRow>(
+    // $2 is cast explicitly: it appears both as an assignment target and in `is null`, so pg
+    // can't otherwise infer its type ("could not determine data type of parameter $2").
     `update schedules set
-       paused_at = $2,
+       paused_at = $2::timestamptz,
        next_run_at = case when $3 then $4::timestamptz else next_run_at end,
-       failure_count = case when $2 is null then 0 else failure_count end,
+       failure_count = case when $2::timestamptz is null then 0 else failure_count end,
        updated_at = now()
      where id = $1
      returning *`,
