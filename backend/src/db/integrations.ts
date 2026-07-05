@@ -1,3 +1,4 @@
+import type { GmailIntegrationConfig } from "@jungle/shared";
 import { pool } from "./pool";
 
 // An integration attached to an agent (see migrations/010_agent_integrations.sql). `config`
@@ -58,4 +59,19 @@ export async function getAgentGithubRepo(agentId: string): Promise<string | null
   const row = await getAgentIntegration(agentId, "github");
   const repo = row?.config?.repo;
   return typeof repo === "string" && repo ? repo : null;
+}
+
+// The agent's attached Gmail integration config (if any): which connected account backs it and
+// whether writes need approval. Secrets are NOT here (see google_identities). Returns null when
+// no Gmail integration is attached or the row is malformed. Analogous to getAgentGithubRepo.
+export async function getAgentGmail(agentId: string): Promise<GmailIntegrationConfig | null> {
+  const row = await getAgentIntegration(agentId, "gmail");
+  if (!row) return null;
+  const c = row.config as Partial<GmailIntegrationConfig>;
+  if (typeof c.backingParticipantId !== "string" || typeof c.email !== "string") return null;
+  return {
+    backingParticipantId: c.backingParticipantId,
+    email: c.email,
+    requireSendApproval: c.requireSendApproval !== false, // default on
+  };
 }

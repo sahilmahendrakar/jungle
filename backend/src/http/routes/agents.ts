@@ -34,6 +34,30 @@ function validateIntegrations(
   });
 }
 
+// Resolve the config actually persisted for an integration the requester is attaching. Most
+// integrations store the client-supplied config as-is; `gmail` is connection-based — it stores no
+// secrets (OAuth tokens live in google_identities), only which connected account backs it and the
+// send-approval toggle. A fresh attach binds to the requester's connected Google account (the
+// "creator mailbox") — 400 if they haven't connected Google yet; a reconfigure (e.g. toggling
+// approval) keeps the original mailbox binding rather than silently rebinding to whoever edited it.
+async function resolveIntegrationConfig(
+  me: db.Participant,
+  agentId: string,
+  key: string,
+  rawConfig: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  if (key !== "gmail") return rawConfig;
+  const requireSendApproval =
+    rawConfig.requireSendApproval !== false && rawConfig.requireSendApproval !== "false"; // default on
+  const existing = await db.getAgentGmail(agentId);
+  if (existing) {
+    return { backingParticipantId: existing.backingParticipantId, email: existing.email, requireSendApproval };
+  }
+  const id = await db.getGoogleIdentity(me.id);
+  if (!id) throw new ApiError(400, "connect your Google account in Settings first");
+  return { backingParticipantId: me.id, email: id.email, requireSendApproval };
+}
+
 // Create an agent = a participant of kind 'agent' running on the SDK runner: mint a per-agent
 // runner token and provision its container. It starts as a blank chat agent; `integrations`
 // (optional) attaches integrations like GitHub (see validateIntegrations above and
@@ -65,7 +89,7 @@ router.post(
       }, client);
     });
     for (const { key, config } of integrations) {
-      await db.setAgentIntegration(participant.id, key, config);
+      await db.setAgentIntegration(participant.id, key, await resolveIntegrationConfig(me, participant.id, key, config));
     }
     // Respond immediately — provisioning (esp. a Fly machine's first boot / image pull) can take
     // up to ~1min, and the row + status UI ("waking") already give the client what it needs.
@@ -136,7 +160,7 @@ router.get(
 router.put(
   "/api/agents/:id/integrations/:key",
   wrap(async (req, res) => {
-    const { agent } = await requireAgent(req);
+    const { me, agent } = await requireAgent(req);
     const key = String(req.params.key);
     const type = getIntegrationType(key);
     if (!type || type.comingSoon) throw new ApiError(400, `unsupported integration: ${key}`);
@@ -144,7 +168,7 @@ router.put(
     for (const field of type.configFields) {
       if (!config[field.key]) throw new ApiError(400, `${field.label} is required`);
     }
-    const row = await db.setAgentIntegration(agent.id, key, config);
+    const row = await db.setAgentIntegration(agent.id, key, await resolveIntegrationConfig(me, agent.id, key, config));
     res.json(row);
   }),
 );

@@ -5,6 +5,10 @@ import {
   getGithubStatus,
   githubConnectUrl,
   type GithubStatus,
+  disconnectGoogle,
+  getGoogleStatus,
+  googleConnectUrl,
+  type GoogleStatus,
 } from "./api";
 import { navigate } from "./route";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -48,6 +52,7 @@ function SettingsContent() {
   const [error, setError] = useState("");
   const [ghStatus, setGhStatus] = useState<GithubStatus | null>(null);
   const [ghLoading, setGhLoading] = useState(true);
+  const [googleStatus, setGoogleStatus] = useState<GoogleStatus | null>(null);
 
   const connected = ghStatus?.connected ?? !!membership?.github.connected;
   const login = ghStatus?.login ?? membership?.github.login;
@@ -78,6 +83,42 @@ function SettingsContent() {
       window.location.href = url;
     } catch (e) {
       setError(String((e as Error).message ?? e));
+      setBusy(false);
+    }
+  }
+
+  // Google (Gmail) connection — same OAuth round-trip shape as GitHub.
+  useEffect(() => {
+    let cancelled = false;
+    getGoogleStatus()
+      .then((s) => !cancelled && setGoogleStatus(s))
+      .catch(() => !cancelled && setGoogleStatus(null));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function connectGoogle() {
+    setError("");
+    setBusy(true);
+    try {
+      const { url } = await googleConnectUrl();
+      window.location.href = url;
+    } catch (e) {
+      setError(String((e as Error).message ?? e));
+      setBusy(false);
+    }
+  }
+
+  async function unlinkGoogle() {
+    setError("");
+    setBusy(true);
+    try {
+      await disconnectGoogle();
+      setGoogleStatus({ connected: false });
+    } catch (e) {
+      setError(String((e as Error).message ?? e));
+    } finally {
       setBusy(false);
     }
   }
@@ -180,6 +221,60 @@ function SettingsContent() {
                 className="shrink-0 gap-1.5 bg-foreground text-background hover:bg-foreground/90"
               >
                 <GithubMark className="size-3.5" />
+                {busy ? "Redirecting…" : "Connect"}
+              </Button>
+            )}
+          </div>
+        </div>
+      </section>
+
+      {/* Google (Gmail) OAuth — backs the Gmail agent integration */}
+      <section className="mt-8 space-y-3">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Google
+        </h2>
+        <div className="rounded-xl border bg-card p-4">
+          <div className="flex items-center gap-3">
+            <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-red-500 text-white">
+              <Mail className="size-5" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-medium">Connect Gmail</div>
+              {googleStatus?.connected ? (
+                <div className="flex items-center gap-1 text-xs text-emerald-600">
+                  <Check className="size-3 shrink-0" />
+                  <span className="truncate">
+                    Connected{googleStatus.email ? ` as ${googleStatus.email}` : ""}
+                  </span>
+                </div>
+              ) : (
+                <div className="text-xs text-muted-foreground">
+                  Link a Google account so agents can read &amp; send email via the Gmail integration.
+                </div>
+              )}
+            </div>
+            {googleStatus?.connected ? (
+              <Button
+                data-testid="settings-disconnect-google"
+                onClick={unlinkGoogle}
+                disabled={busy}
+                size="icon"
+                variant="ghost"
+                title="Disconnect Google"
+                aria-label="Disconnect Google"
+                className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
+              >
+                <Unlink className="size-4" />
+              </Button>
+            ) : (
+              <Button
+                data-testid="settings-connect-google"
+                onClick={connectGoogle}
+                disabled={busy}
+                size="sm"
+                className="shrink-0 gap-1.5"
+              >
+                <Mail className="size-3.5" />
                 {busy ? "Redirecting…" : "Connect"}
               </Button>
             )}

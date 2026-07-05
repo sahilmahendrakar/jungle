@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { GitBranch, Plug, Plus, X } from "lucide-react";
+import { GitBranch, Mail, Plug, Plus, X } from "lucide-react";
 import { INTEGRATION_TYPES, type IntegrationType } from "../../api";
 import { RepoCombobox } from "../../RepoCombobox";
 import { Button } from "@/components/ui/button";
@@ -12,8 +12,17 @@ export interface IntegrationDraft {
   config: Record<string, string>;
 }
 
+// The connected Google account of the current user (fetched by the parent). Gmail attaches to
+// this account; when it's absent the gmail card tells the user to connect in Settings.
+export interface GoogleConn {
+  connected: boolean;
+  email?: string;
+}
+
 function integrationIcon(key: string) {
-  return key === "github" ? GitBranch : Plug;
+  if (key === "github") return GitBranch;
+  if (key === "gmail") return Mail;
+  return Plug;
 }
 
 // One attached integration's config fields — a name/handle + one input per configField.
@@ -22,11 +31,13 @@ function integrationIcon(key: string) {
 function IntegrationCard({
   type,
   config,
+  google,
   onChange,
   onRemove,
 }: {
   type: IntegrationType;
   config: Record<string, string>;
+  google?: GoogleConn;
   onChange: (config: Record<string, string>) => void;
   onRemove: () => void;
 }) {
@@ -66,6 +77,50 @@ function IntegrationCard({
           )}
         </div>
       ))}
+      {type.key === "gmail" && <GmailCardBody config={config} google={google} onChange={onChange} />}
+    </div>
+  );
+}
+
+// Gmail is connection-based (no text config): show the connected account + a send-approval toggle,
+// or a prompt to connect in Settings if the current user hasn't linked a Google account yet.
+function GmailCardBody({
+  config,
+  google,
+  onChange,
+}: {
+  config: Record<string, string>;
+  google?: GoogleConn;
+  onChange: (config: Record<string, string>) => void;
+}) {
+  // Approval defaults on; the value is a string in local drafts and may be a boolean when loaded
+  // from the server — treat anything but an explicit false/"false" as on.
+  const requireApproval = String(config.requireSendApproval ?? "true") !== "false";
+  if (!google?.connected) {
+    return (
+      <p className="text-xs text-amber-600">
+        Not connected. Connect a Google account in <span className="font-medium">Settings → Google</span>{" "}
+        to use this integration.
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      <p className="text-xs text-muted-foreground">
+        Using <span className="font-medium text-foreground">{google.email}</span>
+      </p>
+      <label className="flex items-center gap-2 text-xs text-foreground">
+        <input
+          type="checkbox"
+          className="size-3.5 accent-primary"
+          data-testid="gmail-require-approval"
+          checked={requireApproval}
+          onChange={(e) =>
+            onChange({ ...config, requireSendApproval: e.target.checked ? "true" : "false" })
+          }
+        />
+        Require my approval before sending or modifying email
+      </label>
     </div>
   );
 }
@@ -75,9 +130,12 @@ function IntegrationCard({
 export function IntegrationsEditor({
   value,
   onChange,
+  google,
 }: {
   value: IntegrationDraft[];
   onChange: (v: IntegrationDraft[]) => void;
+  // The current user's Google connection, so the gmail card can show status / the approval toggle.
+  google?: GoogleConn;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const attachedKeys = new Set(value.map((v) => v.key));
@@ -153,6 +211,7 @@ export function IntegrationsEditor({
                 key={entry.key}
                 type={type}
                 config={entry.config}
+                google={google}
                 onChange={(config) =>
                   onChange(value.map((v) => (v.key === entry.key ? { ...v, config } : v)))
                 }

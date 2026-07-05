@@ -9,6 +9,7 @@ import attachmentsRouter from "./http/routes/attachments";
 import channelsRouter from "./http/routes/channels";
 import threadsRouter from "./http/routes/threads";
 import githubRouter from "./http/routes/github";
+import googleRouter from "./http/routes/google";
 import schedulesRouter from "./http/routes/schedules";
 
 // Build the Express app: global middleware, the per-domain routers, and the terminal error
@@ -43,6 +44,7 @@ export function createApp(): express.Express {
   app.use(channelsRouter);
   app.use(threadsRouter);
   app.use(githubRouter);
+  app.use(googleRouter);
   app.use(schedulesRouter);
 
   app.use(errorHandler);

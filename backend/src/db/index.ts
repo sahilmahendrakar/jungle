@@ -11,6 +11,7 @@ export * from "./threads";
 export * from "./attachments";
 export * from "./agents";
 export * from "./github";
+export * from "./google";
 export * from "./integrations";
 export * from "./schedules";
 

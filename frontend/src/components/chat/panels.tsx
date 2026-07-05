@@ -22,8 +22,9 @@ import {
   listAgentIntegrations,
   setAgentIntegration,
   removeAgentIntegration,
+  getGoogleStatus,
 } from "../../api";
-import type { Attachment, Participant, AgentStatus } from "../../api";
+import type { Attachment, Participant, AgentStatus, GoogleStatus } from "../../api";
 import { IntegrationsEditor, type IntegrationDraft } from "./IntegrationsEditor";
 import {
   fmtBytes,
@@ -166,6 +167,7 @@ export function ParticipantProfilePanel({
   const [deleting, setDeleting] = useState(false);
   const [integrations, setIntegrations] = useState<IntegrationDraft[]>([]);
   const [origIntegrations, setOrigIntegrations] = useState<IntegrationDraft[]>([]);
+  const [google, setGoogle] = useState<GoogleStatus | null>(null);
 
   useEffect(() => {
     if (!isAgent) return;
@@ -176,6 +178,10 @@ export function ParticipantProfilePanel({
       setIntegrations(draft);
       setOrigIntegrations(draft);
     });
+    // The viewer's Google connection gates the Gmail integration card (attach/approval toggle).
+    getGoogleStatus()
+      .then((s) => !cancelled && setGoogle(s))
+      .catch(() => !cancelled && setGoogle(null));
     return () => {
       cancelled = true;
     };
@@ -342,7 +348,11 @@ export function ParticipantProfilePanel({
                 Lower effort spends fewer tokens. Applies at the agent's next turn.
               </p>
             </div>
-            <IntegrationsEditor value={integrations} onChange={setIntegrations} />
+            <IntegrationsEditor
+              value={integrations}
+              onChange={setIntegrations}
+              google={google ?? undefined}
+            />
             <ContextUsageCard person={person} />
             <Button
               variant="outline"

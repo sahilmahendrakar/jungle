@@ -8,10 +8,12 @@ import type {
   ConfigureFrame,
   AgentStatus,
   PermissionMode,
+  GmailIntegrationConfig,
 } from "@jungle/shared";
 import { isSdkMode } from "@jungle/shared";
 import * as db from "./db";
 import * as gh from "./github";
+import * as google from "./google";
 import { signedPath } from "./attachments";
 import { provisionerFor } from "./provisioner";
 
@@ -266,7 +268,12 @@ function send(conn: RunnerConn, frame: BackendToRunner): void {
 // in orchestrator.ts's buildAgentTurnInput and rides in each enqueue item instead.
 // `githubRepo` is the agent's attached GitHub integration's repo, if any (db.getAgentGithubRepo) —
 // an agent with no integrations attached is a blank chat agent and gets no repo instructions.
-export function systemPromptAppend(agent: db.AgentRow, githubRepo: string | null): string {
+// `gmail` is the agent's attached Gmail integration config, if any (db.getAgentGmail).
+export function systemPromptAppend(
+  agent: db.AgentRow,
+  githubRepo: string | null,
+  gmail: GmailIntegrationConfig | null,
+): string {
   let s =
     `You are @${agent.handle} (${agent.display_name || agent.handle}) in Jungle, a Slack-style ` +
     `workspace. You are a chat participant.\n` +
@@ -327,6 +334,20 @@ export function systemPromptAppend(agent: db.AgentRow, githubRepo: string | null
       `  git config user.email ${JSON.stringify(gitEmail)}\n` +
       `Then push your branch and open the pull request.`;
   }
+  if (gmail) {
+    s +=
+      `\n\n— Gmail: ${gmail.email} —\n` +
+      `You can act on this mailbox with the gmail_* tools: gmail_search (find messages by query), ` +
+      `gmail_read_message (read one in full), gmail_send (send a new email), gmail_create_draft ` +
+      `(save a draft), gmail_modify_labels (archive / mark read / label). Searching and reading are ` +
+      `always available; ` +
+      (gmail.requireSendApproval
+        ? `sending and modifying require a human's approval, so you'll hit a confirmation prompt — ` +
+          `tell the user when you're waiting on one. `
+        : `sending and modifying run without a separate approval, so be careful. `) +
+      `Only touch this mailbox when you're actually asked to; never email people or change the ` +
+      `inbox as an incidental side effect.`;
+  }
   s +=
     `\n\n— Your environment —\n` +
     `You run in a Linux container: no sudo/apt, ~3GB memory (don't run several heavy ` +
@@ -340,12 +361,25 @@ export function systemPromptAppend(agent: db.AgentRow, githubRepo: string | null
 // (for GitHub-capable agents) a fresh installation token so the runner can authenticate git.
 async function buildConfigure(agent: db.AgentRow): Promise<ConfigureFrame> {
   const githubRepo = await db.getAgentGithubRepo(agent.id);
+  const gmail = await db.getAgentGmail(agent.id);
+  // Mint the Gmail token up front so the system prompt only advertises Gmail when it's actually
+  // usable (e.g. not when the backing user has disconnected their Google account) — otherwise the
+  // agent would see gmail_* instructions with no tools behind them.
+  let gmailGrant: { accessToken: string; email: string; requireSendApproval: boolean } | undefined;
+  if (gmail && google.isConfigured()) {
+    try {
+      const accessToken = await google.getValidGmailToken(gmail.backingParticipantId);
+      gmailGrant = { accessToken, email: gmail.email, requireSendApproval: gmail.requireSendApproval };
+    } catch (e) {
+      console.error(`runner[${agent.id}] configure: could not mint gmail token:`, e);
+    }
+  }
   const frame: ConfigureFrame = {
     type: "configure",
     model: agent.model ?? null,
     permissionMode: toPermissionMode(agent.mode),
     effort: agent.effort,
-    systemPromptAppend: systemPromptAppend(agent, githubRepo),
+    systemPromptAppend: systemPromptAppend(agent, githubRepo, gmailGrant ? gmail : null),
   };
   if (githubRepo && gh.appAuthConfigured()) {
     try {
@@ -357,6 +391,7 @@ async function buildConfigure(agent: db.AgentRow): Promise<ConfigureFrame> {
       console.error(`runner[${agent.id}] configure: could not mint git token:`, e);
     }
   }
+  if (gmailGrant) frame.gmail = gmailGrant;
   return frame;
 }
 
@@ -377,6 +412,22 @@ async function refreshGitCredentials(conn: RunnerConn, agent: db.AgentRow): Prom
     send(conn, { type: "git_credentials", token, login: agent.handle });
   } catch (e) {
     console.error(`runner[${agent.id}] could not refresh git token:`, e);
+  }
+}
+
+// Same idea as refreshGitCredentials, for Gmail: Google access tokens last ~1h, so re-mint from
+// the backing account's refresh token and push a `gmail_credentials` frame before each drain so a
+// long-lived runner never starts a turn with an expired token. getValidGmailToken serves a cached
+// token until ~1 min before expiry, so this is ~free until a refresh is actually needed. No-op for
+// agents without a Gmail integration attached or when Google OAuth isn't configured.
+async function refreshGmailCredentials(conn: RunnerConn, agent: db.AgentRow): Promise<void> {
+  const gmail = await db.getAgentGmail(agent.id);
+  if (!gmail || !google.isConfigured()) return;
+  try {
+    const accessToken = await google.getValidGmailToken(gmail.backingParticipantId);
+    send(conn, { type: "gmail_credentials", accessToken });
+  } catch (e) {
+    console.error(`runner[${agent.id}] could not refresh gmail token:`, e);
   }
 }
 
@@ -413,7 +464,10 @@ export async function drain(agentId: string): Promise<void> {
   // expired installation token. Ordered before `enqueue` so the runner applies it before the
   // turn (and any git ops in it) starts.
   const agent = await db.getAgentRow(agentId);
-  if (agent) await refreshGitCredentials(conn, agent);
+  if (agent) {
+    await refreshGitCredentials(conn, agent);
+    await refreshGmailCredentials(conn, agent);
+  }
   for (const it of items) conn.sentInbox.add(it.inboxId);
   send(conn, { type: "enqueue", items });
 }
