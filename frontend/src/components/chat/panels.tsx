@@ -352,6 +352,7 @@ export function ParticipantProfilePanel({
               value={integrations}
               onChange={setIntegrations}
               google={google ?? undefined}
+              agentId={person.id}
             />
             <ContextUsageCard person={person} />
             <Button

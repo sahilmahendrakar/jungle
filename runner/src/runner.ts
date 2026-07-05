@@ -16,6 +16,7 @@
 import {
   query,
   type EffortLevel,
+  type McpServerConfig,
   type Query,
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -46,6 +47,7 @@ import {
   type BackendToRunner,
   type ConfigureFrame,
   type EnqueueAttachment,
+  type McpIntegrationGrant,
   type PermissionMode,
 } from "./protocol.js";
 
@@ -154,6 +156,13 @@ export class Runner {
   // is picked up without rebuilding the server.
   private gmailToken: string | null = null;
   private gmailSettings: { email: string; requireSendApproval: boolean } | null = null;
+
+  // Remote-MCP integrations (Linear/Notion/Granola/…) from `configure`: the grants (key, url,
+  // safeTools, requireApproval), plus the current OAuth access token per key (seeded from the
+  // grant, refreshed mid-session by `integration_credentials`). Each is mounted as a remote MCP
+  // server per turn with a Bearer header built from the current token (see runTurn).
+  private mcpIntegrations: McpIntegrationGrant[] = [];
+  private mcpTokens = new Map<string, string>();
 
   // Session persistence.
   private sessionId: string | null = null;
@@ -323,6 +332,12 @@ export class Runner {
         // A running turn's gmail server reads this via getToken on its next call — no rebuild.
         this.gmailToken = frame.accessToken;
         break;
+      case "integration_credentials":
+        // Fresh token for a remote-MCP integration. Applied to the NEXT turn's mounted server
+        // (remote MCP headers are fixed when query() is built); the backend refreshes before each
+        // drain so every turn starts fresh.
+        this.mcpTokens.set(frame.key, frame.accessToken);
+        break;
       default:
         log.warn("unknown frame from backend", { type: (frame as any).type });
     }
@@ -351,6 +366,10 @@ export class Runner {
       this.gmailToken = null;
       this.gmailSettings = null;
     }
+    // Remote-MCP integrations: replace the set wholesale (absent = none attached) and seed the
+    // token map from each grant. Later `integration_credentials` frames update the tokens in place.
+    this.mcpIntegrations = frame.mcpIntegrations ?? [];
+    this.mcpTokens = new Map(this.mcpIntegrations.map((g) => [g.key, g.accessToken]));
     this.configured = true;
     void saveState({ sessionId: this.sessionId, model: this.model });
     this.sendState();
@@ -486,6 +505,18 @@ export class Runner {
         allowedTools.push(...GMAIL_WRITE_TOOLS);
       }
     }
+    // Mount each connected remote-MCP integration as a remote HTTP server with a Bearer header
+    // built from the current token. Read-only (safe) tools are auto-allowed; when the agent's
+    // approval toggle is off, allow all of that server's tools; otherwise non-safe tools route
+    // through the confirmation card (preToolUseHook honors this in every permission mode).
+    const mcpServers: Record<string, McpServerConfig> = { jungle: mcpServer };
+    if (gmailServer) mcpServers.gmail = gmailServer;
+    for (const grant of this.mcpIntegrations) {
+      const token = this.mcpTokens.get(grant.key) ?? grant.accessToken;
+      mcpServers[grant.key] = { type: "http", url: grant.url, headers: { Authorization: `Bearer ${token}` } };
+      allowedTools.push(...grant.safeTools);
+      if (!grant.requireApproval) allowedTools.push(`mcp__${grant.key}__*`);
+    }
     const q = query({
       prompt: this.makeInputGenerator(firstBatch, turnId, compacting),
       options: {
@@ -499,7 +530,7 @@ export class Runner {
           preset: "claude_code",
           append: this.systemPromptAppend || undefined,
         },
-        mcpServers: gmailServer ? { jungle: mcpServer, gmail: gmailServer } : { jungle: mcpServer },
+        mcpServers,
         allowedTools,
         // A PreToolUse hook returning permissionDecision "ask" is required to
         // route tool calls to canUseTool: in the non-interactive SDK, `default`
@@ -626,16 +657,27 @@ export class Runner {
   // failure here must never break the turn.
   private async reconnectJungleMcp(q: Query): Promise<void> {
     try {
-      const servers: Record<string, ReturnType<typeof this.buildJungleServer>> = {
+      const servers: Record<string, McpServerConfig> = {
         jungle: this.buildJungleServer(),
       };
       if (this.gmailToken) servers.gmail = this.buildGmailServer();
+      // Re-mount remote-MCP integrations too, with the current token per key.
+      for (const grant of this.mcpIntegrations) {
+        const token = this.mcpTokens.get(grant.key) ?? grant.accessToken;
+        servers[grant.key] = { type: "http", url: grant.url, headers: { Authorization: `Bearer ${token}` } };
+      }
       await q.setMcpServers({});
       await q.setMcpServers(servers);
       log.info("rebuilt MCP connections after mid-turn session re-init");
     } catch (err) {
       log.warn("failed to rebuild jungle MCP connection", { err: String(err) });
     }
+  }
+
+  // The remote-MCP grant a tool call belongs to, if any. Tool names are mcp__<key>__<tool>; match
+  // by the fully-qualified prefix so keys/tools containing underscores or hyphens are handled.
+  private remoteMcpGrantFor(toolName: string): McpIntegrationGrant | null {
+    return this.mcpIntegrations.find((g) => toolName.startsWith(`mcp__${g.key}__`)) ?? null;
   }
 
   // After a turn's result, tell the backend how full the context window is.
@@ -834,6 +876,14 @@ export class Runner {
     // agent's permission mode: gated (ask) when requireSendApproval is on, auto-allowed when off.
     if (GMAIL_WRITE_TOOLS.has(input.tool_name ?? "")) {
       if (!this.gmailSettings?.requireSendApproval) return { continue: true };
+      return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "ask" } };
+    }
+    // Remote-MCP integration tools honor their per-agent approval toggle in EVERY permission mode:
+    // read-only (safe) tools run freely; other tools ask when approval is on, run when it's off.
+    const grant = this.remoteMcpGrantFor(input.tool_name ?? "");
+    if (grant) {
+      if (grant.safeTools.includes(input.tool_name ?? "")) return { continue: true };
+      if (!grant.requireApproval) return { continue: true };
       return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "ask" } };
     }
     // In default mode, ask a human only for tools that can change something. Read-only and

@@ -51,19 +51,22 @@ export function AuthGate() {
     setGhDismissed(true);
   };
 
-  // Handle the OAuth round-trip returns (?github=… / ?google=…), then clean the URL.
+  // Handle the OAuth round-trip returns (?github=… / ?google=… / ?integration=…), then clean the URL.
   useEffect(() => {
     const params = new URLSearchParams(location.search);
     const gh = params.get("github");
     const google = params.get("google");
-    if (!gh && !google) return;
+    const integration = params.get("integration");
+    if (!gh && !google && !integration) return;
     if (gh === "connected") {
       if (user) localStorage.setItem(`jungle.gh.${user.uid}`, "1");
       refreshMe();
     }
-    // Google connection is per-user and read live by Settings' own status fetch; nothing to refresh
-    // here, just clean the return params off the URL.
-    for (const k of ["github", "login", "reason", "google", "email"]) params.delete(k);
+    // Google and per-agent integration connections are read live by the settings/profile status
+    // fetches; nothing to refresh here, just clean the return params off the URL.
+    for (const k of ["github", "login", "reason", "google", "email", "integration", "agent", "connected", "error"]) {
+      params.delete(k);
+    }
     const qs = params.toString();
     history.replaceState({}, "", location.pathname + (qs ? `?${qs}` : ""));
   }, [refreshMe, user]);

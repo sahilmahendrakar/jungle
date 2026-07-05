@@ -18,6 +18,11 @@ export interface IntegrationType {
   // Shown in the picker, disabled — the integration type exists in the catalog but isn't
   // wired up to grant anything yet.
   comingSoon?: boolean;
+  // Connection-based via the per-agent OAuth flow (POST /api/agents/:id/integrations/:key/
+  // connect-url → provider consent → /auth/integrations/callback). The frontend renders a generic
+  // "Connect" card for these (see IntegrationsEditor). Gmail is connection-based too but via the
+  // per-user Google account in Settings, so it is NOT marked here — it has its own card.
+  connection?: "oauth";
 }
 
 export const INTEGRATION_TYPES: IntegrationType[] = [
@@ -39,9 +44,11 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
   {
     key: "linear",
     name: "Linear",
-    description: "Read & update issues in a chosen Linear team via Linear's MCP server.",
-    configFields: [{ key: "team", label: "Team" }],
-    comingSoon: true,
+    description: "Read, create & update Linear issues, projects & comments via Linear's MCP server.",
+    // Connection-based (OAuth to Linear's MCP server); the only per-agent config is the write-
+    // approval toggle, rendered specially by the connection card.
+    configFields: [],
+    connection: "oauth",
   },
   {
     key: "google-drive",

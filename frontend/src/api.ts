@@ -223,6 +223,45 @@ export function removeAgentIntegration(agentId: string, key: string): Promise<{ 
   });
 }
 
+// --- Per-agent OAuth connections for connection-based integrations (Linear/Notion/Granola/Drive).
+// A connection is separate from attaching the integration: attaching creates the config row; this
+// is the OAuth grant, authorized per agent from its profile. ---
+
+export interface IntegrationConnectionStatus {
+  connected: boolean;
+  externalAccount?: string | null;
+}
+
+// Begin connecting: returns the provider authorize URL for the SPA to redirect to (full page).
+export function integrationConnectUrl(agentId: string, key: string): Promise<{ url: string }> {
+  return request(`/api/agents/${agentId}/integrations/${key}/connect-url`, {
+    method: "POST",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to start connect",
+  });
+}
+
+export function getIntegrationConnection(
+  agentId: string,
+  key: string,
+): Promise<IntegrationConnectionStatus> {
+  return request<IntegrationConnectionStatus>(`/api/agents/${agentId}/integrations/${key}/connection`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load connection",
+  });
+}
+
+export function disconnectIntegration(agentId: string, key: string): Promise<{ ok: boolean }> {
+  return request(`/api/agents/${agentId}/integrations/${key}/connection`, {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to disconnect",
+  });
+}
+
 // Update an agent's editable config from its profile page. `mode` is applied live; for sdk
 // agents `model` is applied at the agent's next turn boundary.
 export function updateAgent(

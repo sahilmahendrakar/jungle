@@ -157,6 +157,21 @@ export type RunnerToBackend =
 
 // ---- Backend -> runner ----
 
+// A remote MCP integration the agent is connected to (Linear, Notion, Granola, …). The runner
+// mounts each as a remote MCP server — `{ type: "http", url, headers: { Authorization: Bearer
+// <accessToken> } }` — so its tools appear as mcp__<key>__<tool>. `safeTools` are the read-only
+// tools auto-approved without a confirmation card; when `requireApproval` is false ALL of the
+// server's tools are auto-approved, otherwise non-safe tools route through the confirmation card
+// (see runner.ts). The access token is short-lived and refreshed mid-session via
+// IntegrationCredentialsFrame (keyed by `key`).
+export interface McpIntegrationGrant {
+  key: string;
+  url: string;
+  accessToken: string;
+  safeTools: string[];
+  requireApproval: boolean;
+}
+
 export interface ConfigureFrame {
   type: "configure";
   model: string | null; // null = let the runner use the SDK/agent-config default model
@@ -169,6 +184,9 @@ export interface ConfigureFrame {
   // Read/search Gmail tools run freely; send/modify go through the confirmation card when
   // requireSendApproval is set (see runner.ts). Refreshed mid-session via GmailCredentialsFrame.
   gmail?: { accessToken: string; email: string; requireSendApproval: boolean };
+  // The agent's attached remote-MCP integrations (Linear/Notion/Granola/…), if any. Each is
+  // mounted as a remote MCP server; tokens refreshed via IntegrationCredentialsFrame.
+  mcpIntegrations?: McpIntegrationGrant[];
 }
 
 // A file attached to the message that produced an inbox item. `url` is an origin-relative
@@ -265,6 +283,15 @@ export interface GmailCredentialsFrame {
   accessToken: string;
 }
 
+// Mid-session refresh of a remote-MCP integration's OAuth access token, keyed by integration key
+// (linear/notion/granola/…). Same role as GmailCredentialsFrame for the mcpIntegrations grants:
+// pushed before each drain so a long-lived runner re-mounts its MCP servers with a fresh token.
+export interface IntegrationCredentialsFrame {
+  type: "integration_credentials";
+  key: string;
+  accessToken: string;
+}
+
 export type BackendToRunner =
   | ConfigureFrame
   | EnqueueFrame
@@ -280,4 +307,5 @@ export type BackendToRunner =
   | ScheduleCancelResultFrame
   | ConfirmResultFrame
   | GitCredentialsFrame
-  | GmailCredentialsFrame;
+  | GmailCredentialsFrame
+  | IntegrationCredentialsFrame;
