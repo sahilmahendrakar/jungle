@@ -53,7 +53,7 @@ of the request; responses echo them.
 
 | type | fields | meaning |
 |---|---|---|
-| `configure` | `model`, `permissionMode`, `systemPromptAppend`, `git?: {token, login, repoUrl?}` | reply to `hello`; also sent when config changes while idle. When `repoUrl` is set the runner clones it to `/workspace/repo` (skip if present) BEFORE starting any turn |
+| `configure` | `model`, `permissionMode`, `systemPromptAppend`, `git?: {token, login, repoUrl?}`, `gmail?: {accessToken, email, requireSendApproval}`, `drive?: {accessToken, email, requireApproval}`, `mcpIntegrations?: [{key, url, accessToken, safeTools, requireApproval}]` | reply to `hello`; also sent when config changes while idle. When `repoUrl` is set the runner clones it to `/workspace/repo` (skip if present) BEFORE starting any turn. `gmail`/`drive` mount in-process MCP servers; each `mcpIntegrations` entry mounts a remote MCP server (`{type:"http", url, headers:{Authorization}}`). Integration tokens are all short-lived — refreshed before each drain (see credentials frames below) |
 | `enqueue` | `items: [{inboxId, text, attachments?}]` | text is fully composed by the backend (sender/channel context included). `attachments: [{url, filename, mime, sizeBytes?}]` are files on the triggering message: `url` is an origin-relative signed path the runner downloads into `/workspace/attachments/` (URLs are signed fresh at drain time). Runner queues; consumed at next turn boundary |
 | `interrupt` | — | `q.interrupt()` the running turn |
 | `compact` | — | ask the agent to compact/summarize its session context. Runs as a dedicated `/compact` turn when the agent is next idle (never interleaves with queued messages; repeat requests coalesce) |
@@ -62,6 +62,8 @@ of the request; responses echo them.
 | `send_message_result` | `id`, `result: {ok, error?, messageId?}` | resolves the custom tool call |
 | `confirm_result` | `id`, `result: "allow"\|"deny"`, `denyMessage?`, `updatedInput?` | resolves `canUseTool` |
 | `git_credentials` | `token`, `login` | refreshed GitHub installation token (~1h TTL); runner rewrites its git credential store / `GH_TOKEN` |
+| `gmail_credentials` | `accessToken` | refreshed Gmail OAuth access token (~1h TTL); the in-process gmail server reads it live |
+| `integration_credentials` | `key`, `accessToken` | refreshed OAuth token for a remote-MCP integration or the in-process Google Drive server (keyed by integration key); applied to the next turn's mounted server |
 
 ## Permission modes
 
