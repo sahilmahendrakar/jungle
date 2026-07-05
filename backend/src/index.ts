@@ -9,6 +9,7 @@ import { createApp } from "./app";
 import { initAppSocket } from "./ws/appSocket";
 import { triggerMentionedAgents, buildRunnerHooks } from "./services/orchestrator";
 import { startScheduler } from "./services/scheduler";
+import { registerBuiltinIntegrations } from "./integrations";
 
 // Entry point / boot: wire the HTTP app, both WebSocket subsystems (app + runner), background
 // jobs, and start listening. The request handlers live in http/routes/*, the realtime plumbing
@@ -26,6 +27,10 @@ process.on("uncaughtException", (err) => {
 
 // Register the Fly provisioner alongside the always-present 'docker' one (provisioner.ts).
 setProvisioner("fly", new FlyProvisioner());
+
+// Register the built-in integration adapters (github, gmail, …) so runners.ts / routes can
+// dispatch by key (backend/src/integrations/).
+registerBuiltinIntegrations();
 
 const app = createApp();
 const server = createServer(app);

@@ -10,6 +10,7 @@ import { resolveConfirmDecision } from "../../services/confirmations";
 import { wrap, ApiError } from "../errors";
 import { optInt } from "../validate";
 import { publicParticipant, requireAgent, requireRequester } from "../guards";
+import { adapterFor } from "../../integrations";
 
 const router = Router();
 
@@ -35,27 +36,19 @@ function validateIntegrations(
 }
 
 // Resolve the config actually persisted for an integration the requester is attaching. Most
-// integrations store the client-supplied config as-is; `gmail` is connection-based — it stores no
-// secrets (OAuth tokens live in google_identities), only which connected account backs it and the
-// send-approval toggle. A fresh attach binds to the requester's connected Google account (the
-// "creator mailbox") — 400 if they haven't connected Google yet; a reconfigure (e.g. toggling
-// approval) keeps the original mailbox binding rather than silently rebinding to whoever edited it.
+// integrations store the client-supplied config as-is; connection-based ones (gmail, …) normalize
+// it via their adapter's resolveConfig — e.g. gmail binds to the requester's connected Google
+// account and drops secrets. Per-service logic lives in backend/src/integrations/, not here.
 async function resolveIntegrationConfig(
   me: db.Participant,
   agentId: string,
   key: string,
   rawConfig: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
-  if (key !== "gmail") return rawConfig;
-  const requireSendApproval =
-    rawConfig.requireSendApproval !== false && rawConfig.requireSendApproval !== "false"; // default on
-  const existing = await db.getAgentGmail(agentId);
-  if (existing) {
-    return { backingParticipantId: existing.backingParticipantId, email: existing.email, requireSendApproval };
-  }
-  const id = await db.getGoogleIdentity(me.id);
-  if (!id) throw new ApiError(400, "connect your Google account in Settings first");
-  return { backingParticipantId: me.id, email: id.email, requireSendApproval };
+  const adapter = adapterFor(key);
+  if (!adapter?.resolveConfig) return rawConfig;
+  const existing = await db.getAgentIntegration(agentId, key);
+  return adapter.resolveConfig({ me, agentId, existing: existing?.config ?? null }, rawConfig);
 }
 
 // Create an agent = a participant of kind 'agent' running on the SDK runner: mint a per-agent
