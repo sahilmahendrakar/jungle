@@ -34,6 +34,7 @@ import {
   type ScheduleCancelResult,
 } from "./send-message-tool.js";
 import { createGmailMcpServer } from "./gmail-tool.js";
+import { createDriveMcpServer } from "./drive-tool.js";
 import { applyGitCredentials, cloneRepoIfNeeded, getGhToken } from "./git.js";
 import { loadState, saveState } from "./state.js";
 import {
@@ -72,6 +73,8 @@ const SAFE_TOOLS = new Set([
   "ListMcpResources", "ReadMcpResource", "mcp__jungle__read_history",
   // Gmail read/search: never mutate the mailbox, so no confirmation.
   "mcp__gmail__gmail_search", "mcp__gmail__gmail_read_message",
+  // Google Drive read: search/list/get never mutate, so no confirmation.
+  "mcp__gdrive__drive_search", "mcp__gdrive__drive_list", "mcp__gdrive__drive_get_file",
   // Schedule tools are bounded jungle-app operations with backend-enforced guardrails (caps,
   // min interval, prompt cap) and full human visibility/undo on the Scheduled page — a confirm
   // card would be noise, not safety.
@@ -86,6 +89,11 @@ const GMAIL_WRITE_TOOLS = new Set([
   "mcp__gmail__gmail_create_draft",
   "mcp__gmail__gmail_modify_labels",
 ]);
+
+// Google Drive read/write tools — same gating model as Gmail (writes honor the integration's
+// requireApproval toggle in preToolUseHook; reads always run).
+const DRIVE_READ_TOOLS = ["mcp__gdrive__drive_search", "mcp__gdrive__drive_list", "mcp__gdrive__drive_get_file"];
+const DRIVE_WRITE_TOOLS = new Set(["mcp__gdrive__drive_create_file", "mcp__gdrive__drive_update_file"]);
 
 // Fallback context reading derived from a `result` SDK message when the
 // getContextUsage() control request is unavailable. The turn's final input
@@ -157,12 +165,16 @@ export class Runner {
   private gmailToken: string | null = null;
   private gmailSettings: { email: string; requireSendApproval: boolean } | null = null;
 
+  // Google Drive integration state (in-process, like Gmail): settings from `configure`; the token
+  // lives in integrationTokens under key "google-drive" (refreshed by `integration_credentials`).
+  private driveSettings: { email: string; requireApproval: boolean } | null = null;
+
   // Remote-MCP integrations (Linear/Notion/Granola/…) from `configure`: the grants (key, url,
-  // safeTools, requireApproval), plus the current OAuth access token per key (seeded from the
-  // grant, refreshed mid-session by `integration_credentials`). Each is mounted as a remote MCP
-  // server per turn with a Bearer header built from the current token (see runTurn).
+  // safeTools, requireApproval). Access tokens for BOTH the remote-MCP integrations and the
+  // in-process Drive server live in integrationTokens, keyed by integration key (seeded from the
+  // configure grants, refreshed mid-session by `integration_credentials`).
   private mcpIntegrations: McpIntegrationGrant[] = [];
-  private mcpTokens = new Map<string, string>();
+  private integrationTokens = new Map<string, string>();
 
   // Session persistence.
   private sessionId: string | null = null;
@@ -333,10 +345,11 @@ export class Runner {
         this.gmailToken = frame.accessToken;
         break;
       case "integration_credentials":
-        // Fresh token for a remote-MCP integration. Applied to the NEXT turn's mounted server
-        // (remote MCP headers are fixed when query() is built); the backend refreshes before each
-        // drain so every turn starts fresh.
-        this.mcpTokens.set(frame.key, frame.accessToken);
+        // Fresh token for a remote-MCP integration or the in-process Drive server (keyed by
+        // integration key). Remote MCP headers are fixed when query() is built, so this applies to
+        // the NEXT turn; the in-process Drive server reads it live via getToken. The backend
+        // refreshes before each drain so every turn starts fresh either way.
+        this.integrationTokens.set(frame.key, frame.accessToken);
         break;
       default:
         log.warn("unknown frame from backend", { type: (frame as any).type });
@@ -369,7 +382,14 @@ export class Runner {
     // Remote-MCP integrations: replace the set wholesale (absent = none attached) and seed the
     // token map from each grant. Later `integration_credentials` frames update the tokens in place.
     this.mcpIntegrations = frame.mcpIntegrations ?? [];
-    this.mcpTokens = new Map(this.mcpIntegrations.map((g) => [g.key, g.accessToken]));
+    this.integrationTokens = new Map(this.mcpIntegrations.map((g) => [g.key, g.accessToken]));
+    // Google Drive (in-process, like Gmail): hold settings + seed its token under "google-drive".
+    if (frame.drive) {
+      this.integrationTokens.set("google-drive", frame.drive.accessToken);
+      this.driveSettings = { email: frame.drive.email, requireApproval: frame.drive.requireApproval };
+    } else {
+      this.driveSettings = null;
+    }
     this.configured = true;
     void saveState({ sessionId: this.sessionId, model: this.model });
     this.sendState();
@@ -505,14 +525,22 @@ export class Runner {
         allowedTools.push(...GMAIL_WRITE_TOOLS);
       }
     }
+    // Google Drive: in-process server (like Gmail). Read tools auto-allowed; write tools auto-
+    // allowed only when the approval toggle is off, else routed through the confirmation card.
+    const driveServer = this.driveSettings ? this.buildDriveServer() : null;
+    if (driveServer) {
+      allowedTools.push(...DRIVE_READ_TOOLS);
+      if (!this.driveSettings!.requireApproval) allowedTools.push(...DRIVE_WRITE_TOOLS);
+    }
     // Mount each connected remote-MCP integration as a remote HTTP server with a Bearer header
     // built from the current token. Read-only (safe) tools are auto-allowed; when the agent's
     // approval toggle is off, allow all of that server's tools; otherwise non-safe tools route
     // through the confirmation card (preToolUseHook honors this in every permission mode).
     const mcpServers: Record<string, McpServerConfig> = { jungle: mcpServer };
     if (gmailServer) mcpServers.gmail = gmailServer;
+    if (driveServer) mcpServers.gdrive = driveServer;
     for (const grant of this.mcpIntegrations) {
-      const token = this.mcpTokens.get(grant.key) ?? grant.accessToken;
+      const token = this.integrationTokens.get(grant.key) ?? grant.accessToken;
       mcpServers[grant.key] = { type: "http", url: grant.url, headers: { Authorization: `Bearer ${token}` } };
       allowedTools.push(...grant.safeTools);
       if (!grant.requireApproval) allowedTools.push(`mcp__${grant.key}__*`);
@@ -648,6 +676,13 @@ export class Runner {
     return createGmailMcpServer(() => this.gmailToken);
   }
 
+  // The in-process "gdrive" SDK-MCP server (drive_*), reading the current OAuth access token fresh
+  // on each call (integrationTokens["google-drive"]) so a mid-turn `integration_credentials`
+  // refresh applies without a rebuild. Built per turn alongside the jungle/gmail servers.
+  private buildDriveServer() {
+    return createDriveMcpServer(() => this.integrationTokens.get("google-drive") ?? null);
+  }
+
   // Rebuild the CLI's connection to our in-process "jungle" SDK-MCP server after a mid-turn
   // session re-init (see the reconnect comment in runTurn). reconnectMcpServer() rejects for
   // in-process (sdk) servers, so we cycle setMcpServers instead: removing 'jungle' tears down the
@@ -661,9 +696,10 @@ export class Runner {
         jungle: this.buildJungleServer(),
       };
       if (this.gmailToken) servers.gmail = this.buildGmailServer();
+      if (this.driveSettings) servers.gdrive = this.buildDriveServer();
       // Re-mount remote-MCP integrations too, with the current token per key.
       for (const grant of this.mcpIntegrations) {
-        const token = this.mcpTokens.get(grant.key) ?? grant.accessToken;
+        const token = this.integrationTokens.get(grant.key) ?? grant.accessToken;
         servers[grant.key] = { type: "http", url: grant.url, headers: { Authorization: `Bearer ${token}` } };
       }
       await q.setMcpServers({});
@@ -876,6 +912,11 @@ export class Runner {
     // agent's permission mode: gated (ask) when requireSendApproval is on, auto-allowed when off.
     if (GMAIL_WRITE_TOOLS.has(input.tool_name ?? "")) {
       if (!this.gmailSettings?.requireSendApproval) return { continue: true };
+      return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "ask" } };
+    }
+    // Google Drive write tools honor the integration's approval toggle in every permission mode.
+    if (DRIVE_WRITE_TOOLS.has(input.tool_name ?? "")) {
+      if (!this.driveSettings?.requireApproval) return { continue: true };
       return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "ask" } };
     }
     // Remote-MCP integration tools honor their per-agent approval toggle in EVERY permission mode:

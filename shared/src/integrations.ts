@@ -56,9 +56,9 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
   {
     key: "google-drive",
     name: "Google Drive",
-    description: "Search and read docs/sheets from a connected Drive folder.",
-    configFields: [{ key: "folder", label: "Folder" }],
-    comingSoon: true,
+    description: "Search, read, create & update files in a connected Google Drive.",
+    configFields: [],
+    connection: "oauth",
   },
   {
     key: "notion",

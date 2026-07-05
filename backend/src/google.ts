@@ -140,6 +140,75 @@ export async function getValidGmailToken(participantId: string): Promise<string>
   return tok.access_token;
 }
 
+// --- Generic Google OAuth helpers (per-agent integrations, e.g. Google Drive) ---
+//
+// The functions above back the per-USER Gmail identity (google_identities). Google Drive is a
+// per-AGENT connection (integration_connections), so these variants take an explicit redirectUri
+// and scopes and RETURN the raw tokens instead of storing them to google_identities — the generic
+// integrations routes persist them onto the agent's connection. Same OAuth client (CLIENT_ID/
+// SECRET); the redirectUri must be authorized on that client (the integrations callback).
+
+// Full Drive read+write. openid+email capture the connected account's address for display.
+export const DRIVE_SCOPES = ["openid", "email", "https://www.googleapis.com/auth/drive"];
+
+// Authorize URL without `state` (the caller appends it) — for the per-agent integration flow.
+export function googleAuthorizeUrl(opts: { scopes: string[]; redirectUri: string }): string {
+  const u = new URL(AUTHORIZE);
+  u.searchParams.set("client_id", CLIENT_ID);
+  u.searchParams.set("redirect_uri", opts.redirectUri);
+  u.searchParams.set("response_type", "code");
+  u.searchParams.set("scope", opts.scopes.join(" "));
+  u.searchParams.set("access_type", "offline"); // ask for a refresh token
+  u.searchParams.set("include_granted_scopes", "true");
+  u.searchParams.set("prompt", "consent"); // force a refresh token on every (re)connect
+  return u.toString();
+}
+
+export interface GoogleTokens {
+  email: string;
+  accessToken: string;
+  refreshToken: string | null;
+  accessExpiresAt: Date | null;
+  scopes: string | null;
+}
+
+// Exchange an auth code for tokens + the account email, WITHOUT persisting (caller stores them).
+export async function googleExchangeCode(opts: { code: string; redirectUri: string }): Promise<GoogleTokens> {
+  const tok = await postToken({
+    client_id: CLIENT_ID,
+    client_secret: CLIENT_SECRET,
+    code: opts.code,
+    redirect_uri: opts.redirectUri,
+    grant_type: "authorization_code",
+  });
+  if (!tok.access_token) throw new Error("google oauth: no access_token in response");
+  return {
+    email: await accountEmail(tok),
+    accessToken: tok.access_token,
+    refreshToken: tok.refresh_token ?? null,
+    accessExpiresAt: expiryDate(tok.expires_in),
+    scopes: tok.scope ?? null,
+  };
+}
+
+// Refresh an access token from a stored refresh token, WITHOUT persisting.
+export async function googleRefreshToken(
+  refreshToken: string,
+): Promise<{ accessToken: string; refreshToken: string | null; accessExpiresAt: Date | null }> {
+  const tok = await postToken({
+    client_id: CLIENT_ID,
+    client_secret: CLIENT_SECRET,
+    grant_type: "refresh_token",
+    refresh_token: refreshToken,
+  });
+  if (!tok.access_token) throw new Error("google oauth: refresh returned no access_token");
+  return {
+    accessToken: tok.access_token,
+    refreshToken: tok.refresh_token ?? null, // Google usually omits it on refresh
+    accessExpiresAt: expiryDate(tok.expires_in),
+  };
+}
+
 export interface GoogleStatus {
   connected: boolean;
   email?: string;

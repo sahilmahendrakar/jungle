@@ -184,6 +184,11 @@ export interface ConfigureFrame {
   // Read/search Gmail tools run freely; send/modify go through the confirmation card when
   // requireSendApproval is set (see runner.ts). Refreshed mid-session via GmailCredentialsFrame.
   gmail?: { accessToken: string; email: string; requireSendApproval: boolean };
+  // The agent's attached Google Drive integration, if any: a fresh OAuth access token for the
+  // connected account, its address, and whether writes need approval. Like Gmail, this is an
+  // in-process MCP server (drive_* tools); the token is refreshed via IntegrationCredentialsFrame
+  // keyed "google-drive".
+  drive?: { accessToken: string; email: string; requireApproval: boolean };
   // The agent's attached remote-MCP integrations (Linear/Notion/Granola/…), if any. Each is
   // mounted as a remote MCP server; tokens refreshed via IntegrationCredentialsFrame.
   mcpIntegrations?: McpIntegrationGrant[];
