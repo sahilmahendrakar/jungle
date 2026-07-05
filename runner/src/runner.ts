@@ -98,6 +98,22 @@ function contextFromResult(
   return { tokens, maxTokens };
 }
 
+// True when an SDK `user` stream message carries a tool_result whose body is the CLI's
+// "Stream closed" MCP-transport error — the symptom of a stale in-process MCP connection.
+// That exact string only comes from a broken MCP stream (not from a tool's own output), so
+// matching it is specific enough to trigger a reconnect. See runTurn's reconnect logic.
+function messageHasStreamClosed(message: unknown): boolean {
+  const content = (message as any)?.message?.content;
+  if (!Array.isArray(content)) return false;
+  return content.some(
+    (c: any) =>
+      c?.type === "tool_result" &&
+      c?.is_error === true &&
+      typeof c?.content === "string" &&
+      c.content.includes("Stream closed"),
+  );
+}
+
 export class Runner {
   private conn: Connection;
 
@@ -386,11 +402,7 @@ export class Runner {
     // server SHARED across turns therefore races: the previous turn's async cleanup can null the
     // binding the current turn just established, leaving send_message with no transport — the CLI
     // then surfaces "Stream closed" to the model. A per-turn server has no cross-turn aliasing.
-    const mcpServer = createJungleMcpServer(
-      (id, input) => this.bridgeSendMessage(id, input),
-      (filePath) => uploadFile(this.httpBase, this.env.token, this.workspace, filePath),
-      (id, input) => this.bridgeReadHistory(id, input),
-    );
+    const mcpServer = this.buildJungleServer();
     const q = query({
       prompt: this.makeInputGenerator(firstBatch, turnId, compacting),
       options: {
@@ -423,10 +435,33 @@ export class Runner {
 
     let ok = true;
     let error: string | undefined;
+    // A mid-turn session re-init leaves the CLI's client connection to our in-process
+    // "jungle" SDK-MCP server stale: send_message then fails INSTANTLY with "Stream closed"
+    // for the rest of the query, while CLI-native tools (Bash, Read) keep working. Two known
+    // triggers: context compaction (announced by a `compact_boundary` event) and launching an
+    // async Agent/Task subagent. We reconnect the server in place (no query restart, so the
+    // model keeps its context) — proactively on `compact_boundary`, and reactively whenever a
+    // tool result comes back "Stream closed" (covers the subagent case and any other cause).
+    // `reconnecting` serializes overlapping triggers so the model's rapid retries don't fire a
+    // storm of reconnects. `init` fires once per streamed user message, so it is NOT a re-init
+    // signal and must not be used as one.
+    let reconnecting = false;
+    const reconnectJungle = async () => {
+      if (reconnecting) return;
+      reconnecting = true;
+      await this.reconnectJungleMcp(q);
+      reconnecting = false;
+    };
     try {
       for await (const message of q) {
         // Forward every SDK stream message verbatim.
         this.conn.send({ type: "event", turnId, event: message });
+
+        if ((message as any).type === "system" && (message as any).subtype === "compact_boundary") {
+          await reconnectJungle();
+        } else if ((message as any).type === "user" && messageHasStreamClosed(message)) {
+          await reconnectJungle();
+        }
 
         if ((message as any).type === "result") {
           const sid = (message as any).session_id;
@@ -476,6 +511,34 @@ export class Runner {
     this.sendState();
     // Loop: if more work queued (or a model change left items behind), start again.
     this.maybeStartTurn();
+  }
+
+  // Build the in-process "jungle" SDK-MCP server (send_message + read_history), wired to this
+  // runner's backend bridges. A fresh instance is used per turn and per reconnect — each query()
+  // binds a server to its own transport, so instances must not be shared across connections.
+  private buildJungleServer() {
+    return createJungleMcpServer(
+      (id, input) => this.bridgeSendMessage(id, input),
+      (filePath) => uploadFile(this.httpBase, this.env.token, this.workspace, filePath),
+      (id, input) => this.bridgeReadHistory(id, input),
+    );
+  }
+
+  // Rebuild the CLI's connection to our in-process "jungle" SDK-MCP server after a mid-turn
+  // session re-init (see the reconnect comment in runTurn). reconnectMcpServer() rejects for
+  // in-process (sdk) servers, so we cycle setMcpServers instead: removing 'jungle' tears down the
+  // stale transport on both sides, then re-adding a fresh instance makes the CLI drop and
+  // re-initialize its client — restoring send_message without restarting the query (the model
+  // keeps its context). Best-effort: harmless when the connection was already healthy, and a
+  // failure here must never break the turn.
+  private async reconnectJungleMcp(q: Query): Promise<void> {
+    try {
+      await q.setMcpServers({});
+      await q.setMcpServers({ jungle: this.buildJungleServer() });
+      log.info("rebuilt jungle MCP connection after mid-turn session re-init");
+    } catch (err) {
+      log.warn("failed to rebuild jungle MCP connection", { err: String(err) });
+    }
   }
 
   // After a turn's result, tell the backend how full the context window is.
