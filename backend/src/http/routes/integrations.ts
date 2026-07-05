@@ -1,15 +1,15 @@
 import { Router } from "express";
 import { randomBytes } from "node:crypto";
-import { getIntegrationType } from "@jungle/shared";
+import { INTEGRATION_TYPES, getIntegrationType } from "@jungle/shared";
 import * as db from "../../db";
 import { wrap, ApiError } from "../errors";
-import { requireAgent } from "../guards";
+import { requireRequester } from "../guards";
 import { adapterFor } from "../../integrations";
 
-// Generic OAuth connect flow for connection-based integrations (Linear/Notion/Granola via their
-// remote MCP servers, Google Drive). One set of routes for all of them: the per-service work lives
-// in each adapter's `connection` (backend/src/integrations/). Connections are per-AGENT — a human
-// authorizes from the agent's profile and the grant belongs to that agent (integration_connections).
+// Per-USER OAuth connections for the connection-based integrations (Linear/Notion/Granola via their
+// remote MCP servers, Google Drive). You connect your accounts once in Settings → Connections, like
+// GitHub and Gmail; agents then attach the integration and act with your connection. The per-service
+// work lives in each adapter's `connection` (backend/src/integrations/).
 
 const router = Router();
 
@@ -33,12 +33,14 @@ const BACKEND_ORIGIN = (() => {
 })();
 const REDIRECT_URI = `${BACKEND_ORIGIN}/auth/integrations/callback`;
 
-// Pending OAuth round-trips, keyed by the opaque `state`. Holds everything the callback needs
-// (which agent+integration, who authorized it, and the adapter's per-attempt `pending`: PKCE
-// verifier, token endpoint, …). In-memory is fine for a single backend (mirrors routes/google.ts).
+// The connection-based integration keys (catalog entries marked connection: "oauth").
+const CONNECTION_KEYS = INTEGRATION_TYPES.filter((t) => t.connection === "oauth" && !t.comingSoon).map((t) => t.key);
+
+// Pending OAuth round-trips, keyed by the opaque `state`. Holds which user + integration and the
+// adapter's per-attempt `pending` (PKCE verifier, token endpoint, …). In-memory is fine for a
+// single backend (mirrors routes/google.ts).
 interface PendingConnect {
-  agentId: string;
-  meId: string;
+  participantId: string;
   key: string;
   pending: Record<string, unknown>;
   createdAt: number;
@@ -61,20 +63,19 @@ function connectionAdapter(key: string) {
   return adapter;
 }
 
-// Step 1: the agent-profile UI hits this to begin connecting. The adapter builds the authorize URL
-// and its per-attempt state; we bind it to a fresh OAuth `state` and hand the URL back for the SPA
-// to navigate to (full-page redirect).
+// Step 1: Settings → Connections hits this to begin connecting. The adapter builds the authorize
+// URL and its per-attempt state; we bind it to a fresh OAuth `state` and hand the URL back for the
+// SPA to navigate to (full-page redirect).
 router.post(
-  "/api/agents/:id/integrations/:key/connect-url",
+  "/api/integrations/:key/connect-url",
   wrap(async (req, res) => {
-    const { me, agent } = await requireAgent(req);
+    const me = await requireRequester(req);
     const key = String(req.params.key);
     const adapter = connectionAdapter(key);
     const state = randomBytes(16).toString("hex");
-    const start = await adapter.connection!.start({ agentId: agent.id, me, redirectUri: REDIRECT_URI });
-    trackConnect(state, { agentId: agent.id, meId: me.id, key, pending: start.pending });
-    // The adapter returns an authorize URL without `state` (it can't know ours); append it. If the
-    // adapter already set a state param, ours wins (last value) — providers read the last.
+    const start = await adapter.connection!.start({ me, redirectUri: REDIRECT_URI });
+    trackConnect(state, { participantId: me.id, key, pending: start.pending });
+    // The adapter returns an authorize URL without `state` (it can't know ours); append it.
     const url = new URL(start.authorizeUrl);
     url.searchParams.set("state", state);
     res.json({ url: url.toString() });
@@ -82,27 +83,27 @@ router.post(
 );
 
 // Step 2: the provider redirects here with ?code & ?state. Resolve the pending attempt, let the
-// adapter exchange the code, and persist the per-agent grant. No auth middleware — the opaque
+// adapter exchange the code, and persist the per-user grant. No auth middleware — the opaque
 // `state` authenticates the round-trip (same model as routes/google.ts).
 router.get("/auth/integrations/callback", async (req, res) => {
   const code = (req.query.code as string | undefined) || "";
   const state = (req.query.state as string | undefined) || "";
   const entry = state ? pendingConnects.get(state) : undefined;
-  const backToApp = (params: Record<string, string>) =>
-    `${FRONTEND_URL}/?${new URLSearchParams(params).toString()}`;
+  const backToSettings = (params: Record<string, string>) =>
+    `${FRONTEND_URL}/settings?${new URLSearchParams(params).toString()}`;
   try {
     if (!code || !entry) return res.status(400).send("invalid or expired OAuth state");
     pendingConnects.delete(state);
-    const me = await db.getParticipant(entry.meId);
+    const me = await db.getParticipant(entry.participantId);
     if (!me) return res.status(400).send("connecting user is gone");
     const adapter = connectionAdapter(entry.key);
     const result = await adapter.connection!.complete(
-      { agentId: entry.agentId, me, redirectUri: REDIRECT_URI },
+      { me, redirectUri: REDIRECT_URI },
       entry.pending,
       code,
     );
     await db.upsertIntegrationConnection({
-      agentId: entry.agentId,
+      participantId: me.id,
       key: entry.key,
       externalAccount: result.externalAccount,
       accessToken: result.accessToken,
@@ -110,37 +111,43 @@ router.get("/auth/integrations/callback", async (req, res) => {
       accessExpiresAt: result.accessExpiresAt,
       scopes: result.scopes,
       extra: result.extra,
-      createdBy: me.id,
     });
-    res.redirect(backToApp({ integration: entry.key, agent: entry.agentId, connected: "1" }));
+    res.redirect(backToSettings({ integration: entry.key, status: "connected" }));
   } catch (e) {
     res.redirect(
-      backToApp({
+      backToSettings({
         integration: entry?.key ?? "",
-        agent: entry?.agentId ?? "",
-        error: String((e as Error).message ?? e),
+        status: "error",
+        reason: String((e as Error).message ?? e),
       }),
     );
   }
 });
 
-// Connection status for the agent-profile integrations card.
+// The authed user's connection status for every connection-based integration (Settings + the
+// agent integration cards read this). `{ [key]: { connected, externalAccount } }`.
 router.get(
-  "/api/agents/:id/integrations/:key/connection",
+  "/api/integrations/status",
   wrap(async (req, res) => {
-    const { agent } = await requireAgent(req);
-    const key = String(req.params.key);
-    const row = await db.getIntegrationConnection(agent.id, key);
-    res.json(row ? { connected: true, externalAccount: row.external_account } : { connected: false });
+    const me = await requireRequester(req);
+    const rows = await db.listIntegrationConnections(me.id);
+    const byKey = new Map(rows.map((r) => [r.integration_key, r]));
+    const status: Record<string, { connected: boolean; externalAccount?: string | null }> = {};
+    for (const key of CONNECTION_KEYS) {
+      const row = byKey.get(key);
+      status[key] = row ? { connected: true, externalAccount: row.external_account } : { connected: false };
+    }
+    res.json(status);
   }),
 );
 
-// Disconnect: drop the agent's stored grant. Its runner stops getting a token at the next configure.
+// Disconnect: drop the authed user's grant for one integration. Agents whose integration was backed
+// by this connection stop getting a token at their next configure.
 router.delete(
-  "/api/agents/:id/integrations/:key/connection",
+  "/api/integrations/:key/connection",
   wrap(async (req, res) => {
-    const { agent } = await requireAgent(req);
-    await db.deleteIntegrationConnection(agent.id, String(req.params.key));
+    const me = await requireRequester(req);
+    await db.deleteIntegrationConnection(me.id, String(req.params.key));
     res.json({ ok: true });
   }),
 );

@@ -1,14 +1,15 @@
 import type { ConfigureFrame } from "@jungle/shared";
 import * as db from "../db";
+import { ApiError } from "../http/errors";
 import type { IntegrationAdapter } from "./types";
 import { mcpConnection, getValidMcpToken, type McpProviderSpec } from "./mcp-oauth";
 
 // Factory: build a full IntegrationAdapter for a remote MCP provider (Linear/Notion/Granola) from
 // a spec. All three share the same shape — OAuth via mcp-oauth.ts, mounted by the runner as a
-// remote MCP server — so adding one is just a spec + a register call. Per-agent state is split:
-//   • agent_integrations row  → the integration is attached + its { requireApproval } toggle.
-//   • integration_connections → the OAuth grant (created by the connect flow).
-// A grant is emitted only when both exist and a token can be minted.
+// remote MCP server — so adding one is just a spec + a register call. Like Gmail:
+//   • The OAuth grant is PER-USER (integration_connections), connected once in Settings.
+//   • Attaching to an agent stores config { backingParticipantId, requireApproval? } — the agent
+//     acts with that user's connection; a grant is emitted only when a token can be minted for it.
 
 export interface McpAdapterSpec extends McpProviderSpec {
   // Read-only tool names auto-approved without a confirmation card, as bare tool names (the runner
@@ -53,21 +54,28 @@ export function createMcpRemoteAdapter(spec: McpAdapterSpec): IntegrationAdapter
   return {
     key: spec.key,
 
-    // Attach/reconfigure: the only per-agent config is the approval toggle (moot for read-only
-    // integrations). The OAuth grant lives in integration_connections, set by the connect flow.
-    async resolveConfig(_ctx, rawConfig): Promise<Record<string, unknown>> {
-      if (spec.readOnly) return { requireApproval: false };
-      return {
-        requireApproval: rawConfig.requireApproval !== false && rawConfig.requireApproval !== "false",
-      };
+    // Attach/reconfigure: binds the agent to the attaching user's connection (backingParticipantId),
+    // like gmail — 400 if they haven't connected in Settings. A reconfigure keeps the original
+    // backing user. The only other config is the approval toggle (moot for read-only integrations).
+    async resolveConfig(ctx, rawConfig): Promise<Record<string, unknown>> {
+      const requireApproval =
+        !spec.readOnly && rawConfig.requireApproval !== false && rawConfig.requireApproval !== "false";
+      const existingBacking =
+        typeof ctx.existing?.backingParticipantId === "string" ? ctx.existing.backingParticipantId : null;
+      const backingParticipantId = existingBacking ?? ctx.me.id;
+      if (!existingBacking) {
+        const conn = await db.getIntegrationConnection(ctx.me.id, spec.key);
+        if (!conn) throw new ApiError(400, `connect your ${spec.displayName} account in Settings first`);
+      }
+      return spec.readOnly ? { backingParticipantId } : { backingParticipantId, requireApproval };
     },
 
     async buildGrant(frame: ConfigureFrame, agent, config): Promise<string | null> {
-      const connected = await db.getIntegrationConnection(agent.id, spec.key);
-      if (!connected) return null; // attached but not connected yet — advertise nothing
+      const backing = typeof config.backingParticipantId === "string" ? config.backingParticipantId : null;
+      if (!backing) return null; // not yet bound to a connected user — advertise nothing
       let accessToken: string;
       try {
-        accessToken = await getValidMcpToken(spec, agent.id);
+        accessToken = await getValidMcpToken(spec, backing);
       } catch (e) {
         console.error(`runner[${agent.id}] configure: could not mint ${spec.key} token:`, e);
         return null;
@@ -83,11 +91,11 @@ export function createMcpRemoteAdapter(spec: McpAdapterSpec): IntegrationAdapter
       return promptBlock(spec, requireApproval);
     },
 
-    async refreshCredentials(agent, _config, send): Promise<void> {
-      const connected = await db.getIntegrationConnection(agent.id, spec.key);
-      if (!connected) return;
+    async refreshCredentials(agent, config, send): Promise<void> {
+      const backing = typeof config.backingParticipantId === "string" ? config.backingParticipantId : null;
+      if (!backing) return;
       try {
-        const accessToken = await getValidMcpToken(spec, agent.id);
+        const accessToken = await getValidMcpToken(spec, backing);
         send({ type: "integration_credentials", key: spec.key, accessToken });
       } catch (e) {
         console.error(`runner[${agent.id}] could not refresh ${spec.key} token:`, e);

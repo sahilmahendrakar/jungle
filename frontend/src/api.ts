@@ -223,18 +223,21 @@ export function removeAgentIntegration(agentId: string, key: string): Promise<{ 
   });
 }
 
-// --- Per-agent OAuth connections for connection-based integrations (Linear/Notion/Granola/Drive).
-// A connection is separate from attaching the integration: attaching creates the config row; this
-// is the OAuth grant, authorized per agent from its profile. ---
+// --- Per-USER OAuth connections for connection-based integrations (Linear/Notion/Granola/Drive).
+// You connect your accounts once in Settings → Connections (like GitHub/Gmail); agents then attach
+// the integration and act with your connection. Separate from attaching the integration to an agent. ---
 
 export interface IntegrationConnectionStatus {
   connected: boolean;
   externalAccount?: string | null;
 }
 
+// Per-integration connection status for the current user, keyed by integration key.
+export type IntegrationStatuses = Record<string, IntegrationConnectionStatus>;
+
 // Begin connecting: returns the provider authorize URL for the SPA to redirect to (full page).
-export function integrationConnectUrl(agentId: string, key: string): Promise<{ url: string }> {
-  return request(`/api/agents/${agentId}/integrations/${key}/connect-url`, {
+export function integrationConnectUrl(key: string): Promise<{ url: string }> {
+  return request(`/api/integrations/${key}/connect-url`, {
     method: "POST",
     auth: true,
     devAuth: true,
@@ -242,19 +245,16 @@ export function integrationConnectUrl(agentId: string, key: string): Promise<{ u
   });
 }
 
-export function getIntegrationConnection(
-  agentId: string,
-  key: string,
-): Promise<IntegrationConnectionStatus> {
-  return request<IntegrationConnectionStatus>(`/api/agents/${agentId}/integrations/${key}/connection`, {
+export function getIntegrationStatuses(): Promise<IntegrationStatuses> {
+  return request<IntegrationStatuses>(`/api/integrations/status`, {
     auth: true,
     devAuth: true,
-    errorMessage: "failed to load connection",
+    errorMessage: "failed to load integration connections",
   });
 }
 
-export function disconnectIntegration(agentId: string, key: string): Promise<{ ok: boolean }> {
-  return request(`/api/agents/${agentId}/integrations/${key}/connection`, {
+export function disconnectIntegration(key: string): Promise<{ ok: boolean }> {
+  return request(`/api/integrations/${key}/connection`, {
     method: "DELETE",
     auth: true,
     devAuth: true,

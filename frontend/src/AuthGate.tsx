@@ -62,9 +62,9 @@ export function AuthGate() {
       if (user) localStorage.setItem(`jungle.gh.${user.uid}`, "1");
       refreshMe();
     }
-    // Google and per-agent integration connections are read live by the settings/profile status
-    // fetches; nothing to refresh here, just clean the return params off the URL.
-    for (const k of ["github", "login", "reason", "google", "email", "integration", "agent", "connected", "error"]) {
+    // Google and per-user integration connections are read live by the settings status fetches;
+    // nothing to refresh here, just clean the return params off the URL.
+    for (const k of ["github", "login", "reason", "google", "email", "integration", "status"]) {
       params.delete(k);
     }
     const qs = params.toString();

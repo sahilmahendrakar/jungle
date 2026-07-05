@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
 import { Bot } from "lucide-react";
-import { createParticipant, getGoogleStatus, type GoogleStatus } from "../../api";
+import {
+  createParticipant,
+  getGoogleStatus,
+  getIntegrationStatuses,
+  getIntegrationType,
+  type GoogleStatus,
+  type IntegrationStatuses,
+} from "../../api";
 import { MODEL_OPTIONS, SDK_MODE_OPTIONS } from "../../lib/chat";
 import { SelectMenu } from "./panels";
 import { IntegrationsEditor, type IntegrationDraft } from "./IntegrationsEditor";
@@ -36,14 +43,18 @@ export function AddAgentDialog({
   const [agMode, setAgMode] = useState(SDK_MODE_OPTIONS[0].id); // new agents are sdk runtime
   const [addingAgent, setAddingAgent] = useState(false);
   const [google, setGoogle] = useState<GoogleStatus | null>(null);
+  const [intStatuses, setIntStatuses] = useState<IntegrationStatuses>({});
 
-  // The creator's Google connection gates the Gmail integration (attached to their account).
+  // The creator's connections gate the connection-based integrations (each binds to their account).
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
     getGoogleStatus()
       .then((s) => !cancelled && setGoogle(s))
       .catch(() => !cancelled && setGoogle(null));
+    getIntegrationStatuses()
+      .then((s) => !cancelled && setIntStatuses(s))
+      .catch(() => !cancelled && setIntStatuses({}));
     return () => {
       cancelled = true;
     };
@@ -60,11 +71,14 @@ export function AddAgentDialog({
         kind: "agent",
         handle: agHandle.trim(),
         displayName: agName.trim(),
-        // Keep gmail only when the creator has a Google account connected (it binds to it);
-        // keep other integrations only when they have some config filled in.
-        integrations: integrations.filter((i) =>
-          i.key === "gmail" ? !!google?.connected : Object.values(i.config).some((v) => v.trim()),
-        ),
+        // Keep connection-based integrations (gmail + linear/notion/granola/drive) only when the
+        // creator has that account connected (each binds to it); keep field-based ones (github)
+        // only when some config is filled in.
+        integrations: integrations.filter((i) => {
+          if (i.key === "gmail") return !!google?.connected;
+          if (getIntegrationType(i.key)?.connection === "oauth") return !!intStatuses[i.key]?.connected;
+          return Object.values(i.config).some((v) => v.trim());
+        }),
         model: agModel,
         mode: agMode,
       });
@@ -119,6 +133,7 @@ export function AddAgentDialog({
             value={integrations}
             onChange={setIntegrations}
             google={google ?? undefined}
+            statuses={intStatuses}
           />
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">

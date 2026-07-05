@@ -1,12 +1,6 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { AudioLines, GitBranch, HardDrive, Mail, NotebookText, Plug, Plus, SquareKanban, X } from "lucide-react";
-import {
-  INTEGRATION_TYPES,
-  disconnectIntegration,
-  getIntegrationConnection,
-  integrationConnectUrl,
-  type IntegrationType,
-} from "../../api";
+import { INTEGRATION_TYPES, type IntegrationStatuses, type IntegrationType } from "../../api";
 import { RepoCombobox } from "../../RepoCombobox";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -42,16 +36,16 @@ function IntegrationCard({
   type,
   config,
   google,
-  agentId,
+  statuses,
   onChange,
   onRemove,
 }: {
   type: IntegrationType;
   config: Record<string, string>;
   google?: GoogleConn;
-  // The agent being edited, if it already exists (settings panel). Absent in the create dialog —
-  // connection-based integrations can only be OAuth-connected after the agent is saved.
-  agentId?: string;
+  // The current user's per-integration connection statuses (fetched by the parent). The connection
+  // card reads its own key to show connected/not, like the gmail card reads `google`.
+  statuses?: IntegrationStatuses;
   onChange: (config: Record<string, string>) => void;
   onRemove: () => void;
 }) {
@@ -93,41 +87,28 @@ function IntegrationCard({
       ))}
       {type.key === "gmail" && <GmailCardBody config={config} google={google} onChange={onChange} />}
       {type.connection === "oauth" && (
-        <ConnectionCardBody type={type} config={config} agentId={agentId} onChange={onChange} />
+        <ConnectionCardBody type={type} config={config} statuses={statuses} onChange={onChange} />
       )}
     </div>
   );
 }
 
-// Generic card body for connection-based (per-agent OAuth) integrations — Linear, Notion, Granola,
-// Google Drive. Shows a Connect button / connected status + a write-approval toggle. The OAuth
-// grant is per-agent, so connecting requires the agent to exist: in the create dialog (no agentId)
-// we tell the user to save first and connect from the profile.
+// Card body for connection-based integrations (Linear, Notion, Granola, Google Drive). Like the
+// gmail card: the OAuth connection is PER-USER (Settings → Connections), so this just shows the
+// current user's connection status + a write-approval toggle, or a prompt to connect in Settings.
 function ConnectionCardBody({
   type,
   config,
-  agentId,
+  statuses,
   onChange,
 }: {
   type: IntegrationType;
   config: Record<string, string>;
-  agentId?: string;
+  statuses?: IntegrationStatuses;
   onChange: (config: Record<string, string>) => void;
 }) {
   const requireApproval = String(config.requireApproval ?? "true") !== "false";
-  const [status, setStatus] = useState<{ connected: boolean; externalAccount?: string | null } | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    if (!agentId) return;
-    let live = true;
-    getIntegrationConnection(agentId, type.key)
-      .then((s) => live && setStatus(s))
-      .catch(() => live && setStatus({ connected: false }));
-    return () => {
-      live = false;
-    };
-  }, [agentId, type.key]);
+  const status = statuses?.[type.key];
 
   // Read-only integrations (Granola) can't change anything, so there's nothing to approve.
   const approvalToggle = type.readOnly ? null : (
@@ -143,66 +124,20 @@ function ConnectionCardBody({
     </label>
   );
 
-  if (!agentId) {
+  if (!status?.connected) {
     return (
-      <div className="space-y-2">
-        <p className="text-xs text-amber-600">
-          Save this agent, then connect {type.name} from its profile.
-        </p>
-        {approvalToggle}
-      </div>
+      <p className="text-xs text-amber-600">
+        Not connected. Connect your {type.name} account in{" "}
+        <span className="font-medium">Settings → Connections</span> to use this integration.
+      </p>
     );
   }
-
-  async function connect() {
-    setBusy(true);
-    try {
-      const { url } = await integrationConnectUrl(agentId!, type.key);
-      window.location.href = url; // full-page redirect to the provider consent screen
-    } catch {
-      setBusy(false);
-    }
-  }
-  async function disconnect() {
-    setBusy(true);
-    try {
-      await disconnectIntegration(agentId!, type.key);
-      setStatus({ connected: false });
-    } finally {
-      setBusy(false);
-    }
-  }
-
   return (
     <div className="space-y-2">
-      {status?.connected ? (
-        <div className="flex items-center gap-2">
-          <p className="text-xs text-muted-foreground">
-            Connected{status.externalAccount ? <> · <span className="font-medium text-foreground">{status.externalAccount}</span></> : null}
-          </p>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="ml-auto h-6 text-xs text-muted-foreground hover:text-destructive"
-            disabled={busy}
-            onClick={disconnect}
-            data-testid={`${type.key}-disconnect`}
-          >
-            Disconnect
-          </Button>
-        </div>
-      ) : (
-        <Button
-          variant="secondary"
-          size="sm"
-          className="h-7 text-xs"
-          disabled={busy}
-          onClick={connect}
-          data-testid={`${type.key}-connect`}
-        >
-          Connect {type.name}
-        </Button>
-      )}
+      <p className="text-xs text-muted-foreground">
+        Using{" "}
+        <span className="font-medium text-foreground">{status.externalAccount || `your ${type.name}`}</span>
+      </p>
       {approvalToggle}
     </div>
   );
@@ -257,15 +192,15 @@ export function IntegrationsEditor({
   value,
   onChange,
   google,
-  agentId,
+  statuses,
 }: {
   value: IntegrationDraft[];
   onChange: (v: IntegrationDraft[]) => void;
   // The current user's Google connection, so the gmail card can show status / the approval toggle.
   google?: GoogleConn;
-  // The agent being edited, if it already exists (settings panel). Enables per-agent OAuth connect
-  // for connection-based integrations; absent in the create dialog.
-  agentId?: string;
+  // The current user's per-integration connection statuses (Linear/Notion/Granola/Drive), so each
+  // connection card shows connected/not — like `google` for gmail.
+  statuses?: IntegrationStatuses;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const attachedKeys = new Set(value.map((v) => v.key));
@@ -342,7 +277,7 @@ export function IntegrationsEditor({
                 type={type}
                 config={entry.config}
                 google={google}
-                agentId={agentId}
+                statuses={statuses}
                 onChange={(config) =>
                   onChange(value.map((v) => (v.key === entry.key ? { ...v, config } : v)))
                 }

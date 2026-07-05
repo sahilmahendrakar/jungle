@@ -231,12 +231,12 @@ export function mcpConnection(spec: McpProviderSpec): IntegrationConnection {
   };
 }
 
-// Return a valid access token for the agent's connection to this provider, refreshing from the
-// stored refresh token if it's expired/near expiry (mirrors google.ts:getValidGmailToken). Throws
-// if the agent isn't connected or the token expired with no refresh token (→ reconnect).
-export async function getValidMcpToken(spec: McpProviderSpec, agentId: string): Promise<string> {
-  const row = await db.getIntegrationConnection(agentId, spec.key);
-  if (!row) throw new Error(`agent ${agentId} is not connected to ${spec.key}`);
+// Return a valid access token for a user's connection to this provider, refreshing from the stored
+// refresh token if it's expired/near expiry (mirrors google.ts:getValidGmailToken). Throws if the
+// user isn't connected or the token expired with no refresh token (→ reconnect).
+export async function getValidMcpToken(spec: McpProviderSpec, participantId: string): Promise<string> {
+  const row = await db.getIntegrationConnection(participantId, spec.key);
+  if (!row) throw new Error(`participant ${participantId} is not connected to ${spec.key}`);
   const exp = row.access_expires_at ? new Date(row.access_expires_at).getTime() : Infinity;
   if (exp - Date.now() > 60_000) return row.access_token;
   if (!row.refresh_token) throw new Error(`${spec.key} token expired and no refresh token; reconnect`);
@@ -256,7 +256,7 @@ export async function getValidMcpToken(spec: McpProviderSpec, agentId: string): 
     ...(clientSecret ? { client_secret: clientSecret } : {}),
   });
   await db.updateIntegrationTokens({
-    agentId,
+    participantId,
     key: spec.key,
     accessToken: tok.access_token,
     refreshToken: tok.refresh_token ?? row.refresh_token, // providers often omit it on refresh

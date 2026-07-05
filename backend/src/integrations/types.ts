@@ -27,8 +27,8 @@ export interface ResolveConfigCtx {
 // --- OAuth connection lifecycle (connection-based integrations: linear, notion, granola, drive) ---
 
 export interface ConnectionStartCtx {
-  agentId: string;
-  // The human clicking "Connect" from the agent's profile (their workspace-scoped participant).
+  // The human connecting the account in Settings → Connections (their workspace-scoped participant).
+  // The grant is stored per-user; agents that attach the integration reference this participant.
   me: db.Participant;
   // The absolute callback URL the provider must redirect back to (built by the route from the
   // backend's public origin). Adapters echo it into the authorize request verbatim.

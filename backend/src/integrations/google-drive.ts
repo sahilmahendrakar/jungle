@@ -1,12 +1,14 @@
 import type { ConfigureFrame } from "@jungle/shared";
 import * as db from "../db";
 import * as google from "../google";
+import { ApiError } from "../http/errors";
 import type { IntegrationAdapter } from "./types";
 
 // Google Drive integration: the agent can search, read, and (with approval) create/update files in
-// a connected Drive via the runner's in-process drive_* MCP tools — structurally like Gmail, but
-// the OAuth grant is PER-AGENT (integration_connections) rather than a per-user identity. Uses the
-// same Google OAuth client as Gmail (google.ts); the connect flow requests DRIVE_SCOPES.
+// a connected Drive via the runner's in-process drive_* MCP tools — structurally like Gmail. The
+// OAuth grant is PER-USER (integration_connections), connected once in Settings; attaching to an
+// agent binds config.backingParticipantId to the connecting user. Uses the same Google OAuth client
+// as Gmail (google.ts) with DRIVE_SCOPES.
 
 const KEY = "google-drive";
 
@@ -14,17 +16,17 @@ function requireApprovalOf(config: Record<string, unknown>): boolean {
   return config.requireApproval !== false; // default on
 }
 
-// A valid access token for the agent's Drive connection, refreshing from the stored refresh token
-// if near expiry (mirrors google.ts:getValidGmailToken but reads/writes integration_connections).
-async function getValidDriveToken(agentId: string): Promise<string> {
-  const row = await db.getIntegrationConnection(agentId, KEY);
-  if (!row) throw new Error(`agent ${agentId} has no Google Drive connection`);
+// A valid access token for a user's Drive connection, refreshing from the stored refresh token if
+// near expiry (mirrors google.ts:getValidGmailToken but reads/writes integration_connections).
+async function getValidDriveToken(participantId: string): Promise<string> {
+  const row = await db.getIntegrationConnection(participantId, KEY);
+  if (!row) throw new Error(`participant ${participantId} has no Google Drive connection`);
   const exp = row.access_expires_at ? new Date(row.access_expires_at).getTime() : Infinity;
   if (exp - Date.now() > 60_000) return row.access_token;
   if (!row.refresh_token) throw new Error("Drive token expired and no refresh token; reconnect");
   const tok = await google.googleRefreshToken(row.refresh_token);
   await db.updateIntegrationTokens({
-    agentId,
+    participantId,
     key: KEY,
     accessToken: tok.accessToken,
     refreshToken: tok.refreshToken ?? row.refresh_token,
@@ -52,32 +54,41 @@ function promptBlock(email: string, requireApproval: boolean): string {
 export const googleDriveAdapter: IntegrationAdapter = {
   key: KEY,
 
-  async resolveConfig(_ctx, rawConfig): Promise<Record<string, unknown>> {
-    return {
-      requireApproval: rawConfig.requireApproval !== false && rawConfig.requireApproval !== "false",
-    };
+  // Bind to the attaching user's Drive connection (like gmail) — 400 if not connected; a
+  // reconfigure keeps the original backing user. Stores the display email for the agent card.
+  async resolveConfig(ctx, rawConfig): Promise<Record<string, unknown>> {
+    const requireApproval = rawConfig.requireApproval !== false && rawConfig.requireApproval !== "false";
+    const existingBacking =
+      typeof ctx.existing?.backingParticipantId === "string" ? ctx.existing.backingParticipantId : null;
+    if (existingBacking) {
+      return { backingParticipantId: existingBacking, email: ctx.existing?.email ?? null, requireApproval };
+    }
+    const conn = await db.getIntegrationConnection(ctx.me.id, KEY);
+    if (!conn) throw new ApiError(400, "connect your Google Drive account in Settings first");
+    return { backingParticipantId: ctx.me.id, email: conn.external_account, requireApproval };
   },
 
   async buildGrant(frame: ConfigureFrame, agent, config): Promise<string | null> {
-    const connected = await db.getIntegrationConnection(agent.id, KEY);
-    if (!connected || !google.isConfigured()) return null;
+    const backing = typeof config.backingParticipantId === "string" ? config.backingParticipantId : null;
+    if (!backing || !google.isConfigured()) return null;
     let accessToken: string;
     try {
-      accessToken = await getValidDriveToken(agent.id);
+      accessToken = await getValidDriveToken(backing);
     } catch (e) {
       console.error(`runner[${agent.id}] configure: could not mint Drive token:`, e);
       return null;
     }
+    const email = typeof config.email === "string" && config.email ? config.email : "your Drive";
     const requireApproval = requireApprovalOf(config);
-    frame.drive = { accessToken, email: connected.external_account ?? "your Drive", requireApproval };
-    return promptBlock(connected.external_account ?? "your Drive", requireApproval);
+    frame.drive = { accessToken, email, requireApproval };
+    return promptBlock(email, requireApproval);
   },
 
-  async refreshCredentials(agent, _config, send): Promise<void> {
-    const connected = await db.getIntegrationConnection(agent.id, KEY);
-    if (!connected || !google.isConfigured()) return;
+  async refreshCredentials(agent, config, send): Promise<void> {
+    const backing = typeof config.backingParticipantId === "string" ? config.backingParticipantId : null;
+    if (!backing || !google.isConfigured()) return;
     try {
-      const accessToken = await getValidDriveToken(agent.id);
+      const accessToken = await getValidDriveToken(backing);
       send({ type: "integration_credentials", key: KEY, accessToken });
     } catch (e) {
       console.error(`runner[${agent.id}] could not refresh Drive token:`, e);

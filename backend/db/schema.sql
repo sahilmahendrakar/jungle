@@ -254,14 +254,15 @@ create table if not exists google_identities (
   updated_at        timestamptz not null default now()
 );
 
--- Per-AGENT OAuth connections for the connection-based integrations (Linear/Notion/Granola via
--- their remote MCP servers, Google Drive). A human authorizes from the agent's profile; the grant
--- belongs to the agent (unlike Gmail's per-participant google_identities). `extra` holds per-
--- provider refresh material. mcp_oauth_clients stores the OAuth client registered (once, via DCR)
--- with each remote MCP provider. See migrations/014_integration_connections.sql and
+-- Per-USER OAuth connections for the connection-based integrations (Linear/Notion/Granola via
+-- their remote MCP servers, Google Drive). You connect your accounts once in Settings (like
+-- github_identities / google_identities); an agent's integration references the connecting user by
+-- id (config.backingParticipantId), like the gmail integration. `extra` holds per-provider refresh
+-- material. mcp_oauth_clients stores the OAuth client registered (once, via DCR) per remote MCP
+-- provider. See migrations/014 + 015_integration_connections_per_user.sql and
 -- backend/src/db/connections.ts. MVP: plaintext; encrypt at rest before real multi-tenant.
 create table if not exists integration_connections (
-  agent_id          uuid not null references participants(id) on delete cascade,
+  participant_id    uuid not null references participants(id) on delete cascade,
   integration_key   text not null,
   external_account  text,
   access_token      text not null,
@@ -269,10 +270,9 @@ create table if not exists integration_connections (
   access_expires_at timestamptz,
   scopes            text,
   extra             jsonb not null default '{}'::jsonb,
-  created_by        uuid references participants(id) on delete set null,
   created_at        timestamptz not null default now(),
   updated_at        timestamptz not null default now(),
-  primary key (agent_id, integration_key)
+  primary key (participant_id, integration_key)
 );
 
 create table if not exists mcp_oauth_clients (

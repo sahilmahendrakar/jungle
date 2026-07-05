@@ -23,8 +23,9 @@ import {
   setAgentIntegration,
   removeAgentIntegration,
   getGoogleStatus,
+  getIntegrationStatuses,
 } from "../../api";
-import type { Attachment, Participant, AgentStatus, GoogleStatus } from "../../api";
+import type { Attachment, Participant, AgentStatus, GoogleStatus, IntegrationStatuses } from "../../api";
 import { IntegrationsEditor, type IntegrationDraft } from "./IntegrationsEditor";
 import {
   fmtBytes,
@@ -168,6 +169,7 @@ export function ParticipantProfilePanel({
   const [integrations, setIntegrations] = useState<IntegrationDraft[]>([]);
   const [origIntegrations, setOrigIntegrations] = useState<IntegrationDraft[]>([]);
   const [google, setGoogle] = useState<GoogleStatus | null>(null);
+  const [intStatuses, setIntStatuses] = useState<IntegrationStatuses>({});
 
   useEffect(() => {
     if (!isAgent) return;
@@ -178,10 +180,13 @@ export function ParticipantProfilePanel({
       setIntegrations(draft);
       setOrigIntegrations(draft);
     });
-    // The viewer's Google connection gates the Gmail integration card (attach/approval toggle).
+    // The viewer's connections gate the connection-based integration cards (attach/approval toggle).
     getGoogleStatus()
       .then((s) => !cancelled && setGoogle(s))
       .catch(() => !cancelled && setGoogle(null));
+    getIntegrationStatuses()
+      .then((s) => !cancelled && setIntStatuses(s))
+      .catch(() => !cancelled && setIntStatuses({}));
     return () => {
       cancelled = true;
     };
@@ -352,7 +357,7 @@ export function ParticipantProfilePanel({
               value={integrations}
               onChange={setIntegrations}
               google={google ?? undefined}
-              agentId={person.id}
+              statuses={intStatuses}
             />
             <ContextUsageCard person={person} />
             <Button

@@ -9,6 +9,11 @@ import {
   getGoogleStatus,
   googleConnectUrl,
   type GoogleStatus,
+  INTEGRATION_TYPES,
+  getIntegrationStatuses,
+  integrationConnectUrl,
+  disconnectIntegration,
+  type IntegrationStatuses,
 } from "./api";
 import { navigate } from "./route";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -17,15 +22,29 @@ import { avatarClass, initials } from "@/lib/people";
 import { cn } from "@/lib/utils";
 import {
   ArrowLeft,
+  AudioLines,
   Check,
   ExternalLink,
+  HardDrive,
   Loader2,
   LogOut,
   Mail,
+  NotebookText,
+  Plug,
   Settings as SettingsIcon,
+  SquareKanban,
   Unlink,
   X,
 } from "lucide-react";
+
+// Icon per connection-based integration (matches IntegrationsEditor's mapping).
+function connIcon(key: string) {
+  if (key === "linear") return SquareKanban;
+  if (key === "notion") return NotebookText;
+  if (key === "granola") return AudioLines;
+  if (key === "google-drive") return HardDrive;
+  return Plug;
+}
 
 function GithubMark({ className }: { className?: string }) {
   return (
@@ -53,6 +72,7 @@ function SettingsContent() {
   const [ghStatus, setGhStatus] = useState<GithubStatus | null>(null);
   const [ghLoading, setGhLoading] = useState(true);
   const [googleStatus, setGoogleStatus] = useState<GoogleStatus | null>(null);
+  const [intStatuses, setIntStatuses] = useState<IntegrationStatuses>({});
 
   const connected = ghStatus?.connected ?? !!membership?.github.connected;
   const login = ghStatus?.login ?? membership?.github.login;
@@ -116,6 +136,43 @@ function SettingsContent() {
     try {
       await disconnectGoogle();
       setGoogleStatus({ connected: false });
+    } catch (e) {
+      setError(String((e as Error).message ?? e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Connection-based integrations (Linear/Notion/Granola/Google Drive) — per-user OAuth, same
+  // round-trip shape. One status map; connect/disconnect keyed by integration.
+  useEffect(() => {
+    let cancelled = false;
+    getIntegrationStatuses()
+      .then((s) => !cancelled && setIntStatuses(s))
+      .catch(() => !cancelled && setIntStatuses({}));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function connectIntegration(key: string) {
+    setError("");
+    setBusy(true);
+    try {
+      const { url } = await integrationConnectUrl(key);
+      window.location.href = url;
+    } catch (e) {
+      setError(String((e as Error).message ?? e));
+      setBusy(false);
+    }
+  }
+
+  async function unlinkIntegration(key: string) {
+    setError("");
+    setBusy(true);
+    try {
+      await disconnectIntegration(key);
+      setIntStatuses((s) => ({ ...s, [key]: { connected: false } }));
     } catch (e) {
       setError(String((e as Error).message ?? e));
     } finally {
@@ -279,6 +336,67 @@ function SettingsContent() {
               </Button>
             )}
           </div>
+        </div>
+      </section>
+
+      {/* Connection-based integrations (Linear/Notion/Granola/Google Drive) — per-user OAuth that
+          backs the matching agent integration. Driven by the catalog. */}
+      <section className="mt-8 space-y-3">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Connections
+        </h2>
+        <div className="space-y-2">
+          {INTEGRATION_TYPES.filter((t) => t.connection === "oauth" && !t.comingSoon).map((t) => {
+            const Icon = connIcon(t.key);
+            const st = intStatuses[t.key];
+            return (
+              <div key={t.key} className="rounded-xl border bg-card p-4">
+                <div className="flex items-center gap-3">
+                  <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground">
+                    <Icon className="size-5" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-medium">Connect {t.name}</div>
+                    {st?.connected ? (
+                      <div className="flex items-center gap-1 text-xs text-emerald-600">
+                        <Check className="size-3 shrink-0" />
+                        <span className="truncate">
+                          Connected{st.externalAccount ? ` · ${st.externalAccount}` : ""}
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="text-xs text-muted-foreground">{t.description}</div>
+                    )}
+                  </div>
+                  {st?.connected ? (
+                    <Button
+                      data-testid={`settings-disconnect-${t.key}`}
+                      onClick={() => unlinkIntegration(t.key)}
+                      disabled={busy}
+                      size="icon"
+                      variant="ghost"
+                      title={`Disconnect ${t.name}`}
+                      aria-label={`Disconnect ${t.name}`}
+                      className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
+                    >
+                      <Unlink className="size-4" />
+                    </Button>
+                  ) : (
+                    <Button
+                      data-testid={`settings-connect-${t.key}`}
+                      onClick={() => connectIntegration(t.key)}
+                      disabled={busy}
+                      size="sm"
+                      className="shrink-0 gap-1.5"
+                    >
+                      <Icon className="size-3.5" />
+                      {busy ? "Redirecting…" : "Connect"}
+                    </Button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
       </section>
 
