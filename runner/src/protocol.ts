@@ -82,6 +82,35 @@ export interface ReadHistoryFrame {
   };
 }
 
+// Schedule tools (schedule_create / schedule_list / schedule_cancel): the agent manages its own
+// standing scheduled turns. Same request/result correlation as read_history — a runner-chosen
+// `id`. All validation (cron/timezone/caps) happens backend-side; the tool passes raw strings.
+export interface ScheduleCreateFrame {
+  type: "schedule_create";
+  id: string;
+  // Exactly one cadence: cron+timezone (recurring) or runAt (one-shot). `channel` ("#name")
+  // sets the schedule's context channel; omitted -> the channel this turn was dispatched from.
+  input: {
+    prompt: string;
+    cron?: string;
+    timezone?: string;
+    runAt?: string;
+    channel?: string;
+  };
+}
+
+export interface ScheduleListFrame {
+  type: "schedule_list";
+  id: string;
+  input: Record<string, never>;
+}
+
+export interface ScheduleCancelFrame {
+  type: "schedule_cancel";
+  id: string;
+  input: { scheduleId: string };
+}
+
 export interface ConfirmRequestFrame {
   type: "confirm_request";
   id: string;
@@ -121,6 +150,9 @@ export type RunnerToBackend =
   | EventFrame
   | SendMessageFrame
   | ReadHistoryFrame
+  | ScheduleCreateFrame
+  | ScheduleListFrame
+  | ScheduleCancelFrame
   | ConfirmRequestFrame
   | TurnDoneFrame
   | ContextUsageFrame
@@ -189,6 +221,26 @@ export interface ReadHistoryResultFrame {
   result: { ok: boolean; error?: string; text?: string; oldestSeq?: string | null };
 }
 
+export interface ScheduleCreateResultFrame {
+  type: "schedule_create_result";
+  id: string;
+  result: { ok: boolean; error?: string; scheduleId?: string; nextRunAt?: string };
+}
+
+export interface ScheduleListResultFrame {
+  type: "schedule_list_result";
+  id: string;
+  // text = a preformatted listing (id, cadence, next run, last result, prompt), like
+  // read_history's transcript text.
+  result: { ok: boolean; error?: string; text?: string };
+}
+
+export interface ScheduleCancelResultFrame {
+  type: "schedule_cancel_result";
+  id: string;
+  result: { ok: boolean; error?: string };
+}
+
 export interface ConfirmResultFrame {
   type: "confirm_result";
   id: string;
@@ -213,5 +265,8 @@ export type BackendToRunner =
   | SetEffortFrame
   | SendMessageResultFrame
   | ReadHistoryResultFrame
+  | ScheduleCreateResultFrame
+  | ScheduleListResultFrame
+  | ScheduleCancelResultFrame
   | ConfirmResultFrame
   | GitCredentialsFrame;
