@@ -5,6 +5,7 @@ import { GoogleSignIn } from "./GoogleSignIn";
 import { CreateWorkspace, JoinWorkspace, GithubStep } from "./Onboarding";
 import { App } from "./App";
 import { Settings } from "./Settings";
+import { Scheduled } from "./Scheduled";
 import { setActiveWorkspaceId, type Membership } from "./api";
 import { usePath, navigate } from "./route";
 
@@ -87,6 +88,12 @@ export function AuthGate() {
     memberships.find((m) => m.workspace.id === activeWsId) ?? memberships[0];
 
   if (path === "/settings") return <Settings />;
+  if (path === "/scheduled") {
+    // The Scheduled page calls workspace-scoped API + opens its own WS, so scope the API layer
+    // to the active workspace before it renders (unlike Settings, which is account-level).
+    setActiveWorkspaceId(membership.workspace.id);
+    return <Scheduled workspaceId={membership.workspace.id} />;
+  }
   if (!membership.github.connected && !ghDismissed) return <GithubStep onSkip={dismissGithub} />;
 
   // Set the active workspace on the API layer before App renders so its data loads (and WS

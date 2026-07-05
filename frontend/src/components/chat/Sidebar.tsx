@@ -1,4 +1,4 @@
-import { Bot, Hash, LogOut, MessagesSquare, PanelLeftClose } from "lucide-react";
+import { Bot, CalendarClock, Hash, LogOut, MessagesSquare, PanelLeftClose } from "lucide-react";
 import type { Channel, Participant, Membership } from "../../api";
 import { firebaseEnabled } from "../../firebase";
 import { EmptyHint, NavItem, PersonAvatar, SectionHeader } from "./panels";
@@ -31,6 +31,7 @@ export function Sidebar({
   onSelectChannel,
   onOpenDm,
   onOpenThreads,
+  onOpenScheduled,
   onNewChannel,
   onAddAgent,
   onCollapse,
@@ -60,6 +61,7 @@ export function Sidebar({
   onSelectChannel: (id: string) => void;
   onOpenDm: (otherId: string) => void;
   onOpenThreads: () => void;
+  onOpenScheduled: () => void;
   onNewChannel: () => void;
   onAddAgent: () => void;
   onCollapse: () => void;
@@ -131,6 +133,14 @@ export function Sidebar({
               unread={totalThreadUnread > 0}
               badgeCount={totalThreadUnread}
               badgeMention={totalThreadUnread > 0}
+            />
+            {/* Scheduled: workspace-wide scheduled agent turns (its own /scheduled page). */}
+            <NavItem
+              testId="scheduled-nav"
+              active={false}
+              onClick={onOpenScheduled}
+              icon={<CalendarClock className="size-4 opacity-70" />}
+              label="Scheduled"
             />
 
             <div className="h-3" />

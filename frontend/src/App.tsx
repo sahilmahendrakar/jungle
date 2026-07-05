@@ -28,6 +28,7 @@ import {
 } from "./lib/chat";
 import { SignIn } from "./SignIn";
 import { SettingsPanel } from "./Settings";
+import { navigate } from "./route";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { AgentActivity } from "./AgentActivity";
@@ -639,6 +640,7 @@ export function App({
         onSelectChannel={selectAndClose}
         onOpenDm={openDm}
         onOpenThreads={openThreadsList}
+        onOpenScheduled={() => navigate("/scheduled")}
         onNewChannel={() => setShowNew(true)}
         onAddAgent={() => setShowAddAgent(true)}
         onCollapse={() => {
