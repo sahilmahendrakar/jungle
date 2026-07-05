@@ -90,7 +90,11 @@ export function AuthGate() {
     memberships.find((m) => m.workspace.id === activeWsId) ?? memberships[0];
 
   if (path === "/settings") return <Settings />;
-  if (!membership.github.connected && !ghDismissed) return <GithubStep onSkip={dismissGithub} />;
+  if (!membership.github.connected && !ghDismissed && path !== "/scheduled")
+    return <GithubStep onSkip={dismissGithub} />;
+  // /scheduled renders inside <App> as a main-column view (sidebars intact), not a standalone
+  // page — App reads the path and swaps its main region. It still needs the API layer scoped to
+  // the active workspace, which the setActiveWorkspaceId below (before App renders) handles.
 
   // Set the active workspace on the API layer before App renders so its data loads (and WS
   // handshake) are scoped correctly. Keying App to the participant remounts it on a workspace

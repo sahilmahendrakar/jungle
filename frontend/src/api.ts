@@ -13,11 +13,13 @@ import type {
   Membership,
   InviteInfo,
   AgentIntegration,
+  Schedule,
 } from "@jungle/shared";
 export { INTEGRATION_TYPES, getIntegrationType } from "@jungle/shared";
 export type { IntegrationType } from "@jungle/shared";
 
 export type { Participant, Attachment, UnreadThread, AgentEvent, AgentStatus, AgentIntegration };
+export type { Schedule };
 export type { Me, GoogleProfile, Workspace, Membership, InviteInfo };
 // A message as delivered to the client (attachments carry signed download urls).
 export type Message = WireMessage;
@@ -430,6 +432,63 @@ export function deleteChannel(channelId: string): Promise<{ ok: boolean }> {
     auth: true,
     devAuth: true,
     errorMessage: "failed to delete channel",
+  });
+}
+
+// --- Schedules (scheduled agent turns) ---
+
+export interface ScheduleInput {
+  agentId: string;
+  channelId: string;
+  prompt: string;
+  cron?: string;
+  timezone?: string;
+  runAt?: string;
+}
+
+export function listSchedules(): Promise<Schedule[]> {
+  return request<{ schedules: Schedule[] }>(`/api/schedules`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load schedules",
+  }).then((r) => r.schedules);
+}
+
+export function createSchedule(body: ScheduleInput): Promise<Schedule> {
+  return request<Schedule>(`/api/schedules`, {
+    json: body,
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to create schedule",
+  });
+}
+
+export function updateSchedule(
+  id: string,
+  patch: {
+    prompt?: string;
+    cron?: string | null;
+    timezone?: string | null;
+    runAt?: string | null;
+    channelId?: string;
+    paused?: boolean;
+  },
+): Promise<Schedule> {
+  return request<Schedule>(`/api/schedules/${id}`, {
+    method: "PATCH",
+    json: patch,
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to update schedule",
+  });
+}
+
+export function deleteSchedule(id: string): Promise<{ ok: boolean }> {
+  return request(`/api/schedules/${id}`, {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to delete schedule",
   });
 }
 

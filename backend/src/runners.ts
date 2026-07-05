@@ -64,6 +64,28 @@ export interface ReadHistoryResult {
   oldestSeq?: string | null;
 }
 export type ConfirmDecision = { result: "allow" | "deny"; denyMessage?: string; updatedInput?: unknown };
+export interface ScheduleCreateInput {
+  prompt?: string;
+  cron?: string;
+  timezone?: string;
+  runAt?: string;
+  channel?: string;
+}
+export interface ScheduleCreateResult {
+  ok: boolean;
+  error?: string;
+  scheduleId?: string;
+  nextRunAt?: string;
+}
+export interface ScheduleListResult {
+  ok: boolean;
+  error?: string;
+  text?: string;
+}
+export interface ScheduleCancelResult {
+  ok: boolean;
+  error?: string;
+}
 
 export interface RunnerHooks {
   // Post a message the agent asked to send (same routing/cascade as the MA path's onSend).
@@ -76,6 +98,19 @@ export interface RunnerHooks {
     agent: { id: string; handle: string; workspace_id: string },
     input: ReadHistoryInput,
   ) => Promise<ReadHistoryResult>;
+  // The agent manages its own scheduled turns (schedule_create/list/cancel tools). Validation
+  // and guardrails live in services/scheduler.ts.
+  scheduleCreate: (
+    agent: { id: string; handle: string; workspace_id: string },
+    input: ScheduleCreateInput,
+  ) => Promise<ScheduleCreateResult>;
+  scheduleList: (
+    agent: { id: string; handle: string; workspace_id: string },
+  ) => Promise<ScheduleListResult>;
+  scheduleCancel: (
+    agent: { id: string; handle: string; workspace_id: string },
+    input: { scheduleId?: string },
+  ) => Promise<ScheduleCancelResult>;
   // Surface a tool-confirmation to humans and resolve when one decides. `agentId`+`id`
   // let the decision endpoint route the result back to the right runner.
   requestConfirm: (
@@ -90,6 +125,10 @@ export interface RunnerHooks {
   // A turn died (SDK crash, OOM kill, API error). Tell the humans who were waiting —
   // otherwise the agent just goes silent mid-task.
   onTurnFailed: (agent: { id: string; handle: string }, error: string) => void;
+  // A turn ended, ok or not — fires for EVERY turn_done (unlike onTurnFailed). Carries the
+  // turnId so consumers can attribute the result to the inbox items (and, via their persisted
+  // context, the schedules) that fed the turn.
+  onTurnFinished?: (agentId: string, turnId: string, ok: boolean, error?: string) => void;
   // The agent's live status changed (see AgentStatus). Backend broadcasts it to app sockets.
   onStatusChanged: (agentId: string, status: AgentStatus) => void;
 }
@@ -121,6 +160,10 @@ interface RunnerConn {
   // Pending confirmations from this runner, keyed by the runner-chosen confirm id, so a
   // late/duplicate decision is a no-op.
   pendingConfirms: Set<string>;
+  // The turn this socket most recently reported via `turn_started`. Mid-turn follow-up batches
+  // emit `consumed` with no accompanying `turn_started`, so the consumed handler attributes
+  // them to this turn.
+  currentTurnId: string | null;
   // Timestamp this conn most recently entered "idle" (null while running or never yet idle
   // on this socket). The idle-stop sweeper reads this to decide when to stop the machine.
   idleSince: number | null;
@@ -267,7 +310,18 @@ export function systemPromptAppend(
     `/workspace/attachments/ (each queued message lists the exact paths). To send files or ` +
     `images to people, pass workspace file paths in send_message's \`files\` parameter, e.g. ` +
     `files:["/workspace/repo/screenshot.png"] — images render inline in the chat, other file ` +
-    `types become downloads. Max 10 files, 25MB each.`;
+    `types become downloads. Max 10 files, 25MB each.\n\n` +
+    `— Schedules —\n` +
+    `You can schedule future work for yourself with schedule_create: recurring (a 5-field cron ` +
+    `expression + IANA timezone) or one-time (runAt, ISO-8601). IMPORTANT: a scheduled turn runs ` +
+    `with NO memory of the conversation where it was created — write the prompt as a complete, ` +
+    `self-contained instruction for a future you (what to do, where to post results, any repos, ` +
+    `links, or channel names it needs). When it fires you'll receive that instruction verbatim; ` +
+    `do the work, post results with send_message if there's something worth saying, and finish ` +
+    `silently when there isn't. Review with schedule_list, remove with schedule_cancel. Limits: ` +
+    `10 schedules per agent, recurring at most every 15 minutes. When someone asks you to ` +
+    `"remind me", "check every morning", or "do X weekly", use these tools — never just promise ` +
+    `to remember.`;
   if (githubRepo) {
     const gitName = agent.display_name || agent.handle;
     const gitEmail = `${agent.handle}@agents.jungle.dev`;
@@ -618,6 +672,7 @@ async function accept(ws: WebSocket, token: string): Promise<void> {
     sentInbox: new Set(),
     pendingConfirms: new Set(),
     idleSince: null,
+    currentTurnId: null,
   };
   conns.set(agent.id, conn);
   console.log(`runner[${agent.id}] (@${agent.handle}) connected`);
@@ -659,6 +714,7 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         conn.sessionId = frame.sessionId ?? null;
         setConnState(conn, "idle");
         conn.sentInbox.clear(); // reconnect: allow re-sending unacked inbox rows
+        conn.currentTurnId = null;
         clearMachine(agentId); // a live hello always wins over stale starting/stopped state
         emitStatus(agentId);
         send(conn, await buildConfigure(agent));
@@ -675,15 +731,18 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         break;
       }
       case "turn_started": {
-        // The runner is consuming these inbox items in turn `frame.turnId`. Informational;
-        // durable delivery is confirmed by `consumed`.
+        // The runner is consuming these inbox items in turn `frame.turnId`. Record the turn on
+        // the rows (turn-result attribution) and on the conn (mid-turn follow-up batches emit
+        // `consumed` with no turn_started). Durable delivery is still confirmed by `consumed`.
+        conn.currentTurnId = frame.turnId;
+        await db.markInboxTurnStarted(agentId, Array.isArray(frame.inboxIds) ? frame.inboxIds : [], frame.turnId);
         break;
       }
       case "consumed": {
         const ids: string[] = Array.isArray(frame.inboxIds) ? frame.inboxIds : [];
-        // `consumed` carries no turnId (turn_started already recorded it); markInboxConsumed
-        // coalesces, so a null here preserves any turn_id already set.
-        await db.markInboxConsumed(agentId, ids, null);
+        // `consumed` carries no turnId of its own; attribute to the socket's current turn
+        // (markInboxConsumed coalesces, so rows already stamped by turn_started keep theirs).
+        await db.markInboxConsumed(agentId, ids, conn.currentTurnId);
         break;
       }
       case "event": {
@@ -732,6 +791,61 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
           }
         }
         send(conn, { type: "read_history_result", id: frame.id, result });
+        break;
+      }
+      case "schedule_create": {
+        const agent = await db.getAgentRow(agentId);
+        let result: ScheduleCreateResult;
+        if (!hooks || !agent) {
+          result = { ok: false, error: "backend not ready" };
+        } else {
+          try {
+            result = await hooks.scheduleCreate(
+              { id: agent.id, handle: agent.handle, workspace_id: agent.workspace_id },
+              (frame.input ?? {}) as ScheduleCreateInput,
+            );
+          } catch (e) {
+            result = { ok: false, error: String((e as Error).message ?? e) };
+          }
+        }
+        send(conn, { type: "schedule_create_result", id: frame.id, result });
+        break;
+      }
+      case "schedule_list": {
+        const agent = await db.getAgentRow(agentId);
+        let result: ScheduleListResult;
+        if (!hooks || !agent) {
+          result = { ok: false, error: "backend not ready" };
+        } else {
+          try {
+            result = await hooks.scheduleList({
+              id: agent.id,
+              handle: agent.handle,
+              workspace_id: agent.workspace_id,
+            });
+          } catch (e) {
+            result = { ok: false, error: String((e as Error).message ?? e) };
+          }
+        }
+        send(conn, { type: "schedule_list_result", id: frame.id, result });
+        break;
+      }
+      case "schedule_cancel": {
+        const agent = await db.getAgentRow(agentId);
+        let result: ScheduleCancelResult;
+        if (!hooks || !agent) {
+          result = { ok: false, error: "backend not ready" };
+        } else {
+          try {
+            result = await hooks.scheduleCancel(
+              { id: agent.id, handle: agent.handle, workspace_id: agent.workspace_id },
+              (frame.input ?? {}) as { scheduleId?: string },
+            );
+          } catch (e) {
+            result = { ok: false, error: String((e as Error).message ?? e) };
+          }
+        }
+        send(conn, { type: "schedule_cancel_result", id: frame.id, result });
         break;
       }
       case "confirm_request": {
@@ -783,6 +897,8 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
             );
           }
         }
+        hooks?.onTurnFinished?.(agentId, frame.turnId, !!frame.ok,
+          frame.ok ? undefined : String(frame.error ?? "unknown error"));
         // A turn finished; more work may have queued while it ran.
         await drain(agentId);
         break;

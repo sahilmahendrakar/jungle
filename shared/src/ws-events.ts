@@ -92,6 +92,14 @@ export interface ToolConfirmationResolvedEvent {
   by?: string;
 }
 
+// A schedule in the recipient's workspace changed (created/updated/deleted, including fires and
+// auto-pauses, which are updates). Coarse by design: clients refetch the schedule list.
+export interface ScheduleChangedEvent {
+  type: "schedule_changed";
+  scheduleId: string;
+  action: "created" | "updated" | "deleted";
+}
+
 export type ServerEvent =
   | ConnectedEvent
   | ErrorEvent
@@ -104,7 +112,8 @@ export type ServerEvent =
   | AgentEventEvent
   | AgentContextEvent
   | ToolConfirmationRequestEvent
-  | ToolConfirmationResolvedEvent;
+  | ToolConfirmationResolvedEvent
+  | ScheduleChangedEvent;
 
 // ---- Client -> server ----
 

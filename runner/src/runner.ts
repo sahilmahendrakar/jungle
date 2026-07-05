@@ -28,6 +28,9 @@ import {
   createJungleMcpServer,
   type SendMessageResult,
   type ReadHistoryResult,
+  type ScheduleCreateResult,
+  type ScheduleListResult,
+  type ScheduleCancelResult,
 } from "./send-message-tool.js";
 import { createGmailMcpServer } from "./gmail-tool.js";
 import { applyGitCredentials, cloneRepoIfNeeded, getGhToken } from "./git.js";
@@ -67,6 +70,10 @@ const SAFE_TOOLS = new Set([
   "ListMcpResources", "ReadMcpResource", "mcp__jungle__read_history",
   // Gmail read/search: never mutate the mailbox, so no confirmation.
   "mcp__gmail__gmail_search", "mcp__gmail__gmail_read_message",
+  // Schedule tools are bounded jungle-app operations with backend-enforced guardrails (caps,
+  // min interval, prompt cap) and full human visibility/undo on the Scheduled page — a confirm
+  // card would be noise, not safety.
+  "mcp__jungle__schedule_create", "mcp__jungle__schedule_list", "mcp__jungle__schedule_cancel",
 ]);
 
 // Gmail write tools: gated through the human confirmation card when the integration's
@@ -168,6 +175,9 @@ export class Runner {
   // In-flight request/response correlation.
   private pendingSendMessages = new Map<string, (r: SendMessageResult) => void>();
   private pendingReadHistory = new Map<string, (r: ReadHistoryResult) => void>();
+  private pendingScheduleCreate = new Map<string, (r: ScheduleCreateResult) => void>();
+  private pendingScheduleList = new Map<string, (r: ScheduleListResult) => void>();
+  private pendingScheduleCancel = new Map<string, (r: ScheduleCancelResult) => void>();
   private pendingConfirms = new Map<
     string,
     (r: { allow: boolean; message?: string; updatedInput?: Record<string, unknown> }) => void
@@ -266,6 +276,30 @@ export class Runner {
         const resolve = this.pendingReadHistory.get(frame.id);
         if (resolve) {
           this.pendingReadHistory.delete(frame.id);
+          resolve(frame.result);
+        }
+        break;
+      }
+      case "schedule_create_result": {
+        const resolve = this.pendingScheduleCreate.get(frame.id);
+        if (resolve) {
+          this.pendingScheduleCreate.delete(frame.id);
+          resolve(frame.result);
+        }
+        break;
+      }
+      case "schedule_list_result": {
+        const resolve = this.pendingScheduleList.get(frame.id);
+        if (resolve) {
+          this.pendingScheduleList.delete(frame.id);
+          resolve(frame.result);
+        }
+        break;
+      }
+      case "schedule_cancel_result": {
+        const resolve = this.pendingScheduleCancel.get(frame.id);
+        if (resolve) {
+          this.pendingScheduleCancel.delete(frame.id);
           resolve(frame.result);
         }
         break;
@@ -439,7 +473,13 @@ export class Runner {
     // auto-allowed; write tools are auto-allowed only when the user turned approval off — otherwise
     // they're left off allowedTools so they route through the confirmation card (preToolUseHook).
     const gmailServer = this.gmailToken ? this.buildGmailServer() : null;
-    const allowedTools = ["mcp__jungle__send_message", "mcp__jungle__read_history"];
+    const allowedTools = [
+      "mcp__jungle__send_message",
+      "mcp__jungle__read_history",
+      "mcp__jungle__schedule_create",
+      "mcp__jungle__schedule_list",
+      "mcp__jungle__schedule_cancel",
+    ];
     if (gmailServer) {
       allowedTools.push(...GMAIL_READ_TOOLS);
       if (this.gmailSettings && !this.gmailSettings.requireSendApproval) {
@@ -556,15 +596,18 @@ export class Runner {
     this.maybeStartTurn();
   }
 
-  // Build the in-process "jungle" SDK-MCP server (send_message + read_history), wired to this
-  // runner's backend bridges. A fresh instance is used per turn and per reconnect — each query()
-  // binds a server to its own transport, so instances must not be shared across connections.
+  // Build the in-process "jungle" SDK-MCP server (send_message, read_history, schedule_*), wired
+  // to this runner's backend bridges. A fresh instance is used per turn and per reconnect — each
+  // query() binds a server to its own transport, so instances must not be shared across connections.
   private buildJungleServer() {
-    return createJungleMcpServer(
-      (id, input) => this.bridgeSendMessage(id, input),
-      (filePath) => uploadFile(this.httpBase, this.env.token, this.workspace, filePath),
-      (id, input) => this.bridgeReadHistory(id, input),
-    );
+    return createJungleMcpServer({
+      sendMessage: (id, input) => this.bridgeSendMessage(id, input),
+      uploadFile: (filePath) => uploadFile(this.httpBase, this.env.token, this.workspace, filePath),
+      readHistory: (id, input) => this.bridgeReadHistory(id, input),
+      scheduleCreate: (id, input) => this.bridgeScheduleCreate(id, input),
+      scheduleList: (id) => this.bridgeScheduleList(id),
+      scheduleCancel: (id, input) => this.bridgeScheduleCancel(id, input),
+    });
   }
 
   // The in-process "gmail" SDK-MCP server (gmail_search/read/send/draft/modify), reading the
@@ -885,6 +928,62 @@ export class Runner {
       }
       setTimeout(() => {
         if (this.pendingReadHistory.delete(id)) {
+          resolve({ ok: false, error: "timed out waiting for backend" });
+        }
+      }, 60_000).unref?.();
+    });
+  }
+
+  // ---- schedule_* bridges ----
+
+  private bridgeScheduleCreate(
+    id: string,
+    input: { prompt: string; cron?: string; timezone?: string; runAt?: string; channel?: string },
+  ): Promise<ScheduleCreateResult> {
+    return new Promise((resolve) => {
+      this.pendingScheduleCreate.set(id, resolve);
+      const sent = this.conn.send({ type: "schedule_create", id, input });
+      if (!sent) {
+        this.pendingScheduleCreate.delete(id);
+        resolve({ ok: false, error: "backend unreachable" });
+      }
+      setTimeout(() => {
+        if (this.pendingScheduleCreate.delete(id)) {
+          resolve({ ok: false, error: "timed out waiting for backend" });
+        }
+      }, 60_000).unref?.();
+    });
+  }
+
+  private bridgeScheduleList(id: string): Promise<ScheduleListResult> {
+    return new Promise((resolve) => {
+      this.pendingScheduleList.set(id, resolve);
+      const sent = this.conn.send({ type: "schedule_list", id, input: {} });
+      if (!sent) {
+        this.pendingScheduleList.delete(id);
+        resolve({ ok: false, error: "backend unreachable" });
+      }
+      setTimeout(() => {
+        if (this.pendingScheduleList.delete(id)) {
+          resolve({ ok: false, error: "timed out waiting for backend" });
+        }
+      }, 60_000).unref?.();
+    });
+  }
+
+  private bridgeScheduleCancel(
+    id: string,
+    input: { scheduleId: string },
+  ): Promise<ScheduleCancelResult> {
+    return new Promise((resolve) => {
+      this.pendingScheduleCancel.set(id, resolve);
+      const sent = this.conn.send({ type: "schedule_cancel", id, input });
+      if (!sent) {
+        this.pendingScheduleCancel.delete(id);
+        resolve({ ok: false, error: "backend unreachable" });
+      }
+      setTimeout(() => {
+        if (this.pendingScheduleCancel.delete(id)) {
           resolve({ ok: false, error: "timed out waiting for backend" });
         }
       }, 60_000).unref?.();

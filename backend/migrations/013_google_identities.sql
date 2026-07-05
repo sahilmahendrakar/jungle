@@ -1,4 +1,4 @@
--- 011_google_identities.sql — a participant's connected Google account (Gmail OAuth).
+-- 013_google_identities.sql — a participant's connected Google account (Gmail OAuth).
 --
 -- Per-user (not per-agent) OAuth identity, mirroring github_identities: one connected Google
 -- account per participant, obtained via our Google OAuth flow with offline access (→ refresh

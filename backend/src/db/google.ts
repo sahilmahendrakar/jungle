@@ -1,6 +1,6 @@
 import { pool } from "./pool";
 
-// A participant's connected Google account (see migrations/011_google_identities.sql). Mirrors
+// A participant's connected Google account (see migrations/013_google_identities.sql). Mirrors
 // github.ts's GithubIdentity: one per participant, tokens renewed on demand from the refresh token.
 export interface GoogleIdentity {
   participant_id: string;

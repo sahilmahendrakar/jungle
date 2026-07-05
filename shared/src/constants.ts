@@ -42,3 +42,17 @@ export function isAllowedEffort(effort: string): effort is EffortLevel {
 export function isSdkMode(mode: string): mode is PermissionMode {
   return (SDK_MODES as readonly string[]).includes(mode);
 }
+
+// --- Schedules (scheduled agent turns) ---
+
+// Live schedules per agent ("live" = could still fire: pending or paused; completed one-shots
+// don't count). A standing-spend cap, enforced backend-side on both the tool and HTTP paths.
+export const MAX_SCHEDULES_PER_AGENT = 10;
+// Tightest recurring cadence allowed. Validated by sampling the next few fires of the cron
+// expression and requiring every consecutive gap to be at least this.
+export const MIN_SCHEDULE_INTERVAL_MINUTES = 15;
+// A schedule whose turns fail this many times in a row is auto-paused (with a channel notice)
+// so a crash-looping schedule can't silently burn tokens forever.
+export const SCHEDULE_MAX_CONSECUTIVE_FAILURES = 3;
+// The standing instruction must be self-contained but bounded (it's inlined into turn prompts).
+export const SCHEDULE_PROMPT_MAX_LENGTH = 4000;
