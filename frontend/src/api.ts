@@ -12,9 +12,12 @@ import type {
   Workspace,
   Membership,
   InviteInfo,
+  AgentIntegration,
 } from "@jungle/shared";
+export { INTEGRATION_TYPES, getIntegrationType } from "@jungle/shared";
+export type { IntegrationType } from "@jungle/shared";
 
-export type { Participant, Attachment, UnreadThread, AgentEvent, AgentStatus };
+export type { Participant, Attachment, UnreadThread, AgentEvent, AgentStatus, AgentIntegration };
 export type { Me, GoogleProfile, Workspace, Membership, InviteInfo };
 // A message as delivered to the client (attachments carry signed download urls).
 export type Message = WireMessage;
@@ -161,12 +164,13 @@ export function listParticipants(): Promise<Participant[]> {
   });
 }
 
-// Create a human participant, or (kind "agent", optional repo/model/mode) a cloud agent.
+// Create a human participant, or (kind "agent") an agent. An agent starts as a blank chat
+// agent unless `integrations` attaches one or more (e.g. [{key: "github", config: {repo}}]).
 export function createParticipant(p: {
   kind: "human" | "agent";
   handle: string;
   displayName: string;
-  repo?: string;
+  integrations?: Array<{ key: string; config: Record<string, unknown> }>;
   model?: string;
   mode?: string;
 }): Promise<Participant> {
@@ -176,12 +180,45 @@ export function createParticipant(p: {
       ? {
           handle: p.handle,
           displayName: p.displayName,
-          ...(p.repo ? { repo: p.repo } : {}),
+          ...(p.integrations?.length ? { integrations: p.integrations } : {}),
           ...(p.model ? { model: p.model } : {}),
           ...(p.mode ? { mode: p.mode } : {}),
         }
       : { kind: "human", handle: p.handle, displayName: p.displayName };
   return request<Participant>(path, { json, auth: true, devAuth: true, errorMessage: "create failed" });
+}
+
+// This agent's attached integrations (the settings panel's Integrations section).
+export function listAgentIntegrations(agentId: string): Promise<AgentIntegration[]> {
+  return request<AgentIntegration[]>(`/api/agents/${agentId}/integrations`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load integrations",
+  });
+}
+
+// Attach or reconfigure one integration on an agent (e.g. key "github", config {repo}).
+export function setAgentIntegration(
+  agentId: string,
+  key: string,
+  config: Record<string, unknown>,
+): Promise<AgentIntegration> {
+  return request<AgentIntegration>(`/api/agents/${agentId}/integrations/${key}`, {
+    method: "PUT",
+    json: { config },
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to add integration",
+  });
+}
+
+export function removeAgentIntegration(agentId: string, key: string): Promise<{ ok: boolean }> {
+  return request(`/api/agents/${agentId}/integrations/${key}`, {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to remove integration",
+  });
 }
 
 // Update an agent's editable config from its profile page. `mode` is applied live; for sdk

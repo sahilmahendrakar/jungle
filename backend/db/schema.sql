@@ -226,3 +226,15 @@ create index if not exists attachments_orphan_idx on attachments (created_at)
 
 -- Inbox items carry the triggering message's attachment refs (jsonb); URLs signed at drain.
 alter table agent_inbox add column if not exists attachments jsonb;
+
+-- An agent is not necessarily a coding agent: it starts as a blank chat agent (no rows here)
+-- and can have zero or more integrations attached, each with its own config (github's config
+-- holds `repo`). Replaces participants.repo as the source of truth for what an agent can do.
+-- See migrations/010_agent_integrations.sql and backend/src/db/integrations.ts.
+create table if not exists agent_integrations (
+  agent_id        uuid not null references participants(id) on delete cascade,
+  integration_key text not null,
+  config          jsonb not null default '{}',
+  created_at      timestamptz not null default now(),
+  primary key (agent_id, integration_key)
+);
