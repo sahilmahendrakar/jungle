@@ -129,7 +129,8 @@ function ConnectionCardBody({
     };
   }, [agentId, type.key]);
 
-  const approvalToggle = (
+  // Read-only integrations (Granola) can't change anything, so there's nothing to approve.
+  const approvalToggle = type.readOnly ? null : (
     <label className="flex items-center gap-2 text-xs text-foreground">
       <input
         type="checkbox"

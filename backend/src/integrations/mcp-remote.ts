@@ -13,16 +13,29 @@ import { mcpConnection, getValidMcpToken, type McpProviderSpec } from "./mcp-oau
 export interface McpAdapterSpec extends McpProviderSpec {
   // Read-only tool names auto-approved without a confirmation card, as bare tool names (the runner
   // prefixes mcp__<key>__). The rest route through the confirmation card when requireApproval is on.
+  // Ignored when `readOnly` is set (all tools are safe).
   safeTools: string[];
   // A short phrase for the system prompt describing what this integration's tools do.
   toolsHint: string;
+  // The provider exposes only read-only tools — nothing to approve. All tools run freely and the
+  // approval toggle is irrelevant (see the catalog's readOnly flag for the UI side).
+  readOnly?: boolean;
 }
 
-function requireApprovalOf(config: Record<string, unknown>): boolean {
+function requireApprovalOf(spec: McpAdapterSpec, config: Record<string, unknown>): boolean {
+  if (spec.readOnly) return false; // read-only integration: nothing to approve
   return config.requireApproval !== false; // default on
 }
 
 function promptBlock(spec: McpAdapterSpec, requireApproval: boolean): string {
+  if (spec.readOnly) {
+    return (
+      `\n\n— ${spec.displayName} —\n` +
+      `You're connected to ${spec.displayName} through its MCP server; its tools appear as ` +
+      `mcp__${spec.key}__* (${spec.toolsHint}). These are read-only. Only use them when you're ` +
+      `actually asked to.`
+    );
+  }
   return (
     `\n\n— ${spec.displayName} —\n` +
     `You're connected to ${spec.displayName} through its MCP server; its tools appear as ` +
@@ -40,9 +53,10 @@ export function createMcpRemoteAdapter(spec: McpAdapterSpec): IntegrationAdapter
   return {
     key: spec.key,
 
-    // Attach/reconfigure: the only per-agent config is the approval toggle. The OAuth grant lives
-    // in integration_connections, set by the connect flow — not here.
+    // Attach/reconfigure: the only per-agent config is the approval toggle (moot for read-only
+    // integrations). The OAuth grant lives in integration_connections, set by the connect flow.
     async resolveConfig(_ctx, rawConfig): Promise<Record<string, unknown>> {
+      if (spec.readOnly) return { requireApproval: false };
       return {
         requireApproval: rawConfig.requireApproval !== false && rawConfig.requireApproval !== "false",
       };
@@ -58,7 +72,7 @@ export function createMcpRemoteAdapter(spec: McpAdapterSpec): IntegrationAdapter
         console.error(`runner[${agent.id}] configure: could not mint ${spec.key} token:`, e);
         return null;
       }
-      const requireApproval = requireApprovalOf(config);
+      const requireApproval = requireApprovalOf(spec, config);
       (frame.mcpIntegrations ??= []).push({
         key: spec.key,
         url: spec.mcpUrl,

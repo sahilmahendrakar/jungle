@@ -6,7 +6,7 @@
 import { registerAdapter } from "./registry";
 import { githubAdapter } from "./github";
 import { gmailAdapter } from "./gmail";
-import { linearAdapter } from "./providers";
+import { linearAdapter, notionAdapter, granolaAdapter } from "./providers";
 
 export { registerAdapter, adapterFor, allAdapters } from "./registry";
 export type { IntegrationAdapter, ResolveConfigCtx } from "./types";
@@ -15,4 +15,6 @@ export function registerBuiltinIntegrations(): void {
   registerAdapter(githubAdapter);
   registerAdapter(gmailAdapter);
   registerAdapter(linearAdapter);
+  registerAdapter(notionAdapter);
+  registerAdapter(granolaAdapter);
 }

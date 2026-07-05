@@ -23,3 +23,29 @@ export const linearAdapter = createMcpRemoteAdapter({
     "list_cycles", "list_issue_statuses", "get_issue_status", "list_issue_labels",
   ],
 } satisfies McpAdapterSpec);
+
+// Notion hosted MCP (https://developers.notion.com/guides/mcp). No scopes advertised → request
+// none. Read tools search/fetch; write tools create/update pages & databases & comments.
+export const notionAdapter = createMcpRemoteAdapter({
+  key: "notion",
+  displayName: "Notion",
+  mcpUrl: "https://mcp.notion.com/mcp",
+  toolsHint: "search and fetch pages/databases; create and update pages, databases and comments",
+  safeTools: [
+    "search", "fetch", "get-comments", "get-users", "get-user", "get-self", "get-teams",
+    "notion-search", "notion-fetch", "notion-get-comments", "notion-get-users",
+  ],
+} satisfies McpAdapterSpec);
+
+// Granola (https://docs.granola.ai/help-center/sharing/integrations/mcp). Read-only: query notes,
+// meetings, transcripts and folders. `mcp` scope for the resource, `offline_access` for a refresh
+// token. Everything is read-only → no approval needed.
+export const granolaAdapter = createMcpRemoteAdapter({
+  key: "granola",
+  displayName: "Granola",
+  mcpUrl: "https://mcp.granola.ai/mcp",
+  scope: "mcp offline_access",
+  readOnly: true,
+  toolsHint: "search notes, list meetings and folders, read meeting transcripts",
+  safeTools: [], // read-only → all tools allowed regardless
+} satisfies McpAdapterSpec);

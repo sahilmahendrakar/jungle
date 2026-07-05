@@ -23,6 +23,9 @@ export interface IntegrationType {
   // "Connect" card for these (see IntegrationsEditor). Gmail is connection-based too but via the
   // per-user Google account in Settings, so it is NOT marked here — it has its own card.
   connection?: "oauth";
+  // The integration exposes only read-only tools (e.g. Granola: query notes/transcripts). There's
+  // nothing to approve, so the write-approval toggle is hidden and its tools always run.
+  readOnly?: boolean;
 }
 
 export const INTEGRATION_TYPES: IntegrationType[] = [
@@ -60,9 +63,17 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
   {
     key: "notion",
     name: "Notion",
-    description: "Read & write pages in a connected workspace.",
-    configFields: [{ key: "workspace", label: "Workspace" }],
-    comingSoon: true,
+    description: "Search, read & write pages and databases in a connected Notion workspace.",
+    configFields: [],
+    connection: "oauth",
+  },
+  {
+    key: "granola",
+    name: "Granola",
+    description: "Search and read your Granola meeting notes and transcripts.",
+    configFields: [],
+    connection: "oauth",
+    readOnly: true,
   },
 ];
 
