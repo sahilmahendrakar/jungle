@@ -78,6 +78,33 @@ function browserTz(): string {
   }
 }
 
+// Filter chips are OR-combined derived views over a schedule, not a stored status — there's no
+// "cancelled" state in the schema (delete is permanent), so this covers the lifecycle people
+// actually care about: cadence type, still-due, paused, or a one-shot that already fired.
+type ScheduleFilter = "recurring" | "upcoming" | "paused" | "completed";
+
+const FILTERS: { key: ScheduleFilter; label: string }[] = [
+  { key: "recurring", label: "Recurring" },
+  { key: "upcoming", label: "Upcoming" },
+  { key: "paused", label: "Paused" },
+  { key: "completed", label: "Completed" },
+];
+
+const DEFAULT_FILTERS = new Set<ScheduleFilter>(["recurring", "upcoming", "paused"]);
+
+function matchesFilter(filter: ScheduleFilter, s: Schedule): boolean {
+  switch (filter) {
+    case "recurring":
+      return s.cron !== null;
+    case "upcoming":
+      return !s.paused_at && s.next_run_at !== null;
+    case "paused":
+      return !!s.paused_at;
+    case "completed":
+      return !s.paused_at && s.next_run_at === null;
+  }
+}
+
 export function Scheduled({
   workspaceId,
   sidebarOpen,
@@ -97,9 +124,23 @@ export function Scheduled({
   const [editing, setEditing] = useState<Schedule | "new" | null>(null);
   const [deleting, setDeleting] = useState<Schedule | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [activeFilters, setActiveFilters] = useState<Set<ScheduleFilter>>(DEFAULT_FILTERS);
 
   const agents = useMemo(() => people.filter((p) => p.kind === "agent"), [people]);
   const peopleById = useMemo(() => new Map(people.map((p) => [p.id, p])), [people]);
+  const visibleSchedules = useMemo(
+    () => schedules.filter((s) => [...activeFilters].some((f) => matchesFilter(f, s))),
+    [schedules, activeFilters],
+  );
+
+  function toggleFilter(filter: ScheduleFilter) {
+    setActiveFilters((prev) => {
+      const next = new Set(prev);
+      if (next.has(filter)) next.delete(filter);
+      else next.add(filter);
+      return next;
+    });
+  }
 
   const reload = () => listSchedules().then(setSchedules).catch(() => {});
 
@@ -205,6 +246,21 @@ export function Scheduled({
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto w-full max-w-3xl px-4 py-6">
+        <div className="mb-4 flex flex-wrap gap-1.5" data-testid="schedule-filter-bar">
+          {FILTERS.map(({ key, label }) => (
+            <Button
+              key={key}
+              type="button"
+              size="sm"
+              variant={activeFilters.has(key) ? "default" : "outline"}
+              className="h-7 text-xs"
+              data-testid={`schedule-filter-${key}`}
+              onClick={() => toggleFilter(key)}
+            >
+              {label}
+            </Button>
+          ))}
+        </div>
         {loading ? (
           <div className="flex justify-center py-12 text-muted-foreground">
             <Loader2 className="size-5 animate-spin" />
@@ -213,9 +269,13 @@ export function Scheduled({
           <div className="rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground">
             No schedules yet. Create one, or just ask an agent to “remind me every morning at 9”.
           </div>
+        ) : visibleSchedules.length === 0 ? (
+          <div className="rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground">
+            No schedules match the selected filters.
+          </div>
         ) : (
           <ul className="space-y-2">
-            {schedules.map((s) => {
+            {visibleSchedules.map((s) => {
               const agent = peopleById.get(s.agent_id);
               const name = s.agent_name || agent?.display_name || s.agent_handle || "agent";
               const handle = s.agent_handle || agent?.handle || "";
