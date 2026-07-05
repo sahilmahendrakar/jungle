@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useAuth } from "./auth";
 import { navigate } from "./route";
+import { Fireflies } from "./Fireflies";
 import { Button } from "@/components/ui/button";
 import { Bot, GitPullRequest, Zap } from "lucide-react";
 
@@ -56,10 +57,7 @@ export function GoogleSignIn() {
     <main className="relative grid min-h-screen grid-cols-1 overflow-hidden lg:grid-cols-2">
       {/* Left: brand / pitch */}
       <div className="relative hidden flex-col justify-between bg-sidebar p-10 text-sidebar-foreground lg:flex">
-        <div className="pointer-events-none absolute inset-0">
-          <div className="absolute -top-32 -left-24 size-[34rem] rounded-full bg-primary/30 blur-3xl" />
-          <div className="absolute bottom-0 right-0 size-[28rem] rounded-full bg-fuchsia-500/20 blur-3xl" />
-        </div>
+        <Fireflies />
         <button onClick={() => navigate("/")} className="relative flex cursor-pointer items-center gap-2.5">
           <img src="/icon-192.png" alt="Jungle" className="size-9 rounded-xl" />
           <span className="text-lg font-bold">Jungle</span>

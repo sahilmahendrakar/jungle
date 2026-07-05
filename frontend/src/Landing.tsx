@@ -1,18 +1,50 @@
-import type { CSSProperties } from "react";
 import { navigate } from "./route";
+import { Fireflies } from "./Fireflies";
 
-// Fireflies drifting through the night jungle. Positions/timings are fixed so the
-// scene is calm and identical on every visit. Mostly lime, with a few strays in the
-// logo's other colors — teal, amber, violet — as quiet echoes of the mark.
-const FIREFLIES = [
-  { left: "12%", top: "28%", size: 4, drift: 14, flicker: 3.2, delay: 0, color: "var(--jl-lime)" },
-  { left: "22%", top: "66%", size: 3, drift: 18, flicker: 4.1, delay: 1.2, color: "var(--jl-teal)" },
-  { left: "38%", top: "18%", size: 3, drift: 16, flicker: 3.7, delay: 2.1, color: "var(--jl-lime)" },
-  { left: "64%", top: "24%", size: 4, drift: 20, flicker: 4.6, delay: 0.6, color: "var(--jl-amber)" },
-  { left: "78%", top: "58%", size: 3, drift: 15, flicker: 3.4, delay: 1.8, color: "var(--jl-lime)" },
-  { left: "88%", top: "34%", size: 4, drift: 19, flicker: 4.2, delay: 2.6, color: "var(--jl-violet)" },
-  { left: "50%", top: "80%", size: 3, drift: 17, flicker: 3.9, delay: 0.9, color: "var(--jl-teal)" },
-];
+// A jaguar in the logo's language: flat, curvy, overlapping organic shapes.
+// Amber coat, rosettes in the deep-green background color, plus one spot each
+// in the mark's teal, violet, and lime. Head faces right — she prowls inward.
+function Jaguar({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 340 220" className={className} aria-hidden>
+      {/* tail — long curl off the rump */}
+      <path
+        d="M64 92 C34 82 20 54 44 36"
+        fill="none"
+        stroke="#f2a900"
+        strokeWidth="15"
+        strokeLinecap="round"
+      />
+      {/* legs — mid-stride */}
+      <line x1="94" y1="118" x2="72" y2="196" stroke="#f2a900" strokeWidth="20" strokeLinecap="round" />
+      <line x1="116" y1="128" x2="122" y2="198" stroke="#f2a900" strokeWidth="20" strokeLinecap="round" />
+      <line x1="220" y1="124" x2="208" y2="198" stroke="#f2a900" strokeWidth="20" strokeLinecap="round" />
+      <line x1="246" y1="116" x2="264" y2="192" stroke="#f2a900" strokeWidth="20" strokeLinecap="round" />
+      {/* ears — bases tucked behind the head blob */}
+      <circle cx="252" cy="42" r="10" fill="#f2a900" />
+      <circle cx="292" cy="40" r="10" fill="#f2a900" />
+      {/* body */}
+      <path
+        d="M66 96 C74 62 148 50 210 60 C258 68 270 100 252 128 C224 152 122 152 86 136 C64 126 60 112 66 96 Z"
+        fill="#f2a900"
+      />
+      {/* head */}
+      <path
+        d="M240 76 C238 50 264 36 288 44 C310 52 314 82 298 96 C280 112 244 104 240 76 Z"
+        fill="#f2a900"
+      />
+      {/* eye */}
+      <circle cx="283" cy="66" r="4.5" fill="#04271a" />
+      {/* rosettes */}
+      <ellipse cx="124" cy="92" rx="11" ry="8" fill="#04271a" transform="rotate(-15 124 92)" />
+      <circle cx="168" cy="108" r="9" fill="#04271a" />
+      <circle cx="204" cy="86" r="8" fill="#04271a" />
+      <circle cx="98" cy="74" r="6" fill="#1fb89b" />
+      <circle cx="146" cy="126" r="6" fill="#8b5cf6" />
+      <circle cx="222" cy="118" r="6" fill="#8fd14f" />
+    </svg>
+  );
+}
 
 export function Landing() {
   const goSignIn = () => navigate("/login");
@@ -25,23 +57,8 @@ export function Landing() {
           --jl-ink: #f0f5ee;
           --jl-ink-dim: rgba(240, 245, 238, 0.62);
           --jl-lime: #8fd14f;
-          --jl-teal: #1fb89b;
-          --jl-amber: #f2a900;
-          --jl-violet: #8b5cf6;
-          background:
-            radial-gradient(90rem 60rem at 50% -18%, rgba(31, 184, 155, 0.16), transparent 60%),
-            radial-gradient(70rem 50rem at 108% 110%, rgba(139, 92, 246, 0.14), transparent 60%),
-            radial-gradient(60rem 44rem at -10% 96%, rgba(242, 169, 0, 0.11), transparent 55%),
-            var(--jl-bg);
+          background: var(--jl-bg);
           color: var(--jl-ink);
-        }
-        .jungle-landing::after {
-          content: "";
-          position: absolute;
-          inset: 0;
-          pointer-events: none;
-          opacity: 0.5;
-          background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.04 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
         }
         .jl-serif {
           font-family: "Fraunces", Georgia, serif;
@@ -54,24 +71,6 @@ export function Landing() {
         @keyframes jl-rise {
           from { opacity: 0; transform: translateY(18px); }
           to { opacity: 1; transform: translateY(0); }
-        }
-        .jl-firefly {
-          position: absolute;
-          border-radius: 9999px;
-          background: var(--jl-glow);
-          box-shadow: 0 0 10px 2px color-mix(in srgb, var(--jl-glow) 55%, transparent);
-          animation:
-            jl-drift var(--jl-drift) ease-in-out infinite alternate,
-            jl-flicker var(--jl-flicker) ease-in-out infinite;
-          animation-delay: var(--jl-delay);
-        }
-        @keyframes jl-drift {
-          from { transform: translate(0, 0); }
-          to { transform: translate(26px, -34px); }
-        }
-        @keyframes jl-flicker {
-          0%, 100% { opacity: 0.15; }
-          50% { opacity: 0.9; }
         }
         .jl-cta {
           transition: transform 0.25s cubic-bezier(0.22, 1, 0.36, 1);
@@ -87,32 +86,11 @@ export function Landing() {
         }
         @media (prefers-reduced-motion: reduce) {
           .jl-reveal { animation: none; opacity: 1; }
-          .jl-firefly { animation: none; opacity: 0.5; }
           .jl-cta, .jl-cta-arrow { transition: none; }
         }
       `}</style>
 
-      {/* Fireflies */}
-      <div className="pointer-events-none absolute inset-0" aria-hidden>
-        {FIREFLIES.map((f, i) => (
-          <span
-            key={i}
-            className="jl-firefly"
-            style={
-              {
-                left: f.left,
-                top: f.top,
-                width: f.size,
-                height: f.size,
-                "--jl-drift": `${f.drift}s`,
-                "--jl-flicker": `${f.flicker}s`,
-                "--jl-delay": `${f.delay}s`,
-                "--jl-glow": f.color,
-              } as CSSProperties
-            }
-          />
-        ))}
-      </div>
+      <Fireflies />
 
       {/* Header */}
       <header className="relative z-10 flex items-center justify-between px-6 py-5 sm:px-10">
@@ -167,6 +145,9 @@ export function Landing() {
           </a>
         </div>
       </section>
+
+      {/* Jaguar prowling in from the lower-left corner */}
+      <Jaguar className="jl-reveal absolute bottom-6 left-6 z-0 hidden w-52 md:block lg:left-12 lg:w-64" />
     </main>
   );
 }
