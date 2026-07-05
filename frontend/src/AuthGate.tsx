@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { useAuth } from "./auth";
 import { GoogleSignIn } from "./GoogleSignIn";
+import { Landing } from "./Landing";
 import { CreateWorkspace, JoinWorkspace, GithubStep } from "./Onboarding";
 import { App } from "./App";
 import { Settings } from "./Settings";
@@ -65,8 +66,18 @@ export function AuthGate() {
     history.replaceState({}, "", location.pathname + (qs ? `?${qs}` : ""));
   }, [refreshMe, user]);
 
+  // Once signed in, /login has served its purpose — drop back to the app root.
+  useEffect(() => {
+    if (user && path === "/login") {
+      history.replaceState({}, "", "/");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    }
+  }, [user, path]);
+
   if (!ready) return <FullScreenSpinner />;
-  if (!user) return <GoogleSignIn />;
+  // Signed-out: landing page, except when heading into sign-in or following an invite
+  // link (the join flow needs to keep its /join/<token> URL through sign-in).
+  if (!user) return path === "/login" || path.startsWith("/join/") ? <GoogleSignIn /> : <Landing />;
   if (!me) return <FullScreenSpinner />; // profile loading right after sign-in
 
   // Join-by-link takes priority: works whether or not the account already has memberships.

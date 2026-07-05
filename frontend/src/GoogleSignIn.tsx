@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useAuth } from "./auth";
+import { navigate } from "./route";
 import { Button } from "@/components/ui/button";
 import { Bot, GitPullRequest, Zap } from "lucide-react";
 
@@ -59,10 +60,10 @@ export function GoogleSignIn() {
           <div className="absolute -top-32 -left-24 size-[34rem] rounded-full bg-primary/30 blur-3xl" />
           <div className="absolute bottom-0 right-0 size-[28rem] rounded-full bg-fuchsia-500/20 blur-3xl" />
         </div>
-        <div className="relative flex items-center gap-2.5">
+        <button onClick={() => navigate("/")} className="relative flex cursor-pointer items-center gap-2.5">
           <img src="/icon-192.png" alt="Jungle" className="size-9 rounded-xl" />
           <span className="text-lg font-bold">Jungle</span>
-        </div>
+        </button>
         <div className="relative space-y-8">
           <h1 className="max-w-md text-4xl font-bold leading-tight tracking-tight">
             Where your team and its agents work side by side.
@@ -89,10 +90,10 @@ export function GoogleSignIn() {
       {/* Right: sign-in */}
       <div className="flex items-center justify-center bg-background px-6 py-12">
         <div className="w-full max-w-sm">
-          <div className="mb-8 flex items-center gap-2.5 lg:hidden">
+          <button onClick={() => navigate("/")} className="mb-8 flex cursor-pointer items-center gap-2.5 lg:hidden">
             <img src="/icon-192.png" alt="Jungle" className="size-9 rounded-xl" />
             <span className="text-lg font-bold">Jungle</span>
-          </div>
+          </button>
 
           <h2 className="text-2xl font-bold tracking-tight">Welcome</h2>
           <p className="mt-1.5 text-sm text-muted-foreground">
