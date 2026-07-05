@@ -88,6 +88,10 @@ export interface RunnerHooks {
   // A turn died (SDK crash, OOM kill, API error). Tell the humans who were waiting —
   // otherwise the agent just goes silent mid-task.
   onTurnFailed: (agent: { id: string; handle: string }, error: string) => void;
+  // A turn ended, ok or not — fires for EVERY turn_done (unlike onTurnFailed). Carries the
+  // turnId so consumers can attribute the result to the inbox items (and, via their persisted
+  // context, the schedules) that fed the turn.
+  onTurnFinished?: (agentId: string, turnId: string, ok: boolean, error?: string) => void;
   // The agent's live status changed (see AgentStatus). Backend broadcasts it to app sockets.
   onStatusChanged: (agentId: string, status: AgentStatus) => void;
 }
@@ -119,6 +123,10 @@ interface RunnerConn {
   // Pending confirmations from this runner, keyed by the runner-chosen confirm id, so a
   // late/duplicate decision is a no-op.
   pendingConfirms: Set<string>;
+  // The turn this socket most recently reported via `turn_started`. Mid-turn follow-up batches
+  // emit `consumed` with no accompanying `turn_started`, so the consumed handler attributes
+  // them to this turn.
+  currentTurnId: string | null;
   // Timestamp this conn most recently entered "idle" (null while running or never yet idle
   // on this socket). The idle-stop sweeper reads this to decide when to stop the machine.
   idleSince: number | null;
@@ -564,6 +572,7 @@ async function accept(ws: WebSocket, token: string): Promise<void> {
     sentInbox: new Set(),
     pendingConfirms: new Set(),
     idleSince: null,
+    currentTurnId: null,
   };
   conns.set(agent.id, conn);
   console.log(`runner[${agent.id}] (@${agent.handle}) connected`);
@@ -605,6 +614,7 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         conn.sessionId = frame.sessionId ?? null;
         setConnState(conn, "idle");
         conn.sentInbox.clear(); // reconnect: allow re-sending unacked inbox rows
+        conn.currentTurnId = null;
         clearMachine(agentId); // a live hello always wins over stale starting/stopped state
         emitStatus(agentId);
         send(conn, await buildConfigure(agent));
@@ -621,15 +631,18 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         break;
       }
       case "turn_started": {
-        // The runner is consuming these inbox items in turn `frame.turnId`. Informational;
-        // durable delivery is confirmed by `consumed`.
+        // The runner is consuming these inbox items in turn `frame.turnId`. Record the turn on
+        // the rows (turn-result attribution) and on the conn (mid-turn follow-up batches emit
+        // `consumed` with no turn_started). Durable delivery is still confirmed by `consumed`.
+        conn.currentTurnId = frame.turnId;
+        await db.markInboxTurnStarted(agentId, Array.isArray(frame.inboxIds) ? frame.inboxIds : [], frame.turnId);
         break;
       }
       case "consumed": {
         const ids: string[] = Array.isArray(frame.inboxIds) ? frame.inboxIds : [];
-        // `consumed` carries no turnId (turn_started already recorded it); markInboxConsumed
-        // coalesces, so a null here preserves any turn_id already set.
-        await db.markInboxConsumed(agentId, ids, null);
+        // `consumed` carries no turnId of its own; attribute to the socket's current turn
+        // (markInboxConsumed coalesces, so rows already stamped by turn_started keep theirs).
+        await db.markInboxConsumed(agentId, ids, conn.currentTurnId);
         break;
       }
       case "event": {
@@ -729,6 +742,8 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
             );
           }
         }
+        hooks?.onTurnFinished?.(agentId, frame.turnId, !!frame.ok,
+          frame.ok ? undefined : String(frame.error ?? "unknown error"));
         // A turn finished; more work may have queued while it ran.
         await drain(agentId);
         break;

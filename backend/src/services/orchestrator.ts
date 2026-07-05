@@ -27,14 +27,18 @@ function broadcastAgentWorkspace(agentId: string, payload: unknown): void {
 // back (which may re-enter the cascade, bounded by cascade_budget). Also builds the RunnerHooks
 // the runner subsystem calls back into.
 
-// Per-agent context for the most recent sdk dispatch: the cascade budget its replies inherit, and
-// the channel + thread it was triggered in (used to place a confirm card, and as a fallback
-// destination). Overwritten each dispatch; sdk turns are serialized per agent by the runner.
-const sdkContext = new Map<string, { budget: number; channelId: string; threadRootId: string | null }>();
+// The dispatch context an agent's tool calls resolve against (cascade budget, trigger
+// channel/thread): persisted on each inbox item at enqueue and read back from the most recently
+// CONSUMED item. Durable across backend restarts, and immune to the enqueue-time clobber race
+// the old in-memory per-agent map had (a dispatch queued behind a running turn only takes over
+// once the runner actually consumes it).
+async function resolveDispatchContext(agentId: string): Promise<db.DispatchContext | null> {
+  return db.latestConsumedContext(agentId);
+}
 
 // Only the last few messages are inlined into the turn prompt — enough to orient the agent
-// without ballooning prompt size as a channel/thread grows. If it needs more, it can be given a
-// history-reading tool (not yet implemented) to pull further back.
+// without ballooning prompt size as a channel/thread grows. The read_history tool pulls
+// further back on demand.
 const RECENT_CONTEXT_LIMIT = 5;
 
 // Render the message that actually triggered this turn as its own emphasized block, clearly set
@@ -183,18 +187,17 @@ async function runAgentReply(
     );
     // Repo-specific working instructions live in the runner's systemPromptAppend (runners.ts).
 
-    // Delivery is durable + asynchronous. Remember the reply budget + the channel this dispatch
-    // came from (so a send_message with no explicit destination, and the confirm card, land in the
-    // right place) + the EXISTING thread it was triggered in, if any (so that when the agent omits
-    // threadRootId its reply defaults back into that thread; for a top-level trigger there's no
-    // default thread — the agent chooses by passing the message id). Enqueue the composed input and
-    // push it to the runner if one is connected. If not, it waits in the inbox until the next `hello`.
-    sdkContext.set(agent.id, {
+    // Delivery is durable + asynchronous. The dispatch context (reply budget + the channel this
+    // dispatch came from, so a send_message with no explicit destination and the confirm card land
+    // in the right place + the EXISTING thread it was triggered in, if any, so an omitted
+    // threadRootId defaults back into that thread) rides ON the inbox item and takes effect when
+    // the runner consumes it. Enqueue the composed input and push it to the runner if one is
+    // connected. If not, it waits in the inbox until the next `hello`.
+    await db.enqueueInboxItem(agent.id, input, attachments, {
       budget: replyBudget,
       channelId: triggerChannelId,
       threadRootId: existingThreadRootId,
     });
-    await db.enqueueInboxItem(agent.id, input, attachments);
     await runners.drain(agent.id);
     // Wake-on-message: if the agent's machine is stopped/absent (idle-stop, or never started), a
     // disconnected runner won't have received the drain above — kick the provisioner so it comes
@@ -311,9 +314,9 @@ async function readAgentHistory(
 export function buildRunnerHooks(): runners.RunnerHooks {
   return {
     // A runner's send_message -> post it into Jungle, with the cascade budget of the dispatch
-    // that triggered this agent (looked up from sdkContext).
-    deliverAgentMessage: (agent, input) => {
-      const ctx = sdkContext.get(agent.id);
+    // that triggered this agent (the most recently consumed inbox item's persisted context).
+    deliverAgentMessage: async (agent, input) => {
+      const ctx = await resolveDispatchContext(agent.id);
       return deliverAgentMessage(agent, input, ctx?.budget ?? 0, {
         channelId: ctx?.channelId,
         threadRootId: ctx?.threadRootId ?? null,
@@ -325,11 +328,11 @@ export function buildRunnerHooks(): runners.RunnerHooks {
     },
     // A runner's confirm_request -> surface a confirmation card in the channel that triggered this
     // agent. Resolving the card resolves this promise; runners.ts relays it as confirm_result.
-    requestConfirm: (agent, confirm) => {
-      const channelId = sdkContext.get(agent.id)?.channelId;
+    requestConfirm: async (agent, confirm) => {
+      const channelId = (await resolveDispatchContext(agent.id))?.channelId;
       if (!channelId) {
         // No known channel to place the card — deny rather than hang the turn.
-        return Promise.resolve({ result: "deny", denyMessage: "no channel context for confirmation" });
+        return { result: "deny" as const, denyMessage: "no channel context for confirmation" };
       }
       return surfaceConfirmCard(agent, channelId, confirm.toolName, confirm.input);
     },
@@ -355,9 +358,9 @@ export function buildRunnerHooks(): runners.RunnerHooks {
     // A turn crashed -> post a notice from the agent into the channel that triggered it so the
     // humans waiting aren't ghosted. cascadeBudget 0: a crash notice must never trigger others.
     onTurnFailed: (agent, error) => {
-      const channelId = sdkContext.get(agent.id)?.channelId;
-      if (!channelId) return;
       void (async () => {
+        const channelId = (await resolveDispatchContext(agent.id))?.channelId;
+        if (!channelId) return;
         const msg = await db.persistMessage({
           channelId,
           senderId: agent.id,

@@ -96,6 +96,18 @@ export async function clearRunnerMeta(agentId: string): Promise<void> {
 
 // --- SDK runner: durable inbox + event log ---
 
+// Per-dispatch context that rides on each inbox item: the cascade budget the turn's replies
+// inherit, the channel/thread the dispatch was triggered in (confirm-card placement, default
+// thread routing, crash notices), and — for scheduled turns — the schedule that fired. Persisted
+// so it survives backend restarts; the ACTIVE context for an agent is the context of its most
+// recently consumed item (latestConsumedContext), not an in-memory map.
+export interface DispatchContext {
+  budget: number;
+  channelId: string;
+  threadRootId: string | null;
+  scheduleId?: string;
+}
+
 export interface InboxItem {
   id: string;
   text: string;
@@ -108,10 +120,17 @@ export async function enqueueInboxItem(
   agentId: string,
   text: string,
   attachments?: AttachmentMeta[],
+  context?: DispatchContext,
 ): Promise<string> {
   const { rows } = await pool.query<{ id: string }>(
-    `insert into agent_inbox (agent_id, text, attachments) values ($1, $2, $3) returning id`,
-    [agentId, text, attachments?.length ? JSON.stringify(attachments) : null],
+    `insert into agent_inbox (agent_id, text, attachments, context) values ($1, $2, $3, $4)
+     returning id`,
+    [
+      agentId,
+      text,
+      attachments?.length ? JSON.stringify(attachments) : null,
+      context ? JSON.stringify(context) : null,
+    ],
   );
   return rows[0].id;
 }
@@ -124,6 +143,35 @@ export async function pendingInbox(agentId: string): Promise<InboxItem[]> {
     [agentId],
   );
   return rows;
+}
+
+// Record which turn is consuming these inbox items (the runner's `turn_started`). Does NOT touch
+// delivered_at — durable delivery is only confirmed by `consumed` (markInboxConsumed).
+export async function markInboxTurnStarted(
+  agentId: string,
+  inboxIds: string[],
+  turnId: string,
+): Promise<void> {
+  if (!inboxIds.length) return;
+  await pool.query(
+    `update agent_inbox set turn_id = $3 where agent_id = $1 and id = any($2::uuid[])`,
+    [agentId, inboxIds, turnId],
+  );
+}
+
+// The agent's ACTIVE dispatch context: the context of its most recently consumed inbox item.
+// Context is written at enqueue but only takes effect when the runner consumes the item — so a
+// second dispatch queued behind a running turn can't clobber the live turn's routing. Within one
+// consumed batch (delivered_at ties), the last-enqueued item wins — matching what the agent most
+// recently read. Restart-safe: pure Postgres, no in-memory state.
+export async function latestConsumedContext(agentId: string): Promise<DispatchContext | null> {
+  const { rows } = await pool.query<{ context: DispatchContext }>(
+    `select context from agent_inbox
+     where agent_id = $1 and delivered_at is not null and context is not null
+     order by delivered_at desc, created_at desc limit 1`,
+    [agentId],
+  );
+  return rows[0]?.context ?? null;
 }
 
 // Mark inbox items delivered (the runner acked them via `consumed`), recording the turn.

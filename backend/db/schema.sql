@@ -238,3 +238,11 @@ create table if not exists agent_integrations (
   created_at      timestamptz not null default now(),
   primary key (agent_id, integration_key)
 );
+
+-- Per-dispatch context (cascade budget, trigger channel/thread, firing schedule id) rides on
+-- each inbox item; the agent's active context = its most recently consumed item's context.
+-- Replaces orchestrator.ts's in-memory sdkContext map (raced across queued dispatches, lost on
+-- restart). See migrations/011_inbox_context.sql.
+alter table agent_inbox add column if not exists context jsonb;
+create index if not exists agent_inbox_ctx_idx on agent_inbox (agent_id, delivered_at desc)
+  where context is not null;
