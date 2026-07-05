@@ -8,6 +8,7 @@ import { FlyProvisioner } from "./provisioner-fly";
 import { createApp } from "./app";
 import { initAppSocket } from "./ws/appSocket";
 import { triggerMentionedAgents, buildRunnerHooks } from "./services/orchestrator";
+import { startScheduler } from "./services/scheduler";
 
 // Entry point / boot: wire the HTTP app, both WebSocket subsystems (app + runner), background
 // jobs, and start listening. The request handlers live in http/routes/*, the realtime plumbing
@@ -68,6 +69,9 @@ async function reconcileMachinesAtBoot(): Promise<void> {
 }
 void reconcileMachinesAtBoot();
 runners.startIdleSweeper();
+// Fire due scheduled turns (recurring/one-shot). Advances next_run_at before dispatch, so a
+// crash mid-fire skips rather than double-fires.
+startScheduler();
 
 const PORT = Number(process.env.PORT ?? 3001);
 server.listen(PORT, () => console.log(`jungle-backend on http://localhost:${PORT}`));

@@ -5,6 +5,8 @@ import * as runners from "../runners";
 import { provisionerFor } from "../provisioner";
 import { fanOut, broadcastWorkspace } from "../ws/appSocket";
 import { surfaceConfirmCard } from "./confirmations";
+import * as scheduler from "./scheduler";
+import { ApiError } from "../http/errors";
 
 // Agent -> workspace id, memoized. An agent's workspace never changes, so this is a permanent
 // cache. Used to scope the workspace-wide broadcasts (event/context/status) whose runner hooks
@@ -325,6 +327,75 @@ export function buildRunnerHooks(): runners.RunnerHooks {
     // A runner's read_history -> the same destination resolution as send_message, read-only.
     readHistory: (agent, input) => {
       return readAgentHistory(agent, input);
+    },
+    // A runner's schedule_create -> validate + insert via the scheduler service. The context
+    // channel defaults to the channel this turn was dispatched from; "#name" resolves member-
+    // scoped, same as send_message. ApiError messages surface to the agent as {ok:false}.
+    scheduleCreate: async (agent, input) => {
+      try {
+        let channelId: string | undefined;
+        const name = String(input.channel ?? "").trim();
+        if (name) {
+          const ch = await db.getChannelByNameForMember(name.replace(/^#/, ""), agent.id);
+          if (!ch) return { ok: false, error: `you are not a member of channel ${name} (or it doesn't exist)` };
+          channelId = ch.id;
+        } else {
+          channelId = (await resolveDispatchContext(agent.id))?.channelId;
+          if (!channelId) return { ok: false, error: 'no channel context — pass channel:"#name"' };
+        }
+        const row = await scheduler.createScheduleChecked({
+          workspaceId: agent.workspace_id,
+          agentId: agent.id,
+          channelId,
+          createdBy: agent.id,
+          spec: {
+            prompt: String(input.prompt ?? ""),
+            cron: input.cron,
+            timezone: input.timezone,
+            runAt: input.runAt,
+          },
+          announce: true,
+        });
+        return { ok: true, scheduleId: row.id, nextRunAt: row.next_run_at ?? undefined };
+      } catch (e) {
+        if (e instanceof ApiError) return { ok: false, error: e.message };
+        throw e;
+      }
+    },
+    // A runner's schedule_list -> the agent's own schedules as preformatted text.
+    scheduleList: async (agent) => {
+      const rows = await db.listAgentSchedules(agent.id);
+      if (!rows.length) return { ok: true, text: "You have no schedules." };
+      const lines = rows.map((s) => {
+        const status = s.paused_at
+          ? "PAUSED"
+          : s.next_run_at
+            ? `next run ${s.next_run_at}`
+            : "completed";
+        const last = s.last_status ? `, last run: ${s.last_status}` : "";
+        const prompt = s.prompt.length > 80 ? s.prompt.slice(0, 79) + "…" : s.prompt;
+        return `- ${s.id} [${scheduler.cadenceText(s)}] ${status}${last}\n  "${prompt}"`;
+      });
+      return { ok: true, text: `Your schedules:\n${lines.join("\n")}` };
+    },
+    // A runner's schedule_cancel -> delete, own schedules only.
+    scheduleCancel: async (agent, input) => {
+      const id = String(input.scheduleId ?? "").trim();
+      if (!id) return { ok: false, error: "scheduleId is required" };
+      const row = await db.getSchedule(id).catch(() => null);
+      if (!row || row.agent_id !== agent.id) {
+        return { ok: false, error: "no such schedule of yours (check schedule_list)" };
+      }
+      await db.deleteSchedule(id);
+      broadcastWorkspace(row.workspace_id, { type: "schedule_changed", scheduleId: id, action: "deleted" });
+      return { ok: true };
+    },
+    // Every turn_done -> attribute the result to any schedules whose fires fed the turn
+    // (success/failure counters + auto-pause live in the scheduler).
+    onTurnFinished: (agentId, turnId, ok, error) => {
+      void scheduler.noteTurnResult(agentId, turnId, ok, error).catch((e) =>
+        console.error("noteTurnResult:", e),
+      );
     },
     // A runner's confirm_request -> surface a confirmation card in the channel that triggered this
     // agent. Resolving the card resolves this promise; runners.ts relays it as confirm_result.

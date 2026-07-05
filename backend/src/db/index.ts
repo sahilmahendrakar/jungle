@@ -12,6 +12,7 @@ export * from "./attachments";
 export * from "./agents";
 export * from "./github";
 export * from "./integrations";
+export * from "./schedules";
 
 // Wire/domain type aliases used across the backend via the db namespace (db.PersistedMessage, …).
 export type { Kind, ChannelListItem, UnreadThread, Message as PersistedMessage, AttachmentMeta } from "@jungle/shared";
