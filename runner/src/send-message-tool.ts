@@ -388,6 +388,16 @@ export function createJungleMcpServer(bridges: JungleBridges) {
   return createSdkMcpServer({
     name: "jungle",
     version: "1.0.0",
+    // Keep these tools out of tool-search deferral. This agent has enough tools (jungle + gmail +
+    // built-ins) that the CLI defers MCP tool schemas behind ToolSearch by default. When a mid-turn
+    // session re-init (compaction / subagent launch) orphans this in-process server's transport, the
+    // deferred jungle tools drop out of the searchable catalog entirely — so the model can't even
+    // find send_message to call it, and the reactive "Stream closed" reconnect in runTurn never fires
+    // (it keys on a tool_result, which requires the call to happen). alwaysLoad pins these 5 tools
+    // into every prompt: the model can always call send_message (our only channel to users), and a
+    // stale transport surfaces as a "Stream closed" tool_result that re-arms the reconnect. Cost is
+    // trivial (5 tools) and worth it for the agent's sole communication path.
+    alwaysLoad: true,
     tools: [sendMessage, readHistoryTool, scheduleCreateTool, scheduleListTool, scheduleCancelTool],
   });
 }
