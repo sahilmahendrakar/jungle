@@ -32,6 +32,7 @@ export function Sidebar({
   onOpenDm,
   onOpenThreads,
   onOpenScheduled,
+  scheduledActive,
   onNewChannel,
   onAddAgent,
   onCollapse,
@@ -62,6 +63,7 @@ export function Sidebar({
   onOpenDm: (otherId: string) => void;
   onOpenThreads: () => void;
   onOpenScheduled: () => void;
+  scheduledActive: boolean;
   onNewChannel: () => void;
   onAddAgent: () => void;
   onCollapse: () => void;
@@ -134,10 +136,10 @@ export function Sidebar({
               badgeCount={totalThreadUnread}
               badgeMention={totalThreadUnread > 0}
             />
-            {/* Scheduled: workspace-wide scheduled agent turns (its own /scheduled page). */}
+            {/* Scheduled: workspace-wide scheduled agent turns (a main-column view in-layout). */}
             <NavItem
               testId="scheduled-nav"
-              active={false}
+              active={scheduledActive}
               onClick={onOpenScheduled}
               icon={<CalendarClock className="size-4 opacity-70" />}
               label="Scheduled"

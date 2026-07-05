@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import cronstrue from "cronstrue";
-import { ArrowLeft, CalendarClock, Loader2, Pause, Pencil, Play, Plus, Trash2 } from "lucide-react";
+import { CalendarClock, Loader2, PanelLeft, Pause, Pencil, Play, Plus, Trash2 } from "lucide-react";
 import { useAuth } from "./auth";
-import { navigate } from "./route";
 import {
   WS_BASE,
   createSchedule,
@@ -24,6 +23,11 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import {
   Dialog,
   DialogContent,
@@ -74,7 +78,17 @@ function browserTz(): string {
   }
 }
 
-export function Scheduled({ workspaceId }: { workspaceId: string }) {
+export function Scheduled({
+  workspaceId,
+  sidebarOpen,
+  onOpenDrawer,
+  onExpandSidebar,
+}: {
+  workspaceId: string;
+  sidebarOpen: boolean;
+  onOpenDrawer: () => void;
+  onExpandSidebar: () => void;
+}) {
   const { getToken } = useAuth();
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [people, setPeople] = useState<Participant[]>([]);
@@ -151,20 +165,37 @@ export function Scheduled({ workspaceId }: { workspaceId: string }) {
   }
 
   return (
-    <main className="min-h-screen bg-background">
-      <header className="sticky top-0 z-10 flex h-14 items-center gap-3 border-b bg-background/95 px-4 backdrop-blur supports-[backdrop-filter]:bg-background/80">
+    <main className="flex min-w-0 flex-1 flex-col bg-background">
+      <header className="flex h-14 shrink-0 items-center gap-2.5 border-b px-3 md:px-5">
+        {/* Mobile hamburger: opens the off-canvas drawer. Hidden on md+. */}
         <Button
           variant="ghost"
           size="icon"
-          data-testid="scheduled-back"
-          onClick={() => navigate("/")}
-          className="size-8 shrink-0"
-          aria-label="Back to Jungle"
+          data-testid="sidebar-toggle"
+          aria-label="Open menu"
+          onClick={onOpenDrawer}
+          className="-ml-1 size-9 shrink-0 text-muted-foreground md:hidden"
         >
-          <ArrowLeft className="size-4" />
+          <PanelLeft className="size-5" />
         </Button>
-        <CalendarClock className="size-4 text-muted-foreground" />
-        <h1 className="text-base font-semibold">Scheduled</h1>
+        {!sidebarOpen && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                data-testid="sidebar-expand"
+                onClick={onExpandSidebar}
+                className="-ml-2 hidden size-8 shrink-0 text-muted-foreground md:inline-flex"
+              >
+                <PanelLeft className="size-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Open sidebar (⌘\)</TooltipContent>
+          </Tooltip>
+        )}
+        <CalendarClock className="size-5 text-muted-foreground" />
+        <h1 className="truncate text-base font-semibold">Scheduled</h1>
         <div className="ml-auto">
           <Button size="sm" data-testid="new-schedule" onClick={() => setEditing("new")}>
             <Plus className="size-4" /> New schedule
@@ -172,7 +203,8 @@ export function Scheduled({ workspaceId }: { workspaceId: string }) {
         </div>
       </header>
 
-      <div className="mx-auto w-full max-w-3xl px-4 py-6">
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto w-full max-w-3xl px-4 py-6">
         {loading ? (
           <div className="flex justify-center py-12 text-muted-foreground">
             <Loader2 className="size-5 animate-spin" />
@@ -274,6 +306,7 @@ export function Scheduled({ workspaceId }: { workspaceId: string }) {
             })}
           </ul>
         )}
+        </div>
       </div>
 
       {editing && (

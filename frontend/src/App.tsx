@@ -28,7 +28,8 @@ import {
 } from "./lib/chat";
 import { SignIn } from "./SignIn";
 import { SettingsPanel } from "./Settings";
-import { navigate } from "./route";
+import { Scheduled } from "./Scheduled";
+import { navigate, usePath } from "./route";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { AgentActivity } from "./AgentActivity";
@@ -126,6 +127,11 @@ export function App({
   const left = usePersistedWidth(LEFT_WIDTH);
   const right = usePersistedWidth(RIGHT_WIDTH);
   const [resizing, setResizing] = useState(false);
+  // The Scheduled view is URL-routed (/scheduled) so it stays deep-linkable, but renders inside
+  // this layout (sidebars intact) as a main-column view rather than a standalone page. Only in
+  // Firebase mode (workspaceId set): the page is workspace-scoped and uses the auth context.
+  const path = usePath();
+  const scheduledOpen = path === "/scheduled" && !!workspaceId;
   // Activity view: the sdk agent whose transcript is open, plus a live event buffer for it.
   // We only buffer while a view is open (activityIdRef gates the WS handler), so idle agents
   // don't accumulate unbounded memory. `activityMode` picks how it's rendered: "modal" for the
@@ -637,18 +643,34 @@ export function App({
         leftWidth={left.width}
         personByHandle={personByHandle}
         dmChannelWith={dmChannelWith}
-        onSelectChannel={selectAndClose}
-        onOpenDm={openDm}
-        onOpenThreads={openThreadsList}
+        onSelectChannel={(id) => {
+          if (scheduledOpen) navigate("/");
+          selectAndClose(id);
+        }}
+        onOpenDm={(id) => {
+          if (scheduledOpen) navigate("/");
+          openDm(id);
+        }}
+        onOpenThreads={() => {
+          if (scheduledOpen) navigate("/");
+          openThreadsList();
+        }}
         onOpenScheduled={() => navigate("/scheduled")}
+        scheduledActive={scheduledOpen}
         onNewChannel={() => setShowNew(true)}
         onAddAgent={() => setShowAddAgent(true)}
         onCollapse={() => {
           setSidebarOpen(false); // desktop: collapse
           setDrawerOpen(false); // mobile: close the off-canvas drawer
         }}
-        onOpenProfile={openProfilePanel}
-        onOpenSettings={openSettingsPanel}
+        onOpenProfile={(id) => {
+          if (scheduledOpen) navigate("/");
+          openProfilePanel(id);
+        }}
+        onOpenSettings={() => {
+          if (scheduledOpen) navigate("/");
+          openSettingsPanel();
+        }}
         onSignOut={signOut}
         workspaceId={workspaceId}
         memberships={memberships}
@@ -674,6 +696,14 @@ export function App({
       )}
 
       {/* ---------- Main ---------- */}
+      {scheduledOpen ? (
+        <Scheduled
+          workspaceId={workspaceId!}
+          sidebarOpen={sidebarOpen}
+          onOpenDrawer={() => setDrawerOpen(true)}
+          onExpandSidebar={() => setSidebarOpen(true)}
+        />
+      ) : (
       <main className="flex min-w-0 flex-1 flex-col bg-background">
         {/* Channel header */}
         <ChannelHeader
@@ -761,13 +791,14 @@ export function App({
           onNotice={setNotice}
         />
       </main>
+      )}
 
       {/* ---------- Right panel (contextual sidebar) ----------
           Desktop (md+): in-flow, drag-resizable third column. Mobile: fixed right overlay.
           Hosts one of three views at a time — a participant profile, self settings, or the
           Threads pane (its own list / open-thread sub-modes). */}
       {/* Right panel resize divider (desktop only; sits between main and the panel). */}
-      {rightOpen && isDesktop && (
+      {rightOpen && !scheduledOpen && isDesktop && (
         <ResizeHandle
           edge="right"
           testId="right-panel-resize"
@@ -782,7 +813,7 @@ export function App({
         />
       )}
 
-      {rightOpen && (
+      {rightOpen && !scheduledOpen && (
         <aside
           data-testid="right-panel"
           style={isDesktop ? { width: right.width } : undefined}
