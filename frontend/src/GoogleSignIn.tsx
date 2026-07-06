@@ -57,7 +57,7 @@ export function GoogleSignIn() {
       <div className="relative hidden flex-col justify-between bg-sidebar p-10 text-sidebar-foreground lg:flex">
         <div className="pointer-events-none absolute inset-0">
           <div className="absolute -top-32 -left-24 size-[34rem] rounded-full bg-primary/30 blur-3xl" />
-          <div className="absolute bottom-0 right-0 size-[28rem] rounded-full bg-fuchsia-500/20 blur-3xl" />
+          <div className="absolute bottom-0 right-0 size-[28rem] rounded-full bg-teal-400/20 blur-3xl" />
         </div>
         <div className="relative flex items-center gap-2.5">
           <img src="/icon-192.png" alt="Jungle" className="size-9 rounded-xl" />

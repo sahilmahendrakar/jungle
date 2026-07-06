@@ -56,6 +56,28 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { avatarClass, initials } from "@/lib/people";
 import { cn } from "@/lib/utils";
 
+// The "✨ agent" pill shown next to agent names (message rows, thread panel, profile).
+export function AgentBadge() {
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+      <Sparkles className="size-2.5" /> agent
+    </span>
+  );
+}
+
+// Centered empty-state tile (icon in a rounded square + hint text) shared by the message list,
+// activity transcript, and thread panel.
+export function EmptyState({ icon, children }: { icon: ReactNode; children: ReactNode }) {
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-2.5 text-center">
+      <div className="flex size-12 items-center justify-center rounded-2xl bg-muted text-muted-foreground">
+        {icon}
+      </div>
+      <p className="max-w-xs text-sm text-muted-foreground">{children}</p>
+    </div>
+  );
+}
+
 export function AttachmentList({ attachments }: { attachments: Attachment[] }) {
   return (
     <div data-testid="message-attachments" className="flex flex-wrap items-start gap-2">
@@ -301,11 +323,7 @@ export function ParticipantProfilePanel({
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <h2 className="truncate text-lg font-bold">{person.display_name}</h2>
-              {isAgent && (
-                <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
-                  <Sparkles className="size-2.5" /> agent
-                </span>
-              )}
+              {isAgent && <AgentBadge />}
               {isSelf && <span className="text-xs text-muted-foreground">(you)</span>}
             </div>
             <div className="truncate text-sm text-muted-foreground">@{person.handle}</div>

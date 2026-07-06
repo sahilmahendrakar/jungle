@@ -13,20 +13,9 @@ import { avatarClass, initials } from "@/lib/people";
 import { cn } from "@/lib/utils";
 import { Activity as ActivityIcon, SendHorizonal, Square } from "lucide-react";
 import { ActivityTranscript } from "./components/chat/ActivityTranscript";
+import { STATUS_DOT, STATUS_LABEL } from "./lib/chat";
 
-// Live status dot for the four agent statuses (mirrors the sidebar's colors/labels).
-const STATUS_DOT: Record<AgentStatus, string> = {
-  working: "animate-pulse bg-emerald-500",
-  idle: "bg-emerald-500/60",
-  waking: "animate-pulse bg-amber-400",
-  sleeping: "bg-slate-400/70",
-};
-const STATUS_LABEL: Record<AgentStatus, string> = {
-  working: "Working",
-  idle: "Idle",
-  waking: "Waking up",
-  sleeping: "Sleeping",
-};
+// Live status dot + label (single source of truth for colors/labels: lib/chat.ts).
 function StatusDot({ status }: { status: AgentStatus }) {
   return (
     <span className="flex items-center gap-1.5 text-xs text-muted-foreground">

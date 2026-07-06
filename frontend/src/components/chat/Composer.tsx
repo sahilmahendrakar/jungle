@@ -171,9 +171,13 @@ export function Composer({
     setMention(null);
   }
 
+  // Anything ready to send? Drives the send button's enabled/dimmed affordance.
+  const canSend =
+    draft.trim().length > 0 || pending.some((p) => p.status === "ready" && p.att);
+
   return (
     <div className="px-3 pb-3 pt-1 md:px-5 md:pb-5">
-      <div className="relative rounded-xl border bg-card p-2 shadow-sm focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/20">
+      <div className="relative rounded-2xl border bg-card p-2 shadow-sm transition-shadow focus-within:border-ring focus-within:shadow-md focus-within:ring-[3px] focus-within:ring-ring/20">
         {/* @-mention autocomplete */}
         {mention && mentionCandidates.length > 0 && (
           <div
@@ -334,8 +338,11 @@ export function Composer({
             data-testid="send-button"
             onClick={send}
             size="icon"
-            className="shrink-0"
             aria-label="Send"
+            className={cn(
+              "shrink-0 transition-all",
+              !canSend && "pointer-events-none bg-muted text-muted-foreground shadow-none",
+            )}
           >
             <SendHorizonal className="size-4" />
           </Button>

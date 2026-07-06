@@ -4,6 +4,8 @@ import { Button } from "@/components/ui/button";
 import { Activity as ActivityIcon } from "lucide-react";
 import { groupTurns, mergeEvents } from "./activity/sdkEvents";
 import { TurnSection } from "./activity/Transcript";
+import { EmptyState } from "./panels";
+import { Skeleton } from "@/components/ui/skeleton";
 
 // The scrollable, paginated turn-by-turn transcript shared by the full-screen Activity dialog
 // (AgentActivity) and the inline "View activity" mode in an agent DM (DmActivityView) — same
@@ -98,17 +100,14 @@ export function ActivityTranscript({
         className="min-h-0 flex-1 overflow-y-auto px-4 py-3"
       >
         {!isSdk || empty ? (
-          <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
-            <div className="flex size-12 items-center justify-center rounded-2xl bg-muted">
-              <ActivityIcon className="size-6 text-muted-foreground" />
-            </div>
-            <p className="max-w-xs text-sm text-muted-foreground">
+          <div className="flex h-full flex-col justify-center">
+            <EmptyState icon={<ActivityIcon className="size-6" />}>
               Activity appears here when this agent starts working.
-            </p>
+            </EmptyState>
           </div>
         ) : (
           <div className="space-y-2.5">
-            {hasMore && (
+            {hasMore && !loading && (
               <div className="flex justify-center pb-1">
                 <Button
                   data-testid="activity-load-earlier"
@@ -123,7 +122,11 @@ export function ActivityTranscript({
               </div>
             )}
             {loading && (
-              <div className="py-6 text-center text-sm text-muted-foreground">Loading…</div>
+              <div className="space-y-2.5 py-1">
+                <Skeleton className="h-9 w-full" />
+                <Skeleton className="h-9 w-full" />
+                <Skeleton className="h-24 w-full" />
+              </div>
             )}
             {turns.map((t, i) => (
               <TurnSection
