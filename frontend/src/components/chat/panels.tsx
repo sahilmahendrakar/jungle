@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, type ReactNode } from "react";
 import {
   Activity,
+  BookOpenText,
   Check,
   ChevronDown,
   FileText,
@@ -19,6 +20,7 @@ import {
   deleteAgent,
   compactAgent,
   attachmentUrl,
+  getAgentMemory,
   listAgentIntegrations,
   setAgentIntegration,
   removeAgentIntegration,
@@ -42,6 +44,8 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Markdown } from "../../Markdown";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -158,6 +162,7 @@ export function ParticipantProfilePanel({
 }) {
   const isAgent = person.kind === "agent";
   const [name, setName] = useState(person.display_name);
+  const [persona, setPersona] = useState(person.persona ?? "");
   const [mode, setMode] = useState(person.mode ?? "default");
   const [model, setModel] = useState(person.model ?? MODEL_OPTIONS[0].id);
   const [effort, setEffort] = useState(person.effort ?? EFFORT_OPTIONS[1].id);
@@ -214,6 +219,7 @@ export function ParticipantProfilePanel({
 
   const dirty =
     name.trim() !== person.display_name ||
+    persona.trim() !== (person.persona ?? "") ||
     mode !== (person.mode ?? "default") ||
     model !== (person.model ?? MODEL_OPTIONS[0].id) ||
     effort !== (person.effort ?? EFFORT_OPTIONS[1].id) ||
@@ -224,11 +230,18 @@ export function ParticipantProfilePanel({
     setSaving(true);
     setErr("");
     try {
-      const patch: { displayName?: string; mode?: string; model?: string; effort?: string } = {
+      const patch: {
+        displayName?: string;
+        mode?: string;
+        model?: string;
+        effort?: string;
+        persona?: string;
+      } = {
         displayName: name.trim(),
         mode,
         model,
         effort,
+        persona: persona.trim(),
       };
       const updated = await updateAgent(person.id, patch);
       const nextKeys = new Set(integrations.map((v) => v.key));
@@ -321,6 +334,25 @@ export function ParticipantProfilePanel({
               />
             </div>
             <div className="space-y-1.5">
+              <Label htmlFor="profile-persona">Persona</Label>
+              <Textarea
+                id="profile-persona"
+                data-testid="profile-persona"
+                value={persona}
+                onChange={(e) => setPersona(e.target.value)}
+                maxLength={4000}
+                rows={4}
+                placeholder={
+                  "Who is this agent? e.g. \"You are our infra engineer: own the deploy pipeline, " +
+                  "prefer boring solutions, keep answers terse.\""
+                }
+                className="max-h-48 min-h-20 resize-y text-sm"
+              />
+              <p className="text-[11px] leading-tight text-muted-foreground">
+                Shapes the agent's role and voice in its system prompt. Applies at its next turn.
+              </p>
+            </div>
+            <div className="space-y-1.5">
               <Label>Tool permissions</Label>
               <SelectMenu
                 value={mode}
@@ -359,6 +391,7 @@ export function ParticipantProfilePanel({
               google={google ?? undefined}
               statuses={intStatuses}
             />
+            <MemoryCard person={person} />
             <ContextUsageCard person={person} />
             <Button
               variant="outline"
@@ -552,6 +585,76 @@ export function ContextUsageCard({ person }: { person: Participant }) {
         </p>
       )}
       {err && <p className="text-[11px] text-destructive">{err}</p>}
+    </div>
+  );
+}
+
+// Read-only view of the agent's long-term memory (its /workspace/MEMORY.md, mirrored to the
+// backend after any turn that changes it). Collapsed by default; fetched on expand and
+// refetched when an agent_memory_changed broadcast stamps person.memory_changed_at.
+export function MemoryCard({ person }: { person: Participant }) {
+  const [open, setOpen] = useState(false);
+  const [memory, setMemory] = useState<string | null>(null);
+  const [updatedAt, setUpdatedAt] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [err, setErr] = useState("");
+
+  const changedAt = person.memory_changed_at ?? null;
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    getAgentMemory(person.id)
+      .then((r) => {
+        if (cancelled) return;
+        setMemory(r.memory);
+        setUpdatedAt(r.updatedAt);
+        setLoaded(true);
+        setErr("");
+      })
+      .catch((e) => !cancelled && setErr(String((e as Error).message ?? e)));
+    return () => {
+      cancelled = true;
+    };
+  }, [open, person.id, changedAt]);
+
+  return (
+    <div data-testid="agent-memory" className="rounded-lg border bg-muted/30">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        data-testid="agent-memory-toggle"
+        className="flex w-full items-center gap-2 p-3 text-left"
+      >
+        <BookOpenText className="size-4 shrink-0 text-muted-foreground" />
+        <span className="flex-1 text-xs font-medium text-muted-foreground">Memory</span>
+        <ChevronDown
+          className={cn("size-4 shrink-0 text-muted-foreground transition-transform", open && "rotate-180")}
+        />
+      </button>
+      {open && (
+        <div className="space-y-2 border-t px-3 pb-3 pt-2">
+          {err ? (
+            <p className="text-[11px] text-destructive">{err}</p>
+          ) : !loaded ? (
+            <p className="text-[11px] text-muted-foreground">Loading…</p>
+          ) : memory ? (
+            <>
+              <div className="max-h-72 overflow-y-auto rounded-md border bg-background/70 p-2.5">
+                <Markdown>{memory}</Markdown>
+              </div>
+              {updatedAt && (
+                <p className="text-[11px] text-muted-foreground">
+                  Updated {new Date(updatedAt).toLocaleString()}
+                </p>
+              )}
+            </>
+          ) : (
+            <p className="text-[11px] leading-tight text-muted-foreground">
+              No memories yet — the agent writes down durable facts (preferences, decisions,
+              gotchas) as it works with you.
+            </p>
+          )}
+        </div>
+      )}
     </div>
   );
 }

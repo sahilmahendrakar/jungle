@@ -132,6 +132,16 @@ export function useChatSocket(opts: {
           );
           return;
         }
+        if (evt.type === "agent_memory_changed") {
+          // Stamp the person so an open profile's Memory section refetches (content itself is
+          // pulled from GET /api/agents/:id/memory — it doesn't ride in the broadcast).
+          setPeople((ps) =>
+            ps.map((p) =>
+              p.id === evt.agentId ? { ...p, memory_changed_at: new Date().toISOString() } : p,
+            ),
+          );
+          return;
+        }
         if (evt.type === "participant_deleted") {
           // Resolve the deleted agent's handle so we can drop its DM channel (DMs are keyed
           // by the other member's handle via dm_with), then remove the participant itself.

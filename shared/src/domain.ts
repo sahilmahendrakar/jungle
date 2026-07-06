@@ -39,9 +39,12 @@ export interface ParticipantBase {
 }
 
 // A participant as sent to clients: the public row plus a live `status` (agents only, computed
-// from the runner connection at serialization time — not persisted).
+// from the runner connection at serialization time — not persisted). `memory_changed_at` is
+// client-side only: stamped when an agent_memory_changed broadcast lands, so an open profile's
+// Memory section knows to refetch.
 export interface Participant extends ParticipantBase {
   status?: AgentStatus;
+  memory_changed_at?: string;
 }
 
 // --- Workspaces (Slack-style multi-tenancy) ---

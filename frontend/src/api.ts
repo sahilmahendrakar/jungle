@@ -262,11 +262,24 @@ export function disconnectIntegration(key: string): Promise<{ ok: boolean }> {
   });
 }
 
+// The agent's long-term memory (its MEMORY.md mirror, reported by the runner after turns that
+// change it). Fetched on demand — it doesn't ride in participant payloads.
+export function getAgentMemory(
+  id: string,
+): Promise<{ memory: string | null; updatedAt: string | null }> {
+  return request(`/api/agents/${id}/memory`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load memory",
+  });
+}
+
 // Update an agent's editable config from its profile page. `mode` is applied live; for sdk
-// agents `model` is applied at the agent's next turn boundary.
+// agents `model` is applied at the agent's next turn boundary. `persona` (creator-written
+// role/personality) lands in the agent's system prompt at its next turn; empty string clears it.
 export function updateAgent(
   id: string,
-  patch: { displayName?: string; mode?: string; model?: string; effort?: string },
+  patch: { displayName?: string; mode?: string; model?: string; effort?: string; persona?: string },
 ): Promise<Participant> {
   return request<Participant>(`/api/agents/${id}`, {
     method: "PATCH",
