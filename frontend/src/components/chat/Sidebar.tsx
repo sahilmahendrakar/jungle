@@ -1,6 +1,17 @@
-import { Bot, CalendarClock, Hash, LogOut, MessagesSquare, PanelLeftClose } from "lucide-react";
+import {
+  Bot,
+  CalendarClock,
+  Hash,
+  LogOut,
+  MessagesSquare,
+  Moon,
+  MonitorSmartphone,
+  PanelLeftClose,
+  Sun,
+} from "lucide-react";
 import type { Channel, Participant, Membership } from "../../api";
 import { firebaseEnabled } from "../../firebase";
+import { useTheme, type ThemePreference } from "../../theme";
 import { EmptyHint, NavItem, PersonAvatar, SectionHeader } from "./panels";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 import {
@@ -9,6 +20,41 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+
+// Cycle light -> dark -> system with one button (label shows the CURRENT preference).
+const THEME_CYCLE: Record<ThemePreference, ThemePreference> = {
+  light: "dark",
+  dark: "system",
+  system: "light",
+};
+
+function ThemeToggle() {
+  const { preference, setPreference } = useTheme();
+  const icon =
+    preference === "dark" ? (
+      <Moon className="size-4" />
+    ) : preference === "light" ? (
+      <Sun className="size-4" />
+    ) : (
+      <MonitorSmartphone className="size-4" />
+    );
+  const label =
+    preference === "system" ? "Theme: system" : preference === "dark" ? "Theme: dark" : "Theme: light";
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          data-testid="theme-toggle"
+          onClick={() => setPreference(THEME_CYCLE[preference])}
+          className="flex size-8 shrink-0 items-center justify-center rounded-md text-sidebar-foreground/70 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
+        >
+          {icon}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent>{label} — click to change</TooltipContent>
+    </Tooltip>
+  );
+}
 
 // The left nav shell: workspace header, Threads/Channels/DMs/People lists, and the user footer.
 // Desktop (md+): in-flow, collapsible via a drag-resizable width. Mobile (<md): a fixed off-canvas
@@ -254,6 +300,7 @@ export function Sidebar({
                 <div className="truncate text-xs text-sidebar-foreground/50">@{me.handle}</div>
               </div>
             </button>
+            <ThemeToggle />
             <Tooltip>
               <TooltipTrigger asChild>
                 <button

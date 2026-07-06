@@ -3,7 +3,7 @@ import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { visitParents } from "unist-util-visit-parents";
 import type { Root, Text } from "mdast";
-import "highlight.js/styles/github.css"; // token colors for fenced code blocks
+// Fenced-code token colors come from the token-driven .hljs theme in index.css (light + dark).
 import { cn } from "@/lib/utils";
 import type { Participant } from "./api";
 
