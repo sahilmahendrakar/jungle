@@ -4,20 +4,30 @@
 //   - queue holds {inboxId, text}. When idle and queue non-empty, drain ALL
 //     queued items as one batch, emit turn_started + consumed, and run one
 //     streaming query() whose generator yields the batch as a single user
-//     message. Messages arriving while a query runs are NOT spliced into it:
-//     they wait in the queue until the current turn's `result`, then run as a
-//     fresh query() (resuming the same session, so the model keeps its
-//     context). Mid-turn splicing — streaming a follow-up user message into
-//     the live CLI session — is deliberately disabled: the CLI runs such a
-//     follow-up turn with dead wiring (PreToolUse hooks never fire, so
-//     default-mode confirmation gating is silently bypassed, and the
-//     in-process "jungle" MCP server connection is stale, so every
-//     send_message fails with "Stream closed"). Reproduced deterministically
-//     via backend/test/integration-sdk.mjs against SDK 0.3.198, 2026-07-06;
-//     this was the long-open prod "agent goes mute for a whole turn" bug.
-//     When a `result` arrives the generator returns, the query ends, and the
-//     loop restarts if more work is queued (also how a pending model change
-//     is applied — query restart with resume).
+//     message. Messages arriving while the query runs ARE streamed into it as
+//     follow-up user messages (mid-turn splice): the CLI either folds one
+//     into the turn in progress or queues it as the next turn — both fully
+//     supported, exactly like typing into interactive Claude Code.
+//   - Ending the query is the delicate part. The CLI treats stdin EOF (our
+//     input generator returning) as "no more input": once `inputClosed` is
+//     set, EVERY control request — hook callbacks, canUseTool, in-process
+//     SDK-MCP calls — throws "Stream closed". Closing the input while a
+//     spliced follow-up turn is still queued therefore runs that turn with
+//     dead wiring: PreToolUse hooks error out (so default-mode confirmation
+//     gating silently FALLS THROUGH TO ALLOW) and every send_message fails
+//     with "Stream closed". That — our own premature close in the old
+//     endTurnIfQuiescent, not a CLI defect — was the long-open prod "agent
+//     goes mute for a whole turn" bug (root-caused 2026-07-06 via CLI debug
+//     stderr: sendRequest throwing on inputClosed; deterministic repro in
+//     /tmp/splice-repro and backend/test/integration-sdk.mjs).
+//   - So the close rule is: at a `result`, close immediately only when every
+//     user message we yielded has produced a result (yields <= results).
+//     A spliced message may FOLD into the running turn (one result for two
+//     yields — undetectable from the stream), so when yields > results we
+//     instead close after a short quiescence window with no stream activity;
+//     any activity means the queued turn started, and its own result
+//     re-evaluates the rule. A pending model change still ends the query
+//     directly (restart with resume).
 import {
   query,
   type EffortLevel,
@@ -194,11 +204,20 @@ export class Runner {
   // with real messages and is naturally coalesced if pressed repeatedly.
   private compactRequested = false;
 
-  // Streaming-input generator plumbing: the running query's generator holds its input stream
-  // open awaiting this; endTurn() (at `result`) or a model-change restart resolves it with
-  // null so the generator returns and the query ends. Never resolved with items — mid-turn
-  // splicing is disabled (see the note at the top of this file).
+  // Streaming-input generator plumbing: the running query's generator awaits this between
+  // yields; deliverFollowupBatch resolves it with items (mid-turn splice) and endTurn()
+  // resolves it with null (generator returns → stdin closes → query ends).
   private batchResolver: ((batch: QueueItem[] | null) => void) | null = null;
+
+  // Close bookkeeping for the ACTIVE query (reset each runTurn): how many user messages the
+  // generator has yielded vs how many `result`s the CLI has emitted. Closing the input is
+  // only safe when yields <= results (see the close-rule note at the top of this file);
+  // otherwise quiesceTimer closes after a silent window (a spliced message that FOLDED into
+  // the running turn never gets its own result).
+  private turnYields = 0;
+  private turnResults = 0;
+  private quiesceTimer: NodeJS.Timeout | null = null;
+  private static readonly QUIESCE_MS = 3_000;
 
   // Long-term memory reporting: hash of the MEMORY.md content most recently sent to the
   // backend (`memory` frame), so we only report actual changes. null = nothing reported yet
@@ -419,9 +438,13 @@ export class Runner {
       }
     }
     log.info("enqueued items", { count: items.length, queueDepth: this.queue.length });
-    // While a turn runs, items just wait — the current query ends at its `result` and the
-    // loop starts a fresh query for them (see the mid-turn-splice note at the top of file).
-    this.maybeStartTurn();
+    // If a turn is running and the generator is awaiting a follow-up, splice the new items
+    // into the live query (the CLI folds or queues them — both safe while stdin is open).
+    if (this.running && this.batchResolver && this.pendingModel === null) {
+      this.deliverFollowupBatch();
+    } else {
+      this.maybeStartTurn();
+    }
   }
 
   private async handleInterrupt(): Promise<void> {
@@ -505,6 +528,8 @@ export class Runner {
     const firstBatch = this.queue;
     this.queue = [];
     const turnId = randomUUID();
+    this.turnYields = 0;
+    this.turnResults = 0;
 
     const inboxIds = firstBatch.map((i) => i.inboxId);
     this.conn.send({ type: "turn_started", turnId, inboxIds });
@@ -619,6 +644,21 @@ export class Runner {
         // Forward every SDK stream message verbatim.
         this.conn.send({ type: "event", turnId, event: message });
 
+        // Stream activity while the quiescence window is armed: a new turn's activity
+        // (init/assistant/user — the CLI dequeued a spliced follow-up) cancels the window
+        // outright — that turn's own result re-runs the close rule, and a long tool call's
+        // event gaps must never fire a mid-turn close. Anything else (stray system events
+        // trailing the result) just pushes the window out.
+        if (this.quiesceTimer) {
+          const t = (message as any).type;
+          if (t === "assistant" || t === "user" || ((message as any).subtype === "init" && t === "system")) {
+            clearTimeout(this.quiesceTimer);
+            this.quiesceTimer = null;
+          } else {
+            this.armQuiesceTimer();
+          }
+        }
+
         if ((message as any).type === "system" && (message as any).subtype === "compact_boundary") {
           await reconnectJungle();
         } else if ((message as any).type === "user" && messageHasStreamClosed(message)) {
@@ -626,6 +666,7 @@ export class Runner {
         }
 
         if ((message as any).type === "result") {
+          this.turnResults++;
           const sid = (message as any).session_id;
           if (typeof sid === "string" && sid.length > 0 && sid !== this.sessionId) {
             this.sessionId = sid;
@@ -639,13 +680,17 @@ export class Runner {
           // Report context occupancy while the query is still alive (a control
           // request needs the subprocess up — it exits once this loop ends).
           await this.reportContextUsage(q, message);
-          // The `result` ends this turn's model work: close the streaming input so the query
-          // completes, the CLI subprocess exits, and runTurn falls through to turn_done +
-          // idle. Messages that queued up while the turn ran start a fresh query right after
-          // (maybeStartTurn at the tail). Without this the generator would hold the stream
-          // open forever — subprocess stays alive, `running` never clears, and the agent is
-          // stuck "working" (idle-stop never fires).
-          this.endTurn();
+          // A `result` ended one turn of model work. Close the streaming input only when it
+          // is SAFE — closing while a spliced follow-up turn is still queued runs that turn
+          // with dead hook/MCP wiring (see the close-rule note at the top of this file).
+          // yields <= results ⇒ nothing outstanding ⇒ close now (the common no-splice case).
+          // yields > results ⇒ a spliced message either QUEUED (its turn's events will land
+          // within ms — the armed timer gets pushed out and its own result re-runs this) or
+          // FOLDED into the turn that just ended (no further events — the window elapses and
+          // closes). Without closing here the generator would hold the stream open forever —
+          // subprocess stays alive, `running` never clears, the agent is stuck "working".
+          if (this.turnResults >= this.turnYields) this.endTurn();
+          else this.armQuiesceTimer();
         }
       }
     } catch (err) {
@@ -656,6 +701,10 @@ export class Runner {
       this.activeQuery = null;
       this.batchResolver = null;
       this.running = false;
+      if (this.quiesceTimer) {
+        clearTimeout(this.quiesceTimer);
+        this.quiesceTimer = null;
+      }
     }
 
     this.conn.send({ type: "turn_done", turnId, ok, error });
@@ -774,11 +823,11 @@ export class Runner {
     this.conn.send({ type: "event", turnId, event: { type: "jungle_inbound", source, text } });
   }
 
-  // Streaming-input generator. Yields exactly one user message (the drained batch, or
-  // `/compact`), then holds the stream open until endTurn() resolves it at the turn's
-  // `result` (or a model change / interrupt path does). It never yields a follow-up —
-  // mid-turn splicing runs the follow-up turn with dead hook/MCP wiring in the CLI (see the
-  // note at the top of this file); queued items start a fresh query instead.
+  // Streaming-input generator. Yields the first batch (or `/compact`), then loops: awaiting
+  // either a spliced follow-up batch (yielded into the live query — the CLI folds it into the
+  // running turn or queues it as the next one) or null from endTurn() / a model change, which
+  // makes the generator return so stdin closes and the query ends. turnYields counts every
+  // user message handed to the CLI — the close rule in runTurn compares it against results.
   private async *makeInputGenerator(
     firstBatch: QueueItem[],
     turnId: string,
@@ -788,32 +837,88 @@ export class Runner {
     // compaction, emits a compact_boundary + result, and the query ends.
     if (compacting) {
       this.sendInboundEvent(turnId, "compact", "/compact");
+      this.turnYields++;
       yield {
         type: "user",
         message: { role: "user", content: "/compact" },
         parent_tool_use_id: null,
       } as SDKUserMessage;
     } else {
-      yield await this.toUserMessageAndNotify(firstBatch, turnId, "trigger");
+      const first = await this.toUserMessageAndNotify(firstBatch, turnId, "trigger");
+      this.turnYields++;
+      yield first;
     }
 
-    // Keep the streaming input open until the turn ends. Closing the input right after the
-    // yield would end the query before the model even ran; endTurn() (at `result`) or a
-    // pending-model restart resolves this and lets the generator return.
-    await new Promise<QueueItem[] | null>((resolve) => {
-      this.batchResolver = resolve;
-    });
+    while (true) {
+      // If a model change is pending, end the query so it can restart with the new model.
+      if (this.pendingModel !== null) return;
+
+      const batch = await new Promise<QueueItem[] | null>((resolve) => {
+        this.batchResolver = resolve;
+        // Items that arrived while we were yielding (batchResolver momentarily unset) —
+        // deliver them now.
+        if (this.queue.length > 0 && this.pendingModel === null) {
+          this.batchResolver = null;
+          const items = this.queue;
+          this.queue = [];
+          this.conn.send({ type: "consumed", inboxIds: items.map((i) => i.inboxId) });
+          resolve(items);
+        }
+      });
+
+      if (batch === null || batch.length === 0) return;
+      const msg = await this.toUserMessageAndNotify(batch, turnId, "inbox");
+      this.turnYields++;
+      yield msg;
+    }
   }
 
-  // Called after a `result`: end the streaming-input query by resolving the held promise so
-  // makeInputGenerator returns, the CLI subprocess exits, and runTurn falls through to
-  // turn_done + state:idle. Items that queued up while the turn ran are picked up by the
-  // maybeStartTurn at the tail of runTurn as a fresh query (same resumed session).
+  // End the streaming-input query by resolving the awaited batch with null so
+  // makeInputGenerator returns, stdin closes, the CLI subprocess finishes, and runTurn falls
+  // through to turn_done + state:idle. ONLY safe when no spliced turn is still pending in the
+  // CLI — callers go through the close rule in runTurn's result branch (or the quiescence
+  // window), never directly on enqueue. No-op while the generator is mid-yield (batchResolver
+  // unset); the close rule re-fires at the next result.
   private endTurn(): void {
     if (!this.batchResolver) return;
+    if (this.quiesceTimer) {
+      clearTimeout(this.quiesceTimer);
+      this.quiesceTimer = null;
+    }
     const resolve = this.batchResolver;
     this.batchResolver = null;
     resolve(null);
+  }
+
+  // Arm (or re-arm) the quiescence window: yields > results at a `result` means a spliced
+  // message is unaccounted for — either its turn is about to start (an init/assistant/user
+  // event cancels this) or it folded into the turn that just ended (silence: this fires and
+  // closes the query).
+  private armQuiesceTimer(): void {
+    if (this.quiesceTimer) clearTimeout(this.quiesceTimer);
+    this.quiesceTimer = setTimeout(() => {
+      this.quiesceTimer = null;
+      log.info("quiescence window elapsed — closing input", {
+        yields: this.turnYields,
+        results: this.turnResults,
+      });
+      this.endTurn();
+    }, Runner.QUIESCE_MS);
+    this.quiesceTimer.unref?.();
+  }
+
+  // Splice newly-arrived items into the live query: resolve the generator's pending await so
+  // it yields them as a follow-up user message on the CLI's stdin. The CLI folds them into
+  // the running turn or queues them as the next turn — both fully wired (hooks, MCP) as long
+  // as stdin stays open, which the close rule guarantees.
+  private deliverFollowupBatch(): void {
+    if (!this.batchResolver) return;
+    const items = this.queue;
+    this.queue = [];
+    const resolve = this.batchResolver;
+    this.batchResolver = null;
+    this.conn.send({ type: "consumed", inboxIds: items.map((i) => i.inboxId) });
+    resolve(items);
   }
 
   // Build one user message from a batch. Items with attachments have their files downloaded
