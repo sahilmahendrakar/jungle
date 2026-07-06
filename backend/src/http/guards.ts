@@ -4,9 +4,14 @@ import * as auth from "../auth";
 import { ApiError } from "./errors";
 
 // Strip server-only secrets before a participant row leaves the backend. runner_token
-// authenticates an agent's runner socket — it must NEVER reach clients.
-export function publicParticipant<T extends { runner_token?: unknown }>(p: T): Omit<T, "runner_token"> {
-  const { runner_token: _secret, ...pub } = p;
+// authenticates an agent's runner socket — it must NEVER reach clients. memory/memory_updated_at
+// aren't secret (GET /api/agents/:id/memory serves them) but the MEMORY.md mirror can be ~12KB
+// per agent — too fat to ride along in every participant list, so they're stripped here too.
+export function publicParticipant<T extends { runner_token?: unknown }>(
+  p: T,
+): Omit<T, "runner_token" | "memory" | "memory_updated_at"> {
+  const { runner_token: _secret, memory: _mem, memory_updated_at: _memAt, ...pub } =
+    p as T & { memory?: unknown; memory_updated_at?: unknown };
   return pub;
 }
 

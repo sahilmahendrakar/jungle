@@ -1,6 +1,12 @@
 import { Router } from "express";
 import { randomBytes } from "node:crypto";
-import { isAllowedEffort, isAllowedModel, isSdkMode, getIntegrationType } from "@jungle/shared";
+import {
+  isAllowedEffort,
+  isAllowedModel,
+  isSdkMode,
+  getIntegrationType,
+  PERSONA_MAX_LENGTH,
+} from "@jungle/shared";
 import * as db from "../../db";
 import * as auth from "../../auth";
 import * as runners from "../../runners";
@@ -107,11 +113,24 @@ router.patch(
   "/api/agents/:id",
   wrap(async (req, res) => {
     const { agent } = await requireAgent(req);
-    const patch: { displayName?: string; mode?: string; model?: string; effort?: string } = {};
+    const patch: {
+      displayName?: string;
+      mode?: string;
+      model?: string;
+      effort?: string;
+      persona?: string | null;
+    } = {};
     if (req.body?.displayName !== undefined) {
       const dn = String(req.body.displayName).trim();
       if (!dn) throw new ApiError(400, "display name cannot be empty");
       patch.displayName = dn;
+    }
+    if (req.body?.persona !== undefined) {
+      const persona = String(req.body.persona ?? "").trim();
+      if (persona.length > PERSONA_MAX_LENGTH) {
+        throw new ApiError(400, `persona must be at most ${PERSONA_MAX_LENGTH} characters`);
+      }
+      patch.persona = persona || null; // empty clears it
     }
     if (req.body?.mode !== undefined) {
       const mode = String(req.body.mode);
@@ -132,6 +151,12 @@ router.patch(
       patch.effort = effort;
     }
     const updated = await db.updateAgentConfig(agent.id, patch);
+    // Persona/display name live in the system prompt, which the runner only receives via
+    // `configure` — push a fresh one so a long-connected runner picks the edit up at its next
+    // turn instead of waiting for a reconnect.
+    if (updated && (patch.persona !== undefined || patch.displayName !== undefined)) {
+      await runners.reconfigure(agent.id);
+    }
     const pub = updated ? publicParticipant(updated) : updated;
     broadcastWorkspace(agent.workspace_id, { type: "participant_updated", participant: pub });
     res.json(pub);
@@ -193,6 +218,18 @@ router.delete(
     await db.deleteAgent(agent.id);
     broadcastWorkspace(agent.workspace_id, { type: "participant_deleted", participantId: agent.id });
     res.json({ ok: true });
+  }),
+);
+
+// The agent's curated long-term memory (its /workspace/MEMORY.md, mirrored to the DB via the
+// runner's `memory` frame) — the profile panel's read-only Memory section. Served on demand
+// rather than riding in participant payloads (publicParticipant strips it: it can be ~12KB).
+router.get(
+  "/api/agents/:id/memory",
+  wrap(async (req, res) => {
+    const { agent } = await requireAgent(req);
+    const row = await db.getAgentMemory(agent.id);
+    res.json({ memory: row?.memory ?? null, updatedAt: row?.memory_updated_at ?? null });
   }),
 );
 

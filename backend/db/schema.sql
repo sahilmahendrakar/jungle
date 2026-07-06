@@ -57,6 +57,13 @@ alter table participants add column if not exists context_tokens     integer;
 alter table participants add column if not exists context_max_tokens integer;
 alter table participants add column if not exists context_updated_at timestamptz;
 
+-- Durable agent memory (mirror of the runner's /workspace/MEMORY.md, reported via the `memory`
+-- frame) + creator-written persona injected into the system prompt.
+-- See migrations/016_agent_memory_persona.sql.
+alter table participants add column if not exists memory             text;
+alter table participants add column if not exists memory_updated_at  timestamptz;
+alter table participants add column if not exists persona            text;
+
 -- Per-agent runner provider (gradual Docker -> Fly rollout). 'docker' keeps today's behavior;
 -- 'fly' routes provisioner calls to FlyProvisioner. runner_meta holds provider handles
 -- (Fly: {machineId, volumeId}); null for docker. See migrations/007_fly_provisioner.sql.

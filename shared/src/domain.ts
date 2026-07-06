@@ -32,6 +32,10 @@ export interface ParticipantBase {
   context_updated_at: string | null;
   runner_provider: string; // 'docker' | 'fly' — which Provisioner impl owns this agent's runner
   runner_meta: Record<string, unknown> | null; // provider handles (Fly: {machineId, volumeId})
+  // Creator-written role/personality injected into the agent's system prompt (agents; null = none).
+  // The agent's MEMORY.md mirror is NOT here — it can be large, so clients fetch it on demand
+  // via GET /api/agents/:id/memory.
+  persona: string | null;
 }
 
 // A participant as sent to clients: the public row plus a live `status` (agents only, computed

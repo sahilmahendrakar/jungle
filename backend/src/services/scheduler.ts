@@ -223,8 +223,9 @@ async function dispatchScheduledTurn(s: db.ScheduleRow): Promise<void> {
 // The turn prompt is fully self-contained: the firing agent has no memory of the conversation
 // where the schedule was created, and output is NOT forced — sending nothing is a normal outcome.
 function buildScheduledTurnInput(agent: db.AgentRow, s: db.ScheduleRow, channelName: string): string {
+  const now = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   return (
-    `You are @${agent.handle} in Jungle. This is a SCHEDULED turn — nobody just messaged you. ` +
+    `[Jungle turn] SCHEDULED turn for @${agent.handle} — nobody just messaged you · now: ${now}\n` +
     `A schedule (${cadenceText(s)}) fired. Its standing instruction is quoted verbatim below; ` +
     `you have no other memory of why it was created, so take it at face value:\n\n` +
     `>>> ${s.prompt}\n\n` +

@@ -134,6 +134,15 @@ export interface ContextUsageFrame {
   percent: number;
 }
 
+// The agent's curated long-term memory (/workspace/MEMORY.md) changed. Sent after any turn
+// that modified the file (hash-compared), and once after `configure` to heal backend drift.
+// `content` is the full current file text ("" = file absent/empty). The backend persists it on
+// the participant row so the profile panel can show what the agent knows even while it sleeps.
+export interface MemoryFrame {
+  type: "memory";
+  content: string;
+}
+
 export interface FatalFrame {
   type: "fatal";
   error: string;
@@ -153,6 +162,7 @@ export type RunnerToBackend =
   | ConfirmRequestFrame
   | TurnDoneFrame
   | ContextUsageFrame
+  | MemoryFrame
   | FatalFrame;
 
 // ---- Backend -> runner ----

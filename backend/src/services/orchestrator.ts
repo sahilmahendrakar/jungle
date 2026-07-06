@@ -58,13 +58,18 @@ function formatTriggerMessage(message: PersistedMessage): string {
   );
 }
 
-// Compose the turn-input prompt for a dispatched agent. There are three shapes:
+// Compose the turn-input prompt for a dispatched agent: a one-line situation header (where +
+// when — agents have no clock otherwise), a clearly-labeled context block, the emphasized
+// trigger message, and the shape-specific routing footer. Three shapes:
 //  - Existing thread: the agent gets the THREAD transcript; omitting threadRootId keeps its reply
 //    in that thread (it can pass threadRootId:null / alsoToChannel to reach the whole channel).
 //  - Top-level channel message: the agent gets recent channel context AND the triggering message's
 //    id, and decides — pass that id as threadRootId to reply in a thread under it (encouraged, keeps
 //    the channel tidy), or omit it to post a plain message to the channel.
 //  - DM: recent context; reply goes top-level (DMs don't thread).
+// General behavior (narrate progress, tone, threads-vs-channel philosophy) lives in the system
+// prompt (runners.ts systemPromptAppend) — this footer carries only the routing facts that are
+// concrete to THIS dispatch (channel name, thread root id).
 async function buildAgentTurnInput(
   agent: db.AgentRow,
   triggerChannelId: string,
@@ -74,40 +79,35 @@ async function buildAgentTurnInput(
   triggerMessage: PersistedMessage,
 ): Promise<string> {
   const triggerBlock = formatTriggerMessage(triggerMessage);
+  const now = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   if (existingThreadRootId) {
     return (
-      `You are @${agent.handle} in Jungle. You were addressed in a thread in #${triggerChannelName}.\n\n` +
-      `Thread so far:\n${await db.getThreadContext(existingThreadRootId, RECENT_CONTEXT_LIMIT)}\n\n` +
+      `[Jungle turn] You (@${agent.handle}) were addressed in a THREAD in #${triggerChannelName} · now: ${now}\n\n` +
+      `Thread so far (context):\n${await db.getThreadContext(existingThreadRootId, RECENT_CONTEXT_LIMIT)}\n\n` +
       `${triggerBlock}\n\n` +
-      `Reply by calling send_message with to:"#${triggerChannelName}" — your reply stays in this ` +
-      `thread automatically, which is where your progress updates and results should go. Post ` +
-      `frequent short updates as you work (e.g. "On it", your plan, what you're starting on). If a ` +
-      `message is meant for the whole channel instead, set alsoToChannel:true (posts to both) or ` +
-      `pass threadRootId:null (posts to the channel only). You may also DM someone with to:"@handle".`
+      `Routing: send_message with to:"#${triggerChannelName}" — your reply stays in this thread ` +
+      `automatically (progress updates and results go here). For something the whole channel ` +
+      `should see, set alsoToChannel:true (posts to both) or threadRootId:null (channel only). ` +
+      `DM someone with to:"@handle".`
     );
   }
   if (topLevelChannelMessageId) {
     return (
-      `You are @${agent.handle} in Jungle. You were addressed in #${triggerChannelName} by message ` +
-      `id ${topLevelChannelMessageId}.\n\n` +
-      `Recent conversation:\n${await db.getRecentContext(triggerChannelId, RECENT_CONTEXT_LIMIT)}\n\n` +
+      `[Jungle turn] You (@${agent.handle}) were addressed in #${triggerChannelName} · now: ${now}\n\n` +
+      `Recent conversation (context):\n${await db.getRecentContext(triggerChannelId, RECENT_CONTEXT_LIMIT)}\n\n` +
       `${triggerBlock}\n\n` +
-      `Reply by calling send_message with to:"#${triggerChannelName}". You decide where it lands: ` +
-      `to reply in a THREAD under the message that addressed you (preferred — keeps the channel ` +
-      `tidy, and where your progress updates should go), pass threadRootId:"${topLevelChannelMessageId}". ` +
-      `To post a plain message to the whole channel instead, just omit threadRootId. Either way, ` +
-      `send frequent short updates as you work (e.g. "On it — looking into this", "Here's my ` +
-      `plan …", "Starting on the refactor …") rather than going silent until you're done. You may ` +
-      `also DM someone with to:"@handle", or post in another channel you belong to.`
+      `Routing: send_message with to:"#${triggerChannelName}". Preferred: reply in a THREAD under ` +
+      `the message that addressed you by passing threadRootId:"${topLevelChannelMessageId}" ` +
+      `(progress updates go there too). Omit threadRootId only for a plain channel-level post. ` +
+      `DM someone with to:"@handle", or post in another channel you belong to.`
     );
   }
   return (
-    `You are @${agent.handle} in Jungle. You were addressed in #${triggerChannelName}.\n\n` +
-    `Recent conversation:\n${await db.getRecentContext(triggerChannelId, RECENT_CONTEXT_LIMIT)}\n\n` +
+    `[Jungle turn] You (@${agent.handle}) were addressed in a DM · now: ${now}\n\n` +
+    `Recent conversation (context):\n${await db.getRecentContext(triggerChannelId, RECENT_CONTEXT_LIMIT)}\n\n` +
     `${triggerBlock}\n\n` +
-    `Respond by calling send_message — to reply here use to:"#${triggerChannelName}". Send a short ` +
-    `update as soon as you pick up non-trivial work, then brief progress notes as you go. ` +
-    `You may also DM someone with to:"@handle", or post in another channel you belong to.`
+    `Routing: reply with send_message to:"#${triggerChannelName}". ` +
+    `You may also DM someone else with to:"@handle", or post in another channel you belong to.`
   );
 }
 
@@ -425,6 +425,15 @@ export function buildRunnerHooks(): runners.RunnerHooks {
         tokens: usage.tokens,
         maxTokens: usage.maxTokens,
       });
+    },
+    // The agent's MEMORY.md changed -> persist the mirror + broadcast so an open profile
+    // panel's Memory section live-updates (workspace-scoped). Content itself is fetched via
+    // GET /api/agents/:id/memory, so the broadcast only signals "refetch".
+    onMemoryUpdated: (agentId, content) => {
+      void db
+        .updateAgentMemory(agentId, content)
+        .catch((e) => console.error("updateAgentMemory:", e));
+      broadcastAgentWorkspace(agentId, { type: "agent_memory_changed", agentId });
     },
     // A turn crashed -> post a notice from the agent into the channel that triggered it so the
     // humans waiting aren't ghosted. cascadeBudget 0: a crash notice must never trigger others.

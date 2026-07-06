@@ -71,6 +71,13 @@ export interface AgentContextEvent {
   maxTokens: number;
 }
 
+// An agent's long-term memory (MEMORY.md mirror) changed. Content is intentionally not carried
+// (it can be ~12KB): an open profile panel refetches GET /api/agents/:id/memory.
+export interface AgentMemoryChangedEvent {
+  type: "agent_memory_changed";
+  agentId: string;
+}
+
 // An always-ask agent is requesting confirmation for a sensitive tool call.
 export interface ToolConfirmationRequestEvent {
   type: "tool_confirmation_request";
@@ -111,6 +118,7 @@ export type ServerEvent =
   | ParticipantDeletedEvent
   | AgentEventEvent
   | AgentContextEvent
+  | AgentMemoryChangedEvent
   | ToolConfirmationRequestEvent
   | ToolConfirmationResolvedEvent
   | ScheduleChangedEvent;

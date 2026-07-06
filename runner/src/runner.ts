@@ -20,7 +20,7 @@ import {
   type Query,
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { log } from "./log.js";
@@ -192,6 +192,11 @@ export class Runner {
   // Streaming-input generator plumbing: the running query's generator awaits
   // `nextBatch`; we resolve it with a batch (follow-up turn) or null (end query).
   private batchResolver: ((batch: QueueItem[] | null) => void) | null = null;
+
+  // Long-term memory reporting: hash of the MEMORY.md content most recently sent to the
+  // backend (`memory` frame), so we only report actual changes. null = nothing reported yet
+  // on this process; the post-configure report seeds it.
+  private lastMemoryHash: string | null = null;
 
   // In-flight request/response correlation.
   private pendingSendMessages = new Map<string, (r: SendMessageResult) => void>();
@@ -393,6 +398,9 @@ export class Runner {
     this.configured = true;
     void saveState({ sessionId: this.sessionId, model: this.model });
     this.sendState();
+    // Report the current MEMORY.md once per (re)configure so the backend's mirror heals any
+    // drift (e.g. rows migrated before memory existed, or a report lost across a disconnect).
+    void this.reportMemoryIfChanged();
     this.maybeStartTurn();
   }
 
@@ -545,6 +553,14 @@ export class Runner {
       allowedTools.push(...grant.safeTools);
       if (!grant.requireApproval) allowedTools.push(`mcp__${grant.key}__*`);
     }
+    // Inject the agent's curated long-term memory (MEMORY.md) into this turn's system prompt.
+    // Read fresh each turn so edits the agent made last turn apply immediately.
+    const memory = await this.readMemory();
+    const systemAppend =
+      this.systemPromptAppend +
+      (memory
+        ? `\n\n— Your memory (the current contents of ${this.memoryPath()}) —\n${memory}`
+        : "");
     const q = query({
       prompt: this.makeInputGenerator(firstBatch, turnId, compacting),
       options: {
@@ -556,7 +572,7 @@ export class Runner {
         systemPrompt: {
           type: "preset",
           preset: "claude_code",
-          append: this.systemPromptAppend || undefined,
+          append: systemAppend || undefined,
         },
         mcpServers,
         allowedTools,
@@ -641,6 +657,10 @@ export class Runner {
     }
 
     this.conn.send({ type: "turn_done", turnId, ok, error });
+
+    // If the turn changed MEMORY.md, mirror it to the backend (profile panel's Memory section).
+    // After turn_done so a slow read can't delay the idle transition; best-effort by design.
+    void this.reportMemoryIfChanged();
 
     // Apply a pending model change now (at the turn boundary).
     if (this.pendingModel !== null) {
@@ -899,6 +919,7 @@ export class Runner {
   private async preToolUseHook(input: {
     hook_event_name: string;
     tool_name?: string;
+    tool_input?: unknown;
   }): Promise<{
     continue?: boolean;
     hookSpecificOutput?: {
@@ -908,6 +929,15 @@ export class Runner {
   }> {
     // Always let the auto-allowed send_message tool through untouched.
     if (input.tool_name === "mcp__jungle__send_message") return { continue: true };
+    // Writes to the agent's own MEMORY.md never need a human: memory upkeep is expected,
+    // bounded behavior (the system prompt asks for it), and a confirm card on every remembered
+    // fact would train agents (and users) to stop using memory at all.
+    if (
+      (input.tool_name === "Write" || input.tool_name === "Edit") &&
+      this.isMemoryPath((input.tool_input as { file_path?: unknown } | undefined)?.file_path)
+    ) {
+      return { continue: true };
+    }
     // Gmail write tools honor the integration's explicit send-approval toggle, independent of the
     // agent's permission mode: gated (ask) when requireSendApproval is on, auto-allowed when off.
     if (GMAIL_WRITE_TOOLS.has(input.tool_name ?? "")) {
@@ -1097,6 +1127,52 @@ export class Runner {
     const gh = getGhToken();
     if (gh) env.GH_TOKEN = gh;
     return env;
+  }
+
+  // ---- long-term memory (MEMORY.md) ----
+
+  private memoryPath(): string {
+    return path.join(this.workspace, "MEMORY.md");
+  }
+
+  // Does a tool call's file_path target MEMORY.md? Resolved against the workspace so relative
+  // paths ("MEMORY.md" with cwd=/workspace) and absolute ones both match.
+  private isMemoryPath(filePath: unknown): boolean {
+    if (typeof filePath !== "string" || !filePath) return false;
+    return path.resolve(this.workspace, filePath) === this.memoryPath();
+  }
+
+  // The memory injected into each turn's system prompt is bounded so a runaway file can't eat
+  // the context window; the truncation note tells the agent to prune (the system prompt also
+  // asks it to stay well under this).
+  private static readonly MEMORY_MAX_CHARS = 12_000;
+
+  private async readMemory(): Promise<string | null> {
+    try {
+      const raw = (await fs.readFile(this.memoryPath(), "utf8")).trim();
+      if (!raw) return null;
+      if (raw.length <= Runner.MEMORY_MAX_CHARS) return raw;
+      return (
+        raw.slice(0, Runner.MEMORY_MAX_CHARS) +
+        "\n\n[MEMORY.md truncated — it exceeds the injected limit; prune it down]"
+      );
+    } catch {
+      return null; // absent/unreadable = no memory
+    }
+  }
+
+  // Mirror MEMORY.md to the backend when it changed since the last report ("" = absent/empty,
+  // so a deleted file clears the backend copy too). Best-effort: never throws, and the hash is
+  // only advanced on a successful send so a dropped frame is retried at the next boundary.
+  private async reportMemoryIfChanged(): Promise<void> {
+    try {
+      const content = (await this.readMemory()) ?? "";
+      const hash = createHash("sha256").update(content).digest("hex");
+      if (hash === this.lastMemoryHash) return;
+      if (this.conn.send({ type: "memory", content })) this.lastMemoryHash = hash;
+    } catch (err) {
+      log.warn("memory report failed", { err: String(err) });
+    }
   }
 
   // Only pass `resume` when the session transcript actually exists — a stale sessionId

@@ -43,6 +43,10 @@ export function isSdkMode(mode: string): mode is PermissionMode {
   return (SDK_MODES as readonly string[]).includes(mode);
 }
 
+// Creator-written agent persona (role/personality), injected verbatim into the agent's system
+// prompt — bounded because it rides in every turn's system prompt.
+export const PERSONA_MAX_LENGTH = 4000;
+
 // --- Schedules (scheduled agent turns) ---
 
 // Live schedules per agent ("live" = could still fire: pending or paused; completed one-shots

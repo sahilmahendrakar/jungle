@@ -15,11 +15,13 @@ export interface AgentRow {
   runner_token: string | null;
   runner_provider: string;
   runner_meta: Record<string, unknown> | null;
+  // Creator-written role/personality, injected verbatim into the system prompt (null = none).
+  persona: string | null;
 }
 
 // The column list backing every AgentRow query (kept in one place so the shape can't drift).
 const AGENT_COLUMNS = `id, workspace_id, handle, display_name, repo, model, mode, effort, runtime,
-                       runner_token, runner_provider, runner_meta`;
+                       runner_token, runner_provider, runner_meta, persona`;
 
 // The workspace an agent belongs to (for scoping workspace-wide broadcasts of its events/status).
 export async function getAgentWorkspaceId(agentId: string): Promise<string | null> {

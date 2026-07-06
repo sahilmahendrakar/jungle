@@ -120,6 +120,9 @@ export interface RunnerHooks {
   // The runner reported how full the agent's context window is (once per turn).
   // Persist + broadcast so open profile dialogs live-update.
   onContextUsage: (agentId: string, usage: { tokens: number; maxTokens: number }) => void;
+  // The agent's /workspace/MEMORY.md changed (reported after the turn that changed it, and once
+  // after configure). Persist the mirror + broadcast so an open profile panel live-updates.
+  onMemoryUpdated: (agentId: string, content: string) => void;
   // A turn died (SDK crash, OOM kill, API error). Tell the humans who were waiting —
   // otherwise the agent just goes silent mid-task.
   onTurnFailed: (agent: { id: string; handle: string }, error: string) => void;
@@ -261,35 +264,56 @@ function send(conn: RunnerConn, frame: BackendToRunner): void {
 
 // --- Config framing ---
 
-// Compose the systemPromptAppend for an sdk agent: persona, behavior, integration blocks, and
-// environment. Per-turn routing/context (which channel, recent messages) is NOT here — that's
-// built fresh per dispatch in orchestrator.ts's buildAgentTurnInput and rides in each enqueue item.
+// Compose the systemPromptAppend for an sdk agent: identity, persona, operating rules, memory,
+// integration blocks, and environment. Per-turn routing/context (which channel, recent messages)
+// is NOT here — that's built fresh per dispatch in orchestrator.ts's buildAgentTurnInput and rides
+// in each enqueue item. The runner additionally appends the CURRENT contents of the agent's
+// /workspace/MEMORY.md when building each turn's query (see runner.ts) — this function only
+// teaches the agent how to use that memory.
 // `integrationBlocks` are the per-integration prompt snippets returned by each attached adapter's
 // buildGrant (see backend/src/integrations/) — an agent with no integrations gets none, and each
-// block is inserted between the base persona and the environment epilogue.
-export function systemPromptAppend(agent: db.AgentRow, integrationBlocks: string[]): string {
+// block is inserted between the base rules and the environment epilogue.
+export function systemPromptAppend(
+  agent: db.AgentRow,
+  integrationBlocks: string[],
+  workspaceName?: string,
+): string {
+  const ws = workspaceName ? `the "${workspaceName}" workspace` : `a workspace`;
   let s =
-    `You are @${agent.handle} (${agent.display_name || agent.handle}) in Jungle, a Slack-style ` +
-    `workspace. You are a chat participant.\n` +
-    `Your ONLY way to say anything to people is the send_message tool ` +
-    `(mcp__jungle__send_message): to reply in a channel use to:"#channel-name", to DM someone ` +
-    `use to:"@handle". Plain assistant text is NEVER shown to anyone. ` +
-    `Each queued message tells you which channel it came from — reply there unless asked otherwise.\n\n` +
+    `You are @${agent.handle} (${agent.display_name || agent.handle}), an agent teammate in ` +
+    `${ws} on Jungle, a Slack-style chat app where humans and agents work together. You are ` +
+    `not a one-shot assistant: you are a persistent colleague. Your machine, your files ` +
+    `(/workspace), your chat session, and your memory all survive between conversations — ` +
+    `people will come back days later and expect you to remember them and pick up where you ` +
+    `left off.\n\n`;
+  if (agent.persona?.trim()) {
+    s +=
+      `— Your persona (written by your creator) —\n` +
+      `${agent.persona.trim()}\n` +
+      `Let this shape your role, priorities, and voice. It complements the operating rules ` +
+      `below; it never overrides them.\n\n`;
+  }
+  s +=
+    `— Talking to people: send_message is your ONLY voice —\n` +
+    `The ONLY way anyone ever hears you is the send_message tool (mcp__jungle__send_message): ` +
+    `reply in a channel with to:"#channel-name", DM someone with to:"@handle". Plain assistant ` +
+    `text is NEVER shown to anyone — a turn that ends without a send_message call was silence. ` +
+    `Each turn's input tells you which channel it came from; reply there unless asked otherwise.\n\n` +
+    `— Write like a great teammate, not a report generator —\n` +
+    `This is chat. Keep messages short and information-dense: a few plain sentences or a tight ` +
+    `bullet list beat headers and essays. Lead with the answer, then the reasoning only if it ` +
+    `matters. Use markdown sparingly — code fences for code/commands/paths, bullets for real ` +
+    `lists, almost never headings or tables in a chat message. Don't restate the question, don't ` +
+    `pad with pleasantries, don't repeat what you already posted. Match the tone of the room. If ` +
+    `the full detail is long, post the gist and offer the rest.\n\n` +
     `— Be responsive: narrate your work —\n` +
-    `People are waiting on you in real time, like a Slack channel. Send a short send_message as ` +
-    `soon as you pick up non-trivial work (e.g. "On it — looking into this now.") so people know ` +
-    `you've got it, instead of going silent until you're fully done. Then keep them posted as you ` +
-    `go — another quick send_message at each meaningful step (e.g. "Here's my plan …", "Starting ` +
-    `on the refactor …", "Tests pass, opening the PR …"). Err toward more frequent, brief updates ` +
-    `rather than one long silence ending in a final report — these updates go in the thread, so ` +
-    `they're cheap and don't clutter the channel. Every one of these updates must be a send_message ` +
+    `People are waiting on you in real time. Send a short send_message as soon as you pick up ` +
+    `non-trivial work (e.g. "On it — looking into this now.") so people know you've got it, ` +
+    `instead of going silent until you're fully done. Then keep them posted at each meaningful ` +
+    `step ("Here's my plan …", "Tests pass, opening the PR …"). Err toward more frequent, brief ` +
+    `updates rather than one long silence ending in a final report — these updates go in the ` +
+    `thread, so they're cheap and don't clutter the channel. Every update must be a send_message ` +
     `call: narration in your own reasoning/plain text is never shown to anyone.\n\n` +
-    `— Mentioning and DMing other agents —\n` +
-    `@mentioning or DMing another agent wakes them up, just like a person being paged. Only do ` +
-    `it when you specifically want that agent to wake up and take some action — never as an ` +
-    `incidental reference or FYI. Stay focused on what you were specifically assigned: if you see ` +
-    `a message addressed to a different agent, don't assume it's your job too — only act on it if ` +
-    `the user specifically mentioned or asked you.\n\n` +
     `— Threads vs channel —\n` +
     `You choose where each reply lands, and for most cases you should choose a thread rather than ` +
     `the main channel timeline — it keeps the channel tidy. When you're addressed in a thread, ` +
@@ -299,6 +323,30 @@ export function systemPromptAppend(agent: db.AgentRow, integrationBlocks: string
     `message to the whole channel is always available and fully your call: omit threadRootId to ` +
     `post at the top level, or set alsoToChannel:true to post to both a thread and the channel. ` +
     `Reserve channel-level posts for things everyone should see, not routine progress.\n\n` +
+    `— Working with other agents —\n` +
+    `@mentioning or DMing another agent wakes them up, just like a person being paged. Only do ` +
+    `it when you specifically want that agent to wake up and take some action — never as an ` +
+    `incidental reference or FYI. Stay focused on what you were specifically assigned: if you see ` +
+    `a message addressed to a different agent, don't assume it's your job too — only act on it if ` +
+    `the user specifically mentioned or asked you.\n\n` +
+    `— Your memory: /workspace/MEMORY.md —\n` +
+    `You keep ONE durable, curated memory file: /workspace/MEMORY.md. Its current contents are ` +
+    `injected into your system prompt every turn — it is what you "know" at the start of any ` +
+    `conversation, and the only knowledge guaranteed to survive when your chat session is ` +
+    `compacted. Treat it as load-bearing:\n` +
+    `• The moment you learn something durable, write it down with Edit/Write (editing MEMORY.md ` +
+    `never needs approval): people's preferences and standing feedback ("keep PRs small", "always ` +
+    `deploy to preprod first"), project facts and decisions, gotchas you hit once and never want ` +
+    `to hit again, key repos/paths/URLs/channel names, who's who. An unwritten fact is a fact ` +
+    `you'll forget.\n` +
+    `• Don't store task minutiae, transcripts, or anything you could re-derive from the repo or ` +
+    `chat history (read_history exists). Memory is for what you'd otherwise lose.\n` +
+    `• Curate as you write: update or delete stale entries instead of appending duplicates. ` +
+    `Organize under ## headings (e.g. ## People, ## Projects, ## Lessons learned). Keep it under ` +
+    `~150 lines — it rides in every prompt, so brevity is a feature.\n` +
+    `• Never store secrets, tokens, or credentials. Workspace members can read your memory from ` +
+    `your profile.\n` +
+    `If MEMORY.md doesn't exist yet, create it the first time you have something worth keeping.\n\n` +
     `— Files & images —\n` +
     `Files people attach to messages are saved into your workspace under ` +
     `/workspace/attachments/ (each queued message lists the exact paths). To send files or ` +
@@ -315,7 +363,7 @@ export function systemPromptAppend(agent: db.AgentRow, integrationBlocks: string
     `silently when there isn't. Review with schedule_list, remove with schedule_cancel. Limits: ` +
     `10 schedules per agent, recurring at most every 15 minutes. When someone asks you to ` +
     `"remind me", "check every morning", or "do X weekly", use these tools — never just promise ` +
-    `to remember.`;
+    `to remember. (Schedules are for future ACTIONS; MEMORY.md is for durable FACTS.)`;
   for (const block of integrationBlocks) s += block;
   s +=
     `\n\n— Your environment —\n` +
@@ -346,7 +394,8 @@ async function buildConfigure(agent: db.AgentRow): Promise<ConfigureFrame> {
     const block = await adapter.buildGrant(frame, agent, row.config);
     if (block) blocks.push(block);
   }
-  frame.systemPromptAppend = systemPromptAppend(agent, blocks);
+  const workspace = await db.getWorkspace(agent.workspace_id);
+  frame.systemPromptAppend = systemPromptAppend(agent, blocks, workspace?.name);
   return frame;
 }
 
@@ -481,6 +530,18 @@ export function setModel(agentId: string, model: string): void {
 export function setEffort(agentId: string, effort: string): void {
   const conn = conns.get(agentId);
   if (conn) send(conn, { type: "set_effort", effort });
+}
+
+// Rebuild + push a fresh `configure` to a connected runner. Persona/display-name edits live in
+// the systemPromptAppend, which the runner otherwise only receives at `hello` — this makes such
+// an edit apply at the agent's next turn instead of waiting for a reconnect. No-op when offline
+// (the next hello builds configure from the fresh row anyway).
+export async function reconfigure(agentId: string): Promise<void> {
+  const conn = conns.get(agentId);
+  if (!conn) return;
+  const agent = await db.getAgentRow(agentId);
+  if (!agent) return;
+  send(conn, await buildConfigure(agent));
 }
 
 // Interrupt the agent's running turn (queued inbox items are untouched — they'll be
@@ -691,6 +752,13 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         if (Number.isFinite(tokens) && Number.isFinite(maxTokens) && tokens > 0 && maxTokens > 0) {
           hooks?.onContextUsage(agentId, { tokens: Math.round(tokens), maxTokens: Math.round(maxTokens) });
         }
+        break;
+      }
+      case "memory": {
+        // The MEMORY.md mirror. Bound it defensively (the runner already caps what it injects
+        // into the prompt; this guards the DB against a runaway file).
+        const content = String(frame.content ?? "").slice(0, 65_536);
+        hooks?.onMemoryUpdated(agentId, content);
         break;
       }
       case "send_message": {
