@@ -137,9 +137,10 @@ export interface ContextUsageFrame {
   percent: number;
 }
 
-// The agent's curated long-term memory (/workspace/MEMORY.md) changed. Sent after any turn
-// that modified the file (hash-compared), and once after `configure` to heal backend drift.
-// `content` is the full current file text ("" = file absent/empty). The backend persists it on
+// The agent's curated long-term memory changed. `content` is a rendered mirror of the agent's
+// memory: its MEMORY.md index followed by each memory file (the native Claude Code memory
+// directory on the workspace volume; "" = no memory yet). Sent after any turn that changed it
+// (hash-compared) and once after `configure` to heal backend drift. The backend persists it on
 // the participant row so the profile panel can show what the agent knows even while it sleeps.
 export interface MemoryFrame {
   type: "memory";

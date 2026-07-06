@@ -4,15 +4,20 @@
 //   - queue holds {inboxId, text}. When idle and queue non-empty, drain ALL
 //     queued items as one batch, emit turn_started + consumed, and run one
 //     streaming query() whose generator yields the batch as a single user
-//     message. While the query runs, if more items arrive AND no model change
-//     is pending, the generator yields them as a follow-up user message right
-//     away: the SDK's streamInput() pulls the next generator value and writes
-//     it to the CLI's stdin as soon as it's available, with no wait for a
-//     `result`/turn-end event, so a follow-up is spliced into the live session
-//     mid-turn, not batched until the current turn finishes. If nothing is
-//     queued when a `result` arrives, the generator returns, the query ends,
-//     and the loop restarts (also used to apply a pending model change via
-//     query restart with resume).
+//     message. Messages arriving while a query runs are NOT spliced into it:
+//     they wait in the queue until the current turn's `result`, then run as a
+//     fresh query() (resuming the same session, so the model keeps its
+//     context). Mid-turn splicing — streaming a follow-up user message into
+//     the live CLI session — is deliberately disabled: the CLI runs such a
+//     follow-up turn with dead wiring (PreToolUse hooks never fire, so
+//     default-mode confirmation gating is silently bypassed, and the
+//     in-process "jungle" MCP server connection is stale, so every
+//     send_message fails with "Stream closed"). Reproduced deterministically
+//     via backend/test/integration-sdk.mjs against SDK 0.3.198, 2026-07-06;
+//     this was the long-open prod "agent goes mute for a whole turn" bug.
+//     When a `result` arrives the generator returns, the query ends, and the
+//     loop restarts if more work is queued (also how a pending model change
+//     is applied — query restart with resume).
 import {
   query,
   type EffortLevel,
@@ -189,8 +194,10 @@ export class Runner {
   // with real messages and is naturally coalesced if pressed repeatedly.
   private compactRequested = false;
 
-  // Streaming-input generator plumbing: the running query's generator awaits
-  // `nextBatch`; we resolve it with a batch (follow-up turn) or null (end query).
+  // Streaming-input generator plumbing: the running query's generator holds its input stream
+  // open awaiting this; endTurn() (at `result`) or a model-change restart resolves it with
+  // null so the generator returns and the query ends. Never resolved with items — mid-turn
+  // splicing is disabled (see the note at the top of this file).
   private batchResolver: ((batch: QueueItem[] | null) => void) | null = null;
 
   // Long-term memory reporting: hash of the MEMORY.md content most recently sent to the
@@ -412,12 +419,9 @@ export class Runner {
       }
     }
     log.info("enqueued items", { count: items.length, queueDepth: this.queue.length });
-    // If a turn is running and there's a pending follow-up request, satisfy it.
-    if (this.running && this.batchResolver && this.pendingModel === null) {
-      this.deliverFollowupBatch();
-    } else {
-      this.maybeStartTurn();
-    }
+    // While a turn runs, items just wait — the current query ends at its `result` and the
+    // loop starts a fresh query for them (see the mid-turn-splice note at the top of file).
+    this.maybeStartTurn();
   }
 
   private async handleInterrupt(): Promise<void> {
@@ -553,13 +557,13 @@ export class Runner {
       allowedTools.push(...grant.safeTools);
       if (!grant.requireApproval) allowedTools.push(`mcp__${grant.key}__*`);
     }
-    // Inject the agent's curated long-term memory (MEMORY.md) into this turn's system prompt.
-    // Read fresh each turn so edits the agent made last turn apply immediately.
-    const memory = await this.readMemory();
+    // Inject the agent's memory INDEX into this turn's system prompt (fresh each turn, so
+    // edits made last turn apply immediately). Linked memory files are Read on demand.
+    const memoryIndex = await this.readMemoryIndex();
     const systemAppend =
       this.systemPromptAppend +
-      (memory
-        ? `\n\n— Your memory (the current contents of ${this.memoryPath()}) —\n${memory}`
+      (memoryIndex
+        ? `\n\n— Your memory index (current MEMORY.md; Read linked memory files when relevant) —\n${memoryIndex}`
         : "");
     const q = query({
       prompt: this.makeInputGenerator(firstBatch, turnId, compacting),
@@ -635,15 +639,13 @@ export class Runner {
           // Report context occupancy while the query is still alive (a control
           // request needs the subprocess up — it exits once this loop ends).
           await this.reportContextUsage(q, message);
-          // The `result` ends this turn's model work. Any follow-up that arrived while the
-          // turn was running was already streamed into the generator by handleEnqueue the
-          // moment it was enqueued (see deliverFollowupBatch) — this check only decides
-          // whether to keep the query alive. If nothing is queued, close the streaming input
-          // so the query completes, the CLI subprocess exits, and runTurn falls through to
-          // turn_done + idle. Without this the generator would await the next batch forever —
-          // subprocess stays alive, `running` never clears, and the agent is stuck "working"
-          // (idle-stop never fires).
-          this.endTurnIfQuiescent();
+          // The `result` ends this turn's model work: close the streaming input so the query
+          // completes, the CLI subprocess exits, and runTurn falls through to turn_done +
+          // idle. Messages that queued up while the turn ran start a fresh query right after
+          // (maybeStartTurn at the tail). Without this the generator would hold the stream
+          // open forever — subprocess stays alive, `running` never clears, and the agent is
+          // stuck "working" (idle-stop never fires).
+          this.endTurn();
         }
       }
     } catch (err) {
@@ -772,8 +774,11 @@ export class Runner {
     this.conn.send({ type: "event", turnId, event: { type: "jungle_inbound", source, text } });
   }
 
-  // Streaming-input generator. Yields the first batch, then awaits follow-up
-  // batches at each turn boundary until told to stop (null).
+  // Streaming-input generator. Yields exactly one user message (the drained batch, or
+  // `/compact`), then holds the stream open until endTurn() resolves it at the turn's
+  // `result` (or a model change / interrupt path does). It never yields a follow-up —
+  // mid-turn splicing runs the follow-up turn with dead hook/MCP wiring in the CLI (see the
+  // note at the top of this file); queued items start a fresh query instead.
   private async *makeInputGenerator(
     firstBatch: QueueItem[],
     turnId: string,
@@ -792,54 +797,23 @@ export class Runner {
       yield await this.toUserMessageAndNotify(firstBatch, turnId, "trigger");
     }
 
-    while (true) {
-      // If a model change is pending, end the query so it can restart with the new model.
-      if (this.pendingModel !== null) return;
-
-      const batch = await new Promise<QueueItem[] | null>((resolve) => {
-        this.batchResolver = resolve;
-        // If items arrived after we drained but before we set the resolver, deliver now.
-        if (this.queue.length > 0 && this.pendingModel === null) {
-          this.batchResolver = null;
-          const items = this.queue;
-          this.queue = [];
-          this.conn.send({ type: "consumed", inboxIds: items.map((i) => i.inboxId) });
-          resolve(items);
-        }
-      });
-
-      if (batch === null || batch.length === 0) return;
-      yield await this.toUserMessageAndNotify(batch, turnId, "inbox");
-    }
+    // Keep the streaming input open until the turn ends. Closing the input right after the
+    // yield would end the query before the model even ran; endTurn() (at `result`) or a
+    // pending-model restart resolves this and lets the generator return.
+    await new Promise<QueueItem[] | null>((resolve) => {
+      this.batchResolver = resolve;
+    });
   }
 
-  // Called after a `result`: end the streaming-input query if there's nothing more to feed
-  // it, by resolving the awaited batch with null so makeInputGenerator returns, the CLI
-  // subprocess exits, and runTurn falls through to turn_done + state:idle. No-op when a
-  // follow-up batch was already delivered mid-turn (batchResolver consumed by
-  // deliverFollowupBatch before this ever runs) or a model change is pending (handleSetModel
-  // already ended the query to restart with the new model).
-  private endTurnIfQuiescent(): void {
+  // Called after a `result`: end the streaming-input query by resolving the held promise so
+  // makeInputGenerator returns, the CLI subprocess exits, and runTurn falls through to
+  // turn_done + state:idle. Items that queued up while the turn ran are picked up by the
+  // maybeStartTurn at the tail of runTurn as a fresh query (same resumed session).
+  private endTurn(): void {
     if (!this.batchResolver) return;
-    if (this.pendingModel !== null) return;
-    if (this.queue.length > 0) return;
     const resolve = this.batchResolver;
     this.batchResolver = null;
     resolve(null);
-  }
-
-  // Called when items arrive while a turn is running and a follow-up is awaited: resolves
-  // makeInputGenerator's pending promise immediately, so the generator yields the new batch
-  // and the SDK's streamInput() writes it straight to the CLI's stdin — spliced into the live
-  // session mid-turn, without waiting for the current turn's `result`.
-  private deliverFollowupBatch(): void {
-    if (!this.batchResolver) return;
-    const items = this.queue;
-    this.queue = [];
-    const resolve = this.batchResolver;
-    this.batchResolver = null;
-    this.conn.send({ type: "consumed", inboxIds: items.map((i) => i.inboxId) });
-    resolve(items);
   }
 
   // Build one user message from a batch. Items with attachments have their files downloaded
@@ -1129,44 +1103,101 @@ export class Runner {
     return env;
   }
 
-  // ---- long-term memory (MEMORY.md) ----
+  // ---- long-term memory ----
+  //
+  // Agents use Claude Code's NATIVE memory system: a directory of markdown files (one per
+  // durable fact) indexed by a MEMORY.md, living under CLAUDE_CONFIG_DIR/projects/<slug>/memory
+  // — which is on the workspace volume (childEnv sets CLAUDE_CONFIG_DIR=<workspace>/.claude),
+  // so it survives machine recreation. The claude_code system-prompt preset already teaches the
+  // model this format and location; steering it to a different bespoke file was observed to
+  // lose against the preset's trained-in convention. The runner's roles are: (1) auto-allow
+  // writes inside the memory dir (preToolUseHook) so memory upkeep never hits a confirm card,
+  // (2) inject the INDEX into each turn's system prompt so what the agent knows is
+  // deterministic (linked files are Read on demand — Read is a safe tool), and (3) mirror
+  // index+files to the backend for the profile panel's read-only Memory section.
 
-  private memoryPath(): string {
+  private memoryDir(): string {
+    // Same project-dir slug convention as resumableSessionId (CLAUDE_CONFIG_DIR layout).
+    const slug = this.workspace.replace(/[^a-zA-Z0-9]/g, "-");
+    return path.join(this.workspace, ".claude", "projects", slug, "memory");
+  }
+
+  // A plain fallback file some agents may write anyway (and the location our system prompt
+  // mentions as equivalent); treated as part of memory for allowlisting + injection + mirror.
+  private legacyMemoryPath(): string {
     return path.join(this.workspace, "MEMORY.md");
   }
 
-  // Does a tool call's file_path target MEMORY.md? Resolved against the workspace so relative
-  // paths ("MEMORY.md" with cwd=/workspace) and absolute ones both match.
+  // Does a tool call's file_path target the agent's memory (native dir or fallback file)?
+  // Resolved against the workspace so relative and absolute paths both match.
   private isMemoryPath(filePath: unknown): boolean {
     if (typeof filePath !== "string" || !filePath) return false;
-    return path.resolve(this.workspace, filePath) === this.memoryPath();
+    const resolved = path.resolve(this.workspace, filePath);
+    return (
+      resolved === this.legacyMemoryPath() ||
+      resolved === this.memoryDir() ||
+      resolved.startsWith(this.memoryDir() + path.sep)
+    );
   }
 
-  // The memory injected into each turn's system prompt is bounded so a runaway file can't eat
-  // the context window; the truncation note tells the agent to prune (the system prompt also
-  // asks it to stay well under this).
-  private static readonly MEMORY_MAX_CHARS = 12_000;
+  // Injection cap: the index rides in every turn's system prompt, so a runaway file can't be
+  // allowed to eat the context window.
+  private static readonly MEMORY_INDEX_MAX_CHARS = 8_000;
+  // Mirror cap: index + all memory files, for the profile viewer (backend clamps again).
+  private static readonly MEMORY_MIRROR_MAX_CHARS = 32_000;
 
-  private async readMemory(): Promise<string | null> {
+  private async readFileTrimmed(p: string): Promise<string | null> {
     try {
-      const raw = (await fs.readFile(this.memoryPath(), "utf8")).trim();
-      if (!raw) return null;
-      if (raw.length <= Runner.MEMORY_MAX_CHARS) return raw;
-      return (
-        raw.slice(0, Runner.MEMORY_MAX_CHARS) +
-        "\n\n[MEMORY.md truncated — it exceeds the injected limit; prune it down]"
-      );
+      const raw = (await fs.readFile(p, "utf8")).trim();
+      return raw || null;
     } catch {
-      return null; // absent/unreadable = no memory
+      return null;
     }
   }
 
-  // Mirror MEMORY.md to the backend when it changed since the last report ("" = absent/empty,
-  // so a deleted file clears the backend copy too). Best-effort: never throws, and the hash is
-  // only advanced on a successful send so a dropped frame is retried at the next boundary.
+  // The memory INDEX injected into each turn's system prompt: the native dir's MEMORY.md,
+  // plus the fallback /workspace/MEMORY.md if an agent used that instead.
+  private async readMemoryIndex(): Promise<string | null> {
+    const parts: string[] = [];
+    const native = await this.readFileTrimmed(path.join(this.memoryDir(), "MEMORY.md"));
+    if (native) parts.push(native);
+    const legacy = await this.readFileTrimmed(this.legacyMemoryPath());
+    if (legacy) parts.push(legacy);
+    if (!parts.length) return null;
+    const joined = parts.join("\n\n");
+    return joined.length <= Runner.MEMORY_INDEX_MAX_CHARS
+      ? joined
+      : joined.slice(0, Runner.MEMORY_INDEX_MAX_CHARS) +
+          "\n\n[memory index truncated — prune MEMORY.md down]";
+  }
+
+  // Everything for the backend mirror: the index first, then each memory file under the
+  // native dir (alphabetical), each with a filename heading so the viewer reads naturally.
+  private async readMemoryMirror(): Promise<string> {
+    const parts: string[] = [];
+    const index = await this.readMemoryIndex();
+    if (index) parts.push(index);
+    try {
+      const entries = (await fs.readdir(this.memoryDir())).filter(
+        (f) => f.endsWith(".md") && f !== "MEMORY.md",
+      );
+      entries.sort();
+      for (const f of entries) {
+        const body = await this.readFileTrimmed(path.join(this.memoryDir(), f));
+        if (body) parts.push(`---\n**${f}**\n\n${body}`);
+      }
+    } catch {
+      // no memory dir yet — index (or nothing) is the whole mirror
+    }
+    return parts.join("\n\n").slice(0, Runner.MEMORY_MIRROR_MAX_CHARS);
+  }
+
+  // Mirror memory to the backend when it changed since the last report ("" = absent/empty, so
+  // wiped memory clears the backend copy too). Best-effort: never throws, and the hash is only
+  // advanced on a successful send so a dropped frame is retried at the next boundary.
   private async reportMemoryIfChanged(): Promise<void> {
     try {
-      const content = (await this.readMemory()) ?? "";
+      const content = await this.readMemoryMirror();
       const hash = createHash("sha256").update(content).digest("hex");
       if (hash === this.lastMemoryHash) return;
       if (this.conn.send({ type: "memory", content })) this.lastMemoryHash = hash;
