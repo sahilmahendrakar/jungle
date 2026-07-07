@@ -8,7 +8,7 @@ import { AgentBadge, AttachmentList, EmptyState, PersonAvatar } from "./panels";
 import { DeliverableChips } from "./deliverableCards";
 import { MessageTurnChips } from "./TurnChips";
 import { AgentHoverCard } from "./AgentHoverCard";
-import type { LiveTurn } from "../../ws/useLiveTurns";
+import type { QueuedTurn, TurnChipData } from "../../ws/useLiveTurns";
 import {
   Tooltip,
   TooltipContent,
@@ -163,6 +163,7 @@ function MessageBody({
   onOpenThread,
   onOpenTurn,
   anchoredTurns,
+  anchoredQueued,
   personById,
   onOpenLiveTurn,
 }: {
@@ -175,17 +176,24 @@ function MessageBody({
   unreadByRoot: Map<string, number>;
   onOpenThread: (rootId: string) => void;
   onOpenTurn: (m: Message) => void;
-  anchoredTurns: LiveTurn[];
+  anchoredTurns: TurnChipData[];
+  anchoredQueued: QueuedTurn[];
   personById: (id: string) => Participant | undefined;
-  onOpenLiveTurn: (turn: LiveTurn) => void;
+  onOpenLiveTurn: (turn: TurnChipData) => void;
 }) {
   const isRoot = !m.thread_root_id;
   const hasReplies = isRoot && (replyCounts.get(m.id) ?? 0) > 0;
   const isAgent = personByHandle(m.sender_handle)?.kind === "agent";
   const deliverableLinks = isAgent && m.body ? extractDeliverableLinks(m.body) : [];
   // The thread affordance always shows for a reply row (isRoot false) or a root with replies;
-  // the row only reserves space when it or a turn/deliverable chip actually has something to show.
-  const showFooterRow = !isRoot || hasReplies || anchoredTurns.length > 0 || deliverableLinks.length > 0;
+  // the row only reserves space when it or a turn/queued/deliverable chip actually has something
+  // to show.
+  const showFooterRow =
+    !isRoot ||
+    hasReplies ||
+    anchoredTurns.length > 0 ||
+    anchoredQueued.length > 0 ||
+    deliverableLinks.length > 0;
   return (
     <div
       data-testid="message"
@@ -207,7 +215,12 @@ function MessageBody({
             unreadByRoot={unreadByRoot}
             onOpenThread={onOpenThread}
           />
-          <MessageTurnChips turns={anchoredTurns} personById={personById} onOpenTurn={onOpenLiveTurn} />
+          <MessageTurnChips
+            turns={anchoredTurns}
+            queued={anchoredQueued}
+            personById={personById}
+            onOpenTurn={onOpenLiveTurn}
+          />
           {isAgent && m.body && <DeliverableChips body={m.body} />}
         </div>
       )}
@@ -238,6 +251,7 @@ export function MessageList({
   onOpenThread,
   onOpenTurn,
   turnsByMessage,
+  queuedByMessage,
   personById,
   onOpenLiveTurn,
   jumpToId,
@@ -254,11 +268,13 @@ export function MessageList({
   onOpenThread: (rootId: string) => void;
   // Open the agent Activity view focused on the turn that produced this message.
   onOpenTurn: (m: Message) => void;
-  // Live turns anchored to messages in this channel (the trigger-message chips), keyed by the
-  // triggering message's id, plus the lookups/actions the chips need.
-  turnsByMessage: Map<string, LiveTurn[]>;
+  // Turns anchored to messages in this channel (the trigger-message chips), keyed by the
+  // triggering message's id, plus the lookups/actions the chips need. Durable across reload.
+  turnsByMessage: Map<string, TurnChipData[]>;
+  // Dispatches still queued behind a busy turn, keyed by triggering message id.
+  queuedByMessage: Map<string, QueuedTurn[]>;
   personById: (id: string) => Participant | undefined;
-  onOpenLiveTurn: (turn: LiveTurn) => void;
+  onOpenLiveTurn: (turn: TurnChipData) => void;
   // Jump target (from search / the deliverables feed): once this message renders, scroll it into
   // view with a flash highlight, then report done so the parent clears the target.
   jumpToId: string | null;
@@ -376,6 +392,7 @@ export function MessageList({
                   onOpenThread={onOpenThread}
                   onOpenTurn={onOpenTurn}
                   anchoredTurns={turnsByMessage.get(lead.id) ?? []}
+                  anchoredQueued={queuedByMessage.get(lead.id) ?? []}
                   personById={personById}
                   onOpenLiveTurn={onOpenLiveTurn}
                 />
@@ -392,6 +409,7 @@ export function MessageList({
                     onOpenThread={onOpenThread}
                     onOpenTurn={onOpenTurn}
                     anchoredTurns={turnsByMessage.get(m.id) ?? []}
+                    anchoredQueued={queuedByMessage.get(m.id) ?? []}
                     personById={personById}
                     onOpenLiveTurn={onOpenLiveTurn}
                   />

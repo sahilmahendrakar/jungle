@@ -16,6 +16,7 @@ import {
   getThread,
   markThreadRead,
   listUnreadThreads,
+  getChannelTurnChips,
   type AgentEvent,
   type Channel,
   type Deliverable,
@@ -65,7 +66,7 @@ import { MembersDialog } from "./components/chat/MembersDialog";
 import { DeleteChannelDialog } from "./components/chat/DeleteChannelDialog";
 import { InviteDialog } from "./components/chat/InviteDialog";
 import { useChatSocket } from "./ws/useChatSocket";
-import { useLiveTurns, type LiveTurn } from "./ws/useLiveTurns";
+import { useLiveTurns, type TurnChipData, type QueuedTurn } from "./ws/useLiveTurns";
 
 
 
@@ -113,9 +114,12 @@ export function App({
   // Jump target from search / the deliverables feed: MessageList scrolls it into view with a
   // flash once the message renders, then clears it via onJumpDone.
   const [jumpToId, setJumpToId] = useState<string | null>(null);
-  // Bounded always-on buffer of each agent's current turn (ambient activity surfaces).
-  // liveVersion is a throttled re-render tick; the live-turn-derived useMemos below depend on it.
-  const { liveTurnsRef, liveVersion, ingestLiveEvent } = useLiveTurns();
+  // Bounded always-on buffer of each agent's current turn (ambient activity surfaces), plus the
+  // turn/queued state behind the trigger-message chips (turnChipsRef/queuedRef — durable across
+  // reload via hydrateChannel). liveVersion is a throttled re-render tick; the live-turn-derived
+  // useMemos below depend on it.
+  const { liveTurnsRef, turnChipsRef, queuedRef, liveVersion, ingestLiveEvent, ingestQueued, hydrateChannel } =
+    useLiveTurns();
 
   // Threads. The right-side panel is open when a thread is open (threadRootId) or the Threads
   // list is showing (threadsListOpen). Replies + the root are DERIVED from `messages` (the
@@ -336,6 +340,11 @@ export function App({
     if (!selected) return;
     getMessages(selected).then(setMessages);
     markRead(selected);
+    // Hydrate this channel's trigger-message chips (recent turns + still-queued dispatches) so
+    // they survive a reload — live WS state (turnChipsRef/queuedRef) always wins over this.
+    getChannelTurnChips(selected)
+      .then(({ turns, queued }) => hydrateChannel(selected, turns, queued))
+      .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected]);
 
@@ -462,6 +471,7 @@ export function App({
     refreshThreads,
     reloadChannels,
     ingestLiveEvent,
+    ingestQueued,
     onNotifiableMessage,
     onConfirmRequested,
     onConnected: refreshConfirms,
@@ -663,8 +673,8 @@ export function App({
     openActivity(sender.id, m.turn_id);
   }
 
-  // Open a live turn (a trigger-message chip / roster row) in the Activity view, focused on it.
-  function openLiveTurn(turn: LiveTurn) {
+  // Open a turn (a trigger-message chip / roster row) in the Activity view, focused on it.
+  function openLiveTurn(turn: TurnChipData) {
     openActivity(turn.agentId, turn.turnId);
   }
 
@@ -808,25 +818,37 @@ export function App({
     .map((m) => peopleById.get(m.id) ?? m);
 
   // Live-turn-derived views (recompute on liveVersion, which throttles the event stream):
-  //   - turnsByMessage: running/just-finished turns anchored to a message in the OPEN channel
-  //     (the trigger-message chips), keyed by the triggering message id.
   //   - workingChannelIds: channels with a turn currently running (sidebar dot + header pulse).
-  const { turnsByMessage, workingChannelIds } = useMemo(() => {
-    const byMessage = new Map<string, LiveTurn[]>();
+  const workingChannelIds = useMemo(() => {
     const working = new Set<string>();
     for (const turn of liveTurnsRef.current.values()) {
-      const ctx = turn.context;
-      if (!turn.done && ctx?.channelId) working.add(ctx.channelId);
-      // Anchor a chip only in the channel the turn belongs to, and only on a message we hold.
-      if (ctx?.channelId === selected && ctx.messageId) {
-        const arr = byMessage.get(ctx.messageId) ?? [];
-        arr.push(turn);
-        byMessage.set(ctx.messageId, arr);
+      if (!turn.done && turn.context?.channelId) working.add(turn.context.channelId);
+    }
+    return working;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveVersion]);
+  // Turn/queued chips anchored to a message, keyed by the triggering message id — durable across
+  // reload (turnChipsRef/queuedRef are seeded from the backend on channel open, see the
+  // hydrateChannel effect below) and not filtered by channel: a message id belongs to exactly
+  // one channel, so a chip only ever gets looked up if that message is actually rendered here.
+  const { turnsByMessage, queuedByMessage } = useMemo(() => {
+    const byMessage = new Map<string, TurnChipData[]>();
+    for (const chip of turnChipsRef.current.values()) {
+      for (const mid of chip.messageIds) {
+        const arr = byMessage.get(mid) ?? [];
+        arr.push(chip);
+        byMessage.set(mid, arr);
       }
     }
-    return { turnsByMessage: byMessage, workingChannelIds: working };
+    const byQueuedMessage = new Map<string, QueuedTurn[]>();
+    for (const q of queuedRef.current.values()) {
+      const arr = byQueuedMessage.get(q.messageId) ?? [];
+      arr.push(q);
+      byQueuedMessage.set(q.messageId, arr);
+    }
+    return { turnsByMessage: byMessage, queuedByMessage: byQueuedMessage };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveVersion, selected]);
+  }, [liveVersion]);
   const channelAgentsActive = channelAgents.some((a) => a.status === "working");
   const profilePerson = profileId
     ? people.find((p) => p.id === profileId) ?? (me?.id === profileId ? me : undefined)
@@ -1086,6 +1108,7 @@ export function App({
             onOpenThread={openThread}
             onOpenTurn={openTurnForMessage}
             turnsByMessage={turnsByMessage}
+            queuedByMessage={queuedByMessage}
             personById={(id) => peopleById.get(id)}
             onOpenLiveTurn={openLiveTurn}
             jumpToId={jumpToId}

@@ -83,6 +83,15 @@ export interface AgentEventEvent {
   context?: TurnContext | null;
 }
 
+// A dispatch landed in the agent's inbox behind a turn already in progress — no turn_id yet
+// (that only exists once the runner actually starts or splices it in). Lets the triggering
+// message show a "queued — waiting for @agent" chip immediately instead of nothing.
+export interface AgentQueuedEvent {
+  type: "agent_queued";
+  agentId: string;
+  context: TurnContext;
+}
+
 // An agent's context-window occupancy after a turn (drives the profile usage meter).
 export interface AgentContextEvent {
   type: "agent_context";
@@ -145,6 +154,7 @@ export type ServerEvent =
   | ParticipantDeletedEvent
   | AgentTurnEvent
   | AgentEventEvent
+  | AgentQueuedEvent
   | AgentContextEvent
   | AgentMemoryChangedEvent
   | ToolConfirmationRequestEvent

@@ -196,12 +196,27 @@ async function runAgentReply(
     // threadRootId defaults back into that thread) rides ON the inbox item and takes effect when
     // the runner consumes it. Enqueue the composed input and push it to the runner if one is
     // connected. If not, it waits in the inbox until the next `hello`.
+    // If the agent is already busy, this dispatch will sit in the inbox until the current turn
+    // ends (or splices it in mid-turn) — tell the workspace now so the triggering message shows
+    // a "queued" chip immediately instead of nothing until a turn actually picks it up.
+    const willQueue = runners.agentStatus(agent.id) === "working";
     await db.enqueueInboxItem(agent.id, input, attachments, {
       budget: replyBudget,
       channelId: triggerChannelId,
       threadRootId: existingThreadRootId,
       messageId: triggerMessage.id,
     });
+    if (willQueue) {
+      broadcastAgentWorkspace(agent.id, {
+        type: "agent_queued",
+        agentId: agent.id,
+        context: {
+          channelId: triggerChannelId,
+          threadRootId: existingThreadRootId,
+          messageId: triggerMessage.id,
+        },
+      });
+    }
     await runners.drain(agent.id);
     // Wake-on-message: if the agent's machine is stopped/absent (idle-stop, or never started), a
     // disconnected runner won't have received the drain above — kick the provisioner so it comes
@@ -395,11 +410,13 @@ export function buildRunnerHooks(): runners.RunnerHooks {
       return { ok: true };
     },
     // Every turn_done -> attribute the result to any schedules whose fires fed the turn
-    // (success/failure counters + auto-pause live in the scheduler).
+    // (success/failure counters + auto-pause live in the scheduler), and close out the durable
+    // turn row so a reload can show the chip as finished instead of forever "running".
     onTurnFinished: (agentId, turnId, ok, error) => {
       void scheduler.noteTurnResult(agentId, turnId, ok, error).catch((e) =>
         console.error("noteTurnResult:", e),
       );
+      void db.finishTurn(agentId, turnId, ok).catch((e) => console.error("finishTurn:", e));
     },
     // A runner's confirm_request -> surface a confirmation card in the channel that triggered this
     // agent. Resolving the card resolves this promise; runners.ts relays it as confirm_result.
@@ -411,9 +428,11 @@ export function buildRunnerHooks(): runners.RunnerHooks {
       }
       return surfaceConfirmCard(agent, channelId, confirm.toolName, confirm.input);
     },
-    // A turn began -> tell the workspace where it was triggered from (channel/thread/message),
-    // so clients can show the work where it was requested.
+    // A turn began -> persist the durable turn row (so a reload can hydrate its chip) and tell
+    // the workspace where it was triggered from (channel/thread/message), so clients can show
+    // the work where it was requested.
     onTurnStarted: (agentId, turnId, context) => {
+      void db.ensureTurn(agentId, turnId, context).catch((e) => console.error("ensureTurn:", e));
       broadcastAgentWorkspace(agentId, {
         type: "agent_turn",
         agentId,
@@ -422,6 +441,25 @@ export function buildRunnerHooks(): runners.RunnerHooks {
           ? { channelId: context.channelId, threadRootId: context.threadRootId, messageId: context.messageId }
           : null,
       });
+    },
+    // A follow-up batch was consumed by a turn ALREADY in progress (spliced in, not queued for
+    // its own turn) -> anchor its message to the same durable turn row. Only broadcast when the
+    // anchor is genuinely new (ensureTurn is a no-op — and returns false — for the batch that
+    // already anchored via onTurnStarted), so clients add this message to the same running/
+    // finished chip instead of duplicating it.
+    onTurnMessageJoined: (agentId, turnId, context) => {
+      void db
+        .ensureTurn(agentId, turnId, context)
+        .then((added) => {
+          if (!added) return;
+          broadcastAgentWorkspace(agentId, {
+            type: "agent_turn",
+            agentId,
+            turnId,
+            context: { channelId: context.channelId, threadRootId: context.threadRootId, messageId: context.messageId },
+          });
+        })
+        .catch((e) => console.error("ensureTurn (message joined):", e));
     },
     // A runner's SDK stream event -> persist for the Activity feed + broadcast to the agent's
     // workspace (raw tool output must never leak to other workspaces). The turn's context rides

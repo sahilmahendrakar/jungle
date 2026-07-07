@@ -121,6 +121,10 @@ export interface RunnerHooks {
   // A turn began: carries the dispatch context of the inbox batch that fed it (null when the
   // batch had none, e.g. compaction). Broadcast so clients learn the turn's home channel.
   onTurnStarted?: (agentId: string, turnId: string, context: db.DispatchContext | null) => void;
+  // A follow-up batch was consumed by a turn ALREADY in progress (a message spliced in rather
+  // than queued for its own turn — see runner/src/runner.ts's splice comment). Lets that
+  // message's chip anchor to the same running turn instead of showing nothing.
+  onTurnMessageJoined?: (agentId: string, turnId: string, context: db.DispatchContext) => void;
   // Persist an SDK stream event and broadcast it to app websockets. `context` is the current
   // turn's dispatch context (rides on every frame so mid-turn page loads still learn the home).
   onAgentEvent: (
@@ -774,6 +778,14 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         // `consumed` carries no turnId of its own; attribute to the socket's current turn
         // (markInboxConsumed coalesces, so rows already stamped by turn_started keep theirs).
         await db.markInboxConsumed(agentId, ids, conn.currentTurnId);
+        // Anchor this batch's dispatch context to the current turn too. Covers both the very
+        // first batch (already anchored by turn_started — a no-op here) and a later batch
+        // spliced into a turn already in progress: a genuinely new anchor, so that message gets
+        // its own chip pointing at the SAME running turn instead of showing nothing.
+        if (conn.currentTurnId) {
+          const ctx = await db.contextForInboxIds(agentId, ids);
+          if (ctx) hooks?.onTurnMessageJoined?.(agentId, conn.currentTurnId, ctx);
+        }
         break;
       }
       case "event": {

@@ -406,6 +406,34 @@ export function getMessages(channelId: string): Promise<Message[]> {
   });
 }
 
+export interface TurnChipRow {
+  turn_id: string;
+  agent_id: string;
+  message_ids: string[];
+  started_at: string;
+  done_at: string | null;
+  ok: boolean | null;
+  duration_ms: number | null;
+}
+
+export interface QueuedChipRow {
+  agent_id: string;
+  message_id: string;
+}
+
+// Durable turn chips for a channel (recent running/finished turns + still-queued dispatches),
+// keyed to the messages that triggered them. Hydrates chips on channel open / reload; live
+// updates ride the app WS (agent_turn/agent_event/agent_queued).
+export function getChannelTurnChips(
+  channelId: string,
+): Promise<{ turns: TurnChipRow[]; queued: QueuedChipRow[] }> {
+  return request(`/api/channels/${channelId}/turn-chips`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load turn chips",
+  });
+}
+
 // --- Threads ---
 
 // Full transcript of one thread (root + replies, seq order). Used to lazy-load a thread the
