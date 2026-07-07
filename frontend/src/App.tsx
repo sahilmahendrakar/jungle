@@ -1038,7 +1038,10 @@ export function App({
           style={isDesktop ? { width: right.width } : undefined}
           className={cn(
             "fixed inset-y-0 right-0 z-40 flex w-full max-w-[440px] flex-col border-l bg-background shadow-xl",
-            "md:relative md:z-auto md:shadow-none",
+            // The 440px cap is for the mobile fixed overlay only — on desktop the panel's width is
+            // fully driven by the resize handle (RIGHT_WIDTH.max is 620), so cancel the cap there
+            // or dragging past 440px silently does nothing.
+            "md:relative md:z-auto md:max-w-none md:shadow-none",
             !resizing && "md:transition-[width] md:duration-200 md:ease-in-out",
           )}
         >
