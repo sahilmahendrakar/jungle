@@ -198,6 +198,13 @@ export class Runner {
   private queue: QueueItem[] = [];
   private running = false;
   private activeQuery: Query | null = null;
+  // Hard-kill path for the active query's CLI subprocess (and any tool child processes it
+  // spawned, e.g. a blocked bash command). query.interrupt() is cooperative — a control
+  // message the CLI acts on between steps — and does not preempt an in-flight tool call.
+  // Aborting goes through the SDK's own graceful-close path (stdin EOF, ~2s grace, then
+  // child.kill()), so it actually tears down a stuck subprocess where interrupt() can't.
+  private activeAbortController: AbortController | null = null;
+  private static readonly INTERRUPT_GRACE_MS = 2_000;
   private pendingModel: string | null = null;
   // Set by a `compact` frame; consumed at the next idle boundary by running a
   // dedicated `/compact` turn. A flag (not a queue item) so it can't interleave
@@ -448,13 +455,23 @@ export class Runner {
   }
 
   private async handleInterrupt(): Promise<void> {
-    if (this.activeQuery) {
-      log.info("interrupting active turn");
-      try {
-        await this.activeQuery.interrupt();
-      } catch (err) {
-        log.warn("interrupt failed", { err: String(err) });
-      }
+    if (!this.activeQuery) return;
+    const abortController = this.activeAbortController;
+    log.info("interrupting active turn");
+    try {
+      await this.activeQuery.interrupt();
+    } catch (err) {
+      log.warn("interrupt failed", { err: String(err) });
+    }
+    // interrupt() only asks the CLI to stop between steps — it won't preempt a blocked
+    // tool subprocess (e.g. a long-running bash command). Give it a short grace window to
+    // actually end the turn; if it's still running, escalate to a hard kill. Compare by
+    // reference so we never abort a later turn's controller if one started in the meantime.
+    if (!abortController) return;
+    await new Promise((resolve) => setTimeout(resolve, Runner.INTERRUPT_GRACE_MS));
+    if (this.running && this.activeAbortController === abortController) {
+      log.warn("interrupt did not stop the turn in time; aborting");
+      abortController.abort();
     }
   }
 
@@ -590,9 +607,12 @@ export class Runner {
       (memoryIndex
         ? `\n\n— Your memory index (current MEMORY.md; Read linked memory files when relevant) —\n${memoryIndex}`
         : "");
+    const abortController = new AbortController();
+    this.activeAbortController = abortController;
     const q = query({
       prompt: this.makeInputGenerator(firstBatch, turnId, compacting),
       options: {
+        abortController,
         cwd: this.workspace,
         model: this.model ?? undefined,
         effort: this.effort,
@@ -699,6 +719,7 @@ export class Runner {
       log.error("turn errored", { turnId, err: error });
     } finally {
       this.activeQuery = null;
+      this.activeAbortController = null;
       this.batchResolver = null;
       this.running = false;
       if (this.quiesceTimer) {
