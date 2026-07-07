@@ -1,5 +1,5 @@
 import type pg from "pg";
-import type { Message as PersistedMessage, AttachmentMeta } from "@jungle/shared";
+import type { Message as PersistedMessage, AttachmentMeta, SearchResult } from "@jungle/shared";
 import { pool } from "./pool";
 import { withTransaction } from "./tx";
 import { resolveMentions, getParticipant } from "./participants";
@@ -43,6 +43,7 @@ function rowToMessage(
     also_to_channel?: boolean | null;
     reply_count?: number | null;
     last_reply_at?: string | null;
+    turn_id?: string | null;
   },
   attachments: AttachmentMeta[],
   mentions: { id: string; handle: string }[] = [],
@@ -56,6 +57,7 @@ function rowToMessage(
     body: r.body,
     created_at: r.created_at,
     cascade_budget: r.cascade_budget ?? null,
+    turn_id: r.turn_id ?? null,
     thread_root_id: r.thread_root_id ?? null,
     also_to_channel: r.also_to_channel ?? false,
     reply_count: r.reply_count ?? 0,
@@ -79,6 +81,8 @@ export async function persistMessage(args: {
   // the main timeline (ignored when threadRootId is absent).
   threadRootId?: string | null;
   alsoToChannel?: boolean;
+  // Agent sends only: the runner turn that produced this message (see RunnerHooks).
+  turnId?: string | null;
 }): Promise<PersistedMessage> {
   const mentions = await resolveMentions(args.channelId, args.body);
   const { msg, attachments } = await withTransaction(async (client) => {
@@ -88,13 +92,13 @@ export async function persistMessage(args: {
     const alsoToChannel = !!rootId && !!args.alsoToChannel;
     const ins = await client.query(
       `insert into messages
-         (channel_id, sender_id, body, client_msg_id, cascade_budget, thread_root_id, also_to_channel)
-       values ($1, $2, $3, $4, $5, $6, $7)
+         (channel_id, sender_id, body, client_msg_id, cascade_budget, thread_root_id, also_to_channel, turn_id)
+       values ($1, $2, $3, $4, $5, $6, $7, $8)
        on conflict (sender_id, client_msg_id) where client_msg_id is not null do nothing
        returning *`,
       [
         args.channelId, args.senderId, args.body, args.clientMsgId ?? null,
-        args.cascadeBudget ?? null, rootId, alsoToChannel,
+        args.cascadeBudget ?? null, rootId, alsoToChannel, args.turnId ?? null,
       ],
     );
     let row = ins.rows[0];
@@ -213,6 +217,36 @@ export async function getChannelHistoryBefore(
   );
   const oldestSeq = oldestSeqOf(rows);
   return { text: formatContextLines(rows), oldestSeq };
+}
+
+// Full-text search over the requester's channels (GET /api/search), newest first.
+// websearch_to_tsquery parses free text safely ("fix login", quoted phrases, -exclusions); the
+// predicate matches migrations/019's GIN expression index exactly. dm_with mirrors the channel
+// list's shape so the client can label DM hits with the other member's handle.
+export async function searchMessages(
+  workspaceId: string,
+  participantId: string,
+  query: string,
+  limit = 30,
+): Promise<SearchResult[]> {
+  const { rows } = await pool.query<SearchResult>(
+    `select m.id as message_id, m.channel_id, c.name as channel_name, c.kind as channel_kind,
+            (select p2.handle from channel_members cm2
+             join participants p2 on p2.id = cm2.participant_id
+             where c.kind = 'dm' and cm2.channel_id = c.id and cm2.participant_id <> $2
+             limit 1) as dm_with,
+            m.thread_root_id, p.handle as sender_handle, m.body, m.created_at
+     from messages m
+     join channels c on c.id = m.channel_id
+     join channel_members cm on cm.channel_id = m.channel_id and cm.participant_id = $2
+     join participants p on p.id = m.sender_id
+     where c.workspace_id = $1
+       and to_tsvector('english', m.body) @@ websearch_to_tsquery('english', $3)
+     order by m.seq desc
+     limit $4`,
+    [workspaceId, participantId, query, Math.min(50, Math.max(1, limit))],
+  );
+  return rows;
 }
 
 // The channel a message belongs to (for membership checks on thread endpoints). Null if gone.

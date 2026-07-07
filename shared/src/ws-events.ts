@@ -2,7 +2,7 @@
 // runner protocol (see runner-protocol.ts). The backend emits ServerEvent frames (some to one
 // socket, most fanned out to a channel or broadcast to all); the client sends ClientFrame frames.
 
-import type { AgentStatus, Participant, WireMessage } from "./domain.js";
+import type { AgentStatus, Deliverable, Participant, WireMessage } from "./domain.js";
 
 // ---- Server -> client ----
 
@@ -107,6 +107,13 @@ export interface ScheduleChangedEvent {
   action: "created" | "updated" | "deleted";
 }
 
+// An agent shipped a work artifact (a PR opened, a doc written, …) — extracted from the links in
+// its message at send time. Carries the full row so the Deliverables feed appends without a refetch.
+export interface DeliverableCreatedEvent {
+  type: "deliverable_created";
+  deliverable: Deliverable;
+}
+
 export type ServerEvent =
   | ConnectedEvent
   | ErrorEvent
@@ -121,7 +128,8 @@ export type ServerEvent =
   | AgentMemoryChangedEvent
   | ToolConfirmationRequestEvent
   | ToolConfirmationResolvedEvent
-  | ScheduleChangedEvent;
+  | ScheduleChangedEvent
+  | DeliverableCreatedEvent;
 
 // ---- Client -> server ----
 

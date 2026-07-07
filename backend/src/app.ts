@@ -12,6 +12,7 @@ import githubRouter from "./http/routes/github";
 import googleRouter from "./http/routes/google";
 import integrationsRouter from "./http/routes/integrations";
 import schedulesRouter from "./http/routes/schedules";
+import workfeedRouter from "./http/routes/workfeed";
 
 // Build the Express app: global middleware, the per-domain routers, and the terminal error
 // handler. The http server + WebSocket wiring live in index.ts (boot).
@@ -50,6 +51,7 @@ export function createApp(): express.Express {
   app.use(googleRouter);
   app.use(integrationsRouter);
   app.use(schedulesRouter);
+  app.use(workfeedRouter);
 
   app.use(errorHandler);
   return app;

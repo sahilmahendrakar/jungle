@@ -5,6 +5,7 @@ import * as runners from "../runners";
 import { provisionerFor } from "../provisioner";
 import { fanOut, broadcastWorkspace } from "../ws/appSocket";
 import { surfaceConfirmCard } from "./confirmations";
+import { recordDeliverables } from "./deliverables";
 import * as scheduler from "./scheduler";
 import { ApiError } from "../http/errors";
 
@@ -224,6 +225,7 @@ async function deliverAgentMessage(
   toolInput: runners.SendMessageInput,
   budget: number,
   dispatch: { channelId?: string; threadRootId: string | null },
+  turnId: string | null,
 ): Promise<runners.SendMessageResult> {
   const to = String(toolInput.to ?? "").trim();
   const body = String(toolInput.body ?? "").trim();
@@ -261,9 +263,10 @@ async function deliverAgentMessage(
   try {
     const msg = await db.persistMessage({
       channelId, senderId: agent.id, body, cascadeBudget: budget, attachmentIds,
-      threadRootId, alsoToChannel: !!toolInput.alsoToChannel,
+      threadRootId, alsoToChannel: !!toolInput.alsoToChannel, turnId,
     });
     await fanOut(channelId, { type: "message", message: att.withUrls(msg) });
+    void recordDeliverables(agent, channelId, msg);
     void triggerMentionedAgents(channelId, msg, "agent");
     return { ok: true, messageId: msg.id };
   } catch (e) {
@@ -317,12 +320,12 @@ export function buildRunnerHooks(): runners.RunnerHooks {
   return {
     // A runner's send_message -> post it into Jungle, with the cascade budget of the dispatch
     // that triggered this agent (the most recently consumed inbox item's persisted context).
-    deliverAgentMessage: async (agent, input) => {
+    deliverAgentMessage: async (agent, input, turnId) => {
       const ctx = await resolveDispatchContext(agent.id);
       return deliverAgentMessage(agent, input, ctx?.budget ?? 0, {
         channelId: ctx?.channelId,
         threadRootId: ctx?.threadRootId ?? null,
-      });
+      }, turnId);
     },
     // A runner's read_history -> the same destination resolution as send_message, read-only.
     readHistory: (agent, input) => {

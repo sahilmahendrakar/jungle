@@ -159,6 +159,8 @@ alter table messages add column if not exists thread_root_id uuid references mes
 alter table messages add column if not exists also_to_channel boolean not null default false;
 alter table messages add column if not exists reply_count int not null default 0;
 alter table messages add column if not exists last_reply_at timestamptz;
+-- Agent messages: the runner turn that produced this message (see migrations/017_message_turn.sql).
+alter table messages add column if not exists turn_id text;
 create index if not exists messages_channel_seq_idx on messages (channel_id, seq);
 create index if not exists messages_thread_idx on messages (thread_root_id, seq)
   where thread_root_id is not null;
@@ -329,3 +331,25 @@ create index if not exists schedules_due_idx on schedules (next_run_at)
   where next_run_at is not null and paused_at is null;
 create index if not exists schedules_ws_idx    on schedules (workspace_id);
 create index if not exists schedules_agent_idx on schedules (agent_id);
+
+-- Deliverables: durable work artifacts agents produce (PRs, docs, issues, …), extracted from the
+-- links in their messages at send time. The workspace's lasting "what got shipped" record.
+-- See migrations/018_deliverables.sql and backend/src/services/deliverables.ts.
+create table if not exists deliverables (
+  id           bigserial primary key,
+  workspace_id uuid not null references workspaces(id) on delete cascade,
+  agent_id     uuid not null references participants(id) on delete cascade,
+  channel_id   uuid not null references channels(id) on delete cascade,
+  message_id   uuid not null references messages(id) on delete cascade,
+  kind         text not null,   -- github_pr | github_issue | github | notion | google_doc | google_drive | linear | granola
+  title        text,
+  url          text not null,
+  created_at   timestamptz not null default now(),
+  unique (workspace_id, url)
+);
+create index if not exists deliverables_ws_idx on deliverables (workspace_id, id desc);
+create index if not exists deliverables_agent_idx on deliverables (agent_id, id desc);
+
+-- Full-text search over message bodies (see migrations/019_message_search.sql).
+create index if not exists messages_body_fts_idx
+  on messages using gin (to_tsvector('english', body));

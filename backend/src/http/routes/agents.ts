@@ -12,7 +12,7 @@ import * as auth from "../../auth";
 import * as runners from "../../runners";
 import { provisionerFor } from "../../provisioner";
 import { broadcastWorkspace } from "../../ws/appSocket";
-import { resolveConfirmDecision } from "../../services/confirmations";
+import { listPendingConfirmsFor, resolveConfirmDecision } from "../../services/confirmations";
 import { wrap, ApiError } from "../errors";
 import { optInt } from "../validate";
 import { publicParticipant, requireAgent, requireRequester } from "../guards";
@@ -300,6 +300,17 @@ router.post(
     const result = await runners.compactOrWake(agent);
     if (result === "wake_failed") return res.json({ ok: false, error: "failed to wake agent" });
     res.json({ ok: true, waking: result === "waking" });
+  }),
+);
+
+// Every confirmation still awaiting a decision that the requester can act on (member of the
+// confirm's channel). Clients call this on load/reconnect to rebuild the approvals badge/inbox —
+// the request-time WS fan-out only reaches sockets that were open at that moment.
+router.get(
+  "/api/confirmations",
+  wrap(async (req, res) => {
+    const me = await requireRequester(req);
+    res.json({ confirmations: await listPendingConfirmsFor(me.id) });
   }),
 );
 

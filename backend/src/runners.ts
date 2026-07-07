@@ -87,9 +87,12 @@ export interface ScheduleCancelResult {
 
 export interface RunnerHooks {
   // Post a message the agent asked to send (same routing/cascade as the MA path's onSend).
+  // `turnId` is the runner's current turn when the send arrived (null outside a tracked turn) —
+  // persisted on the message so the UI can link it back to the work that produced it.
   deliverAgentMessage: (
     agent: { id: string; handle: string; workspace_id: string },
     input: SendMessageInput,
+    turnId: string | null,
   ) => Promise<SendMessageResult>;
   // Read a page of channel/thread history the agent asked for (read_history tool).
   readHistory: (
@@ -770,6 +773,7 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
             result = await hooks.deliverAgentMessage(
               { id: agent.id, handle: agent.handle, workspace_id: agent.workspace_id },
               (frame.input ?? {}) as SendMessageInput,
+              conn.currentTurnId,
             );
           } catch (e) {
             result = { ok: false, error: String((e as Error).message ?? e) };
