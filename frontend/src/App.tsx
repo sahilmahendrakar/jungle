@@ -860,14 +860,21 @@ export function App({
   // hydrateChannel effect below) and not filtered by channel: a message id belongs to exactly
   // one channel, so a chip only ever gets looked up if that message is actually rendered here.
   const { turnsByMessage, queuedByMessage } = useMemo(() => {
-    const byMessage = new Map<string, TurnChipData[]>();
+    // Per (message, agent), keep only the MOST RECENT turn's chip — a thread root now
+    // accumulates one anchor per reply that re-triggers the agent (see orchestrator.ts), so
+    // without this an old "finished" chip from an earlier reply would just sit there forever
+    // next to the new one instead of being replaced by it.
+    const latestByMessage = new Map<string, Map<string, TurnChipData>>();
     for (const chip of turnChipsRef.current.values()) {
       for (const mid of chip.messageIds) {
-        const arr = byMessage.get(mid) ?? [];
-        arr.push(chip);
-        byMessage.set(mid, arr);
+        const byAgent = latestByMessage.get(mid) ?? new Map<string, TurnChipData>();
+        const existing = byAgent.get(chip.agentId);
+        if (!existing || chip.startedAt >= existing.startedAt) byAgent.set(chip.agentId, chip);
+        latestByMessage.set(mid, byAgent);
       }
     }
+    const byMessage = new Map<string, TurnChipData[]>();
+    for (const [mid, byAgent] of latestByMessage) byMessage.set(mid, [...byAgent.values()]);
     const byQueuedMessage = new Map<string, QueuedTurn[]>();
     for (const q of queuedRef.current.values()) {
       const arr = byQueuedMessage.get(q.messageId) ?? [];
