@@ -539,7 +539,9 @@ export function App({
   // The right panel is shared by three views — a participant profile, self settings, and the
   // threads pane. Opening any one clears the others so they never fight over the panel, and
   // closes the mobile nav drawer so the panel isn't hidden behind it.
-  function openProfilePanel(id: string) {
+  // useCallback (not a plain function) so its identity is stable across re-renders — same reason
+  // as personByHandle above.
+  const openProfilePanel = useCallback((id: string) => {
     setProfileId(id);
     setSettingsPanelOpen(false);
     setThreadRootId(null);
@@ -547,7 +549,7 @@ export function App({
     setRosterOpen(false);
     setActivityId(null);
     setDrawerOpen(false);
-  }
+  }, []);
   function openSettingsPanel() {
     setSettingsPanelOpen(true);
     setProfileId(null);
@@ -803,8 +805,14 @@ export function App({
   const rooms = channels.filter((c) => c.kind !== "dm");
   const dms = channels.filter((c) => c.kind === "dm");
   const dmChannelWith = (handle: string) => dms.find((c) => c.dm_with === handle);
-  const personByHandle = (h?: string | null) =>
-    h ? people.find((p) => p.handle === h) : undefined;
+  // Stable identity across re-renders (unlike an inline arrow fn) so consumers that key off it —
+  // notably Markdown's react-markdown `components` object — don't get a "new" prop on every
+  // render and remount their custom renderers (which would drop mounted state like an open
+  // hover card) just because an unrelated live-turn tick re-rendered this component.
+  const personByHandle = useCallback(
+    (h?: string | null) => (h ? people.find((p) => p.handle === h) : undefined),
+    [people],
+  );
   const peopleById = new Map(people.map((p) => [p.id, p]));
   // Agents working/waking in the currently-open channel (drives the header banner). Read status
   // from the live `people` map rather than the `members` roster snapshot so it stays current.

@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -25,17 +26,25 @@ interface HasChildren {
 function remarkMentions() {
   return (tree: Root) => {
     visitParents(tree, "text", (node: Text, ancestors) => {
-      const parent = ancestors[ancestors.length - 1] as unknown as HasChildren | undefined;
+      const parent = ancestors[ancestors.length - 1] as unknown as
+        HasChildren | undefined;
       const index = parent ? parent.children.indexOf(node) : -1;
-      if (!parent || index < 0 || ancestors.some((a) => a.type === "link")) return;
+      if (!parent || index < 0 || ancestors.some((a) => a.type === "link"))
+        return;
       MENTION_RE.lastIndex = 0;
       if (!MENTION_RE.test(node.value)) return;
-      const children: (Text | { type: "link"; url: string; children: Text[] })[] = [];
+      const children: (
+        Text | { type: "link"; url: string; children: Text[] }
+      )[] = [];
       let last = 0;
       let match: RegExpExecArray | null;
       MENTION_RE.lastIndex = 0;
       while ((match = MENTION_RE.exec(node.value))) {
-        if (match.index > last) children.push({ type: "text", value: node.value.slice(last, match.index) });
+        if (match.index > last)
+          children.push({
+            type: "text",
+            value: node.value.slice(last, match.index),
+          });
         children.push({
           type: "link",
           url: `mention:${match[1]}`,
@@ -43,7 +52,8 @@ function remarkMentions() {
         });
         last = match.index + match[0].length;
       }
-      if (last < node.value.length) children.push({ type: "text", value: node.value.slice(last) });
+      if (last < node.value.length)
+        children.push({ type: "text", value: node.value.slice(last) });
       parent.children.splice(index, 1, ...children);
       return index + children.length;
     });
@@ -56,7 +66,9 @@ function plainText(node: React.ReactNode): string {
   if (typeof node === "string" || typeof node === "number") return String(node);
   if (Array.isArray(node)) return node.map(plainText).join("");
   if (node && typeof node === "object" && "props" in node) {
-    return plainText((node as { props: { children?: React.ReactNode } }).props.children);
+    return plainText(
+      (node as { props: { children?: React.ReactNode } }).props.children,
+    );
   }
   return "";
 }
@@ -77,45 +89,66 @@ export function Markdown({
   personByHandle?: (handle: string) => Participant | undefined;
   onOpenProfile?: (id: string) => void;
 }) {
-  const components: Components = {
-    a: ({ href, children, ...props }) => {
-      // Bare "@handle" text gets rewritten to a "mention:" pseudo-link by remarkMentions above.
-      // But some senders (notably agents) write the mention as real markdown link syntax
-      // instead of bare text — remarkMentions skips text already inside a link, so that lands
-      // here with its original href. Treat a link whose *entire* visible text is "@handle" the
-      // same way: a known participant still gets a badge/popover, not a real navigating anchor.
-      const linkText = !href?.startsWith("mention:") ? plainText(children) : null;
-      const bareMention = linkText ? linkText.match(/^@([a-zA-Z0-9_-]+)$/) : null;
-      if (href?.startsWith("mention:") || bareMention) {
-        const handle = href?.startsWith("mention:") ? href.slice("mention:".length) : bareMention![1];
-        const person = personByHandle?.(handle);
-        if (!person) return href?.startsWith("mention:") ? <>@{handle}</> : <>{children}</>;
+  // Memoized: react-markdown treats each key of `components` as a component type, so handing it
+  // a fresh object (and fresh `a` function) on every render — as an inline object literal would —
+  // makes it remount that renderer's whole subtree even when nothing meaningful changed. That
+  // silently drops any mounted state underneath, including an open agent hover card on an
+  // @mention badge, any time this Markdown re-renders (e.g. a live turn chip ticking elsewhere
+  // in the same message). Keeping this referentially stable across renders is the actual fix —
+  // not tweaking the hover card's own open/close delays, which only masks the symptom.
+  const components: Components = useMemo(
+    () => ({
+      a: ({ href, children, ...props }) => {
+        // Bare "@handle" text gets rewritten to a "mention:" pseudo-link by remarkMentions above.
+        // But some senders (notably agents) write the mention as real markdown link syntax
+        // instead of bare text — remarkMentions skips text already inside a link, so that lands
+        // here with its original href. Treat a link whose *entire* visible text is "@handle" the
+        // same way: a known participant still gets a badge/popover, not a real navigating anchor.
+        const linkText = !href?.startsWith("mention:")
+          ? plainText(children)
+          : null;
+        const bareMention = linkText
+          ? linkText.match(/^@([a-zA-Z0-9_-]+)$/)
+          : null;
+        if (href?.startsWith("mention:") || bareMention) {
+          const handle = href?.startsWith("mention:")
+            ? href.slice("mention:".length)
+            : bareMention![1];
+          const person = personByHandle?.(handle);
+          if (!person)
+            return href?.startsWith("mention:") ? (
+              <>@{handle}</>
+            ) : (
+              <>{children}</>
+            );
+          return (
+            <AgentHoverCard agentId={person.id}>
+              <button
+                type="button"
+                data-testid="mention-badge"
+                onClick={() => onOpenProfile?.(person.id)}
+                className="rounded px-1 py-0.5 align-baseline font-medium text-primary bg-primary/10 hover:bg-primary/20"
+              >
+                @{person.display_name}
+              </button>
+            </AgentHoverCard>
+          );
+        }
         return (
-          <AgentHoverCard agentId={person.id}>
-            <button
-              type="button"
-              data-testid="mention-badge"
-              onClick={() => onOpenProfile?.(person.id)}
-              className="rounded px-1 py-0.5 align-baseline font-medium text-primary bg-primary/10 hover:bg-primary/20"
-            >
-              @{person.display_name}
-            </button>
-          </AgentHoverCard>
+          <a
+            {...props}
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-medium text-primary underline underline-offset-2 hover:text-primary/80"
+          >
+            {children}
+          </a>
         );
-      }
-      return (
-        <a
-          {...props}
-          href={href}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="font-medium text-primary underline underline-offset-2 hover:text-primary/80"
-        >
-          {children}
-        </a>
-      );
-    },
-  };
+      },
+    }),
+    [personByHandle, onOpenProfile],
+  );
 
   return (
     <div
