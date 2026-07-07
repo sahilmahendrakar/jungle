@@ -90,6 +90,7 @@ export function Sidebar({
   onOpenDeliverables,
   deliverablesActive,
   onOpenSearch,
+  workingChannelIds,
   onNewChannel,
   onAddAgent,
   onCollapse,
@@ -129,6 +130,7 @@ export function Sidebar({
   onOpenDeliverables: () => void;
   deliverablesActive: boolean;
   onOpenSearch: () => void;
+  workingChannelIds: Set<string>; // channels with a turn currently running (pulsing dot)
   onNewChannel: () => void;
   onAddAgent: () => void;
   onCollapse: () => void;
@@ -269,6 +271,7 @@ export function Sidebar({
                   icon={<Hash className="size-4 opacity-70" />}
                   label={c.name}
                   unread={unread}
+                  working={workingChannelIds.has(c.id)}
                   // Slack: regular channel unreads are bold-only; only a mention shows a count badge.
                   badgeCount={c.has_mention ? c.unread_count ?? 0 : 0}
                   badgeMention={c.has_mention}

@@ -55,12 +55,32 @@ export interface ParticipantDeletedEvent {
   participantId: string;
 }
 
-// One raw SDK stream message from an agent's turn, for the live Activity transcript.
+// Where an agent's current turn came from: the channel (and thread/message) whose dispatch the
+// runner consumed. This is what lets the client show work WHERE IT WAS REQUESTED — the trigger
+// message's chip, the DM strip, the sidebar working-dot — instead of in every channel the agent
+// happens to be a member of. Absent for turns with no dispatch context (e.g. compaction).
+export interface TurnContext {
+  channelId?: string;
+  threadRootId?: string | null;
+  messageId?: string; // the message whose dispatch triggered this turn
+}
+
+// A turn began: which agent, which turn, and where it was triggered from.
+export interface AgentTurnEvent {
+  type: "agent_turn";
+  agentId: string;
+  turnId: string;
+  context: TurnContext | null;
+}
+
+// One raw SDK stream message from an agent's turn, for the live Activity transcript. Carries the
+// turn's context on every frame so a client that loads mid-turn still learns the turn's home.
 export interface AgentEventEvent {
   type: "agent_event";
   agentId: string;
   turnId: string;
   event: unknown;
+  context?: TurnContext | null;
 }
 
 // An agent's context-window occupancy after a turn (drives the profile usage meter).
@@ -123,6 +143,7 @@ export type ServerEvent =
   | ChannelDeletedEvent
   | ParticipantUpdatedEvent
   | ParticipantDeletedEvent
+  | AgentTurnEvent
   | AgentEventEvent
   | AgentContextEvent
   | AgentMemoryChangedEvent

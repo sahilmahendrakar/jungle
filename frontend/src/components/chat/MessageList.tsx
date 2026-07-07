@@ -5,6 +5,9 @@ import { fmtTime } from "../../lib/chat";
 import { Markdown } from "../../Markdown";
 import { AgentBadge, AttachmentList, EmptyState, PersonAvatar } from "./panels";
 import { DeliverableChips } from "./deliverableCards";
+import { MessageTurnChips } from "./TurnChips";
+import { AgentHoverCard } from "./AgentHoverCard";
+import type { LiveTurn } from "../../ws/useLiveTurns";
 import {
   Tooltip,
   TooltipContent,
@@ -157,6 +160,9 @@ function MessageBody({
   unreadByRoot,
   onOpenThread,
   onOpenTurn,
+  anchoredTurns,
+  personById,
+  onOpenLiveTurn,
 }: {
   m: Message;
   className?: string;
@@ -167,6 +173,9 @@ function MessageBody({
   unreadByRoot: Map<string, number>;
   onOpenThread: (rootId: string) => void;
   onOpenTurn: (m: Message) => void;
+  anchoredTurns: LiveTurn[];
+  personById: (id: string) => Participant | undefined;
+  onOpenLiveTurn: (turn: LiveTurn) => void;
 }) {
   const isRoot = !m.thread_root_id;
   const hasReplies = isRoot && (replyCounts.get(m.id) ?? 0) > 0;
@@ -186,6 +195,8 @@ function MessageBody({
       {/* Artifact cards for the work links agents post (PRs, docs, …) — agent messages only,
           so a human pasting a PR link doesn't read as a "deliverable". */}
       {isAgent && m.body && <DeliverableChips body={m.body} />}
+      {/* Live work anchored under the message that triggered it (one chip per agent). */}
+      <MessageTurnChips turns={anchoredTurns} personById={personById} onOpenTurn={onOpenLiveTurn} />
       <ThreadFooter
         m={m}
         replyCounts={replyCounts}
@@ -218,6 +229,9 @@ export function MessageList({
   unreadByRoot,
   onOpenThread,
   onOpenTurn,
+  turnsByMessage,
+  personById,
+  onOpenLiveTurn,
   jumpToId,
   onJumpDone,
 }: {
@@ -232,6 +246,11 @@ export function MessageList({
   onOpenThread: (rootId: string) => void;
   // Open the agent Activity view focused on the turn that produced this message.
   onOpenTurn: (m: Message) => void;
+  // Live turns anchored to messages in this channel (the trigger-message chips), keyed by the
+  // triggering message's id, plus the lookups/actions the chips need.
+  turnsByMessage: Map<string, LiveTurn[]>;
+  personById: (id: string) => Participant | undefined;
+  onOpenLiveTurn: (turn: LiveTurn) => void;
   // Jump target (from search / the deliverables feed): once this message renders, scroll it into
   // view with a flash highlight, then report done so the parent clears the target.
   jumpToId: string | null;
@@ -309,27 +328,31 @@ export function MessageList({
           const isAgent = sender?.kind === "agent";
           return (
             <div key={lead.id} className="flex gap-3">
-              <button
-                onClick={() => sender && onOpenProfile(sender.id)}
-                disabled={!sender}
-                className="h-fit shrink-0 rounded-md transition-opacity hover:opacity-80 disabled:cursor-default"
-                title={sender ? `View @${sender.handle}` : undefined}
-              >
-                <PersonAvatar
-                  name={sender?.display_name ?? lead.sender_handle}
-                  handle={lead.sender_handle}
-                />
-              </button>
+              <AgentHoverCard agentId={sender?.id ?? ""}>
+                <button
+                  onClick={() => sender && onOpenProfile(sender.id)}
+                  disabled={!sender}
+                  className="h-fit shrink-0 rounded-md transition-opacity hover:opacity-80 disabled:cursor-default"
+                  title={sender ? `View @${sender.handle}` : undefined}
+                >
+                  <PersonAvatar
+                    name={sender?.display_name ?? lead.sender_handle}
+                    handle={lead.sender_handle}
+                  />
+                </button>
+              </AgentHoverCard>
               <div className="min-w-0 flex-1">
                 <div className="flex items-baseline gap-2">
-                  <button
-                    data-testid="message-sender"
-                    onClick={() => sender && onOpenProfile(sender.id)}
-                    disabled={!sender}
-                    className="font-semibold hover:underline disabled:no-underline"
-                  >
-                    {sender?.display_name ?? lead.sender_handle}
-                  </button>
+                  <AgentHoverCard agentId={sender?.id ?? ""}>
+                    <button
+                      data-testid="message-sender"
+                      onClick={() => sender && onOpenProfile(sender.id)}
+                      disabled={!sender}
+                      className="font-semibold hover:underline disabled:no-underline"
+                    >
+                      {sender?.display_name ?? lead.sender_handle}
+                    </button>
+                  </AgentHoverCard>
                   {isAgent && <AgentBadge />}
                   <span className="text-xs text-muted-foreground">
                     {fmtTime(lead.created_at)}
@@ -344,6 +367,9 @@ export function MessageList({
                   unreadByRoot={unreadByRoot}
                   onOpenThread={onOpenThread}
                   onOpenTurn={onOpenTurn}
+                  anchoredTurns={turnsByMessage.get(lead.id) ?? []}
+                  personById={personById}
+                  onOpenLiveTurn={onOpenLiveTurn}
                 />
                 {rest.map((m) => (
                   <MessageBody
@@ -357,6 +383,9 @@ export function MessageList({
                     unreadByRoot={unreadByRoot}
                     onOpenThread={onOpenThread}
                     onOpenTurn={onOpenTurn}
+                    anchoredTurns={turnsByMessage.get(m.id) ?? []}
+                    personById={personById}
+                    onOpenLiveTurn={onOpenLiveTurn}
                   />
                 ))}
               </div>

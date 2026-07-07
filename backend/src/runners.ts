@@ -118,8 +118,17 @@ export interface RunnerHooks {
     agent: db.AgentRow,
     confirm: { id: string; toolName: string; input: unknown; suggestions?: unknown },
   ) => Promise<ConfirmDecision>;
-  // Persist an SDK stream event and broadcast it to app websockets.
-  onAgentEvent: (agentId: string, turnId: string | null, event: unknown) => void;
+  // A turn began: carries the dispatch context of the inbox batch that fed it (null when the
+  // batch had none, e.g. compaction). Broadcast so clients learn the turn's home channel.
+  onTurnStarted?: (agentId: string, turnId: string, context: db.DispatchContext | null) => void;
+  // Persist an SDK stream event and broadcast it to app websockets. `context` is the current
+  // turn's dispatch context (rides on every frame so mid-turn page loads still learn the home).
+  onAgentEvent: (
+    agentId: string,
+    turnId: string | null,
+    event: unknown,
+    context?: db.DispatchContext | null,
+  ) => void;
   // The runner reported how full the agent's context window is (once per turn).
   // Persist + broadcast so open profile dialogs live-update.
   onContextUsage: (agentId: string, usage: { tokens: number; maxTokens: number }) => void;
@@ -164,6 +173,9 @@ interface RunnerConn {
   // Pending confirmations from this runner, keyed by the runner-chosen confirm id, so a
   // late/duplicate decision is a no-op.
   pendingConfirms: Set<string>;
+  // The current turn's dispatch context (fetched at turn_started from the batch's inbox rows),
+  // attached to every event broadcast so clients know the turn's home channel.
+  currentTurnContext: db.DispatchContext | null;
   // The turn this socket most recently reported via `turn_started`. Mid-turn follow-up batches
   // emit `consumed` with no accompanying `turn_started`, so the consumed handler attributes
   // them to this turn.
@@ -672,6 +684,7 @@ async function accept(ws: WebSocket, token: string): Promise<void> {
     pendingConfirms: new Set(),
     idleSince: null,
     currentTurnId: null,
+    currentTurnContext: null,
   };
   conns.set(agent.id, conn);
   console.log(`runner[${agent.id}] (@${agent.handle}) connected`);
@@ -714,6 +727,7 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         setConnState(conn, "idle");
         conn.sentInbox.clear(); // reconnect: allow re-sending unacked inbox rows
         conn.currentTurnId = null;
+        conn.currentTurnContext = null;
         clearMachine(agentId); // a live hello always wins over stale starting/stopped state
         emitStatus(agentId);
         send(conn, await buildConfigure(agent));
@@ -734,7 +748,12 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         // the rows (turn-result attribution) and on the conn (mid-turn follow-up batches emit
         // `consumed` with no turn_started). Durable delivery is still confirmed by `consumed`.
         conn.currentTurnId = frame.turnId;
-        await db.markInboxTurnStarted(agentId, Array.isArray(frame.inboxIds) ? frame.inboxIds : [], frame.turnId);
+        const inboxIds = Array.isArray(frame.inboxIds) ? frame.inboxIds : [];
+        await db.markInboxTurnStarted(agentId, inboxIds, frame.turnId);
+        // Resolve the batch's dispatch context: it names the turn's HOME (trigger channel/
+        // thread/message), which clients use to show work where it was requested.
+        conn.currentTurnContext = await db.contextForInboxIds(agentId, inboxIds);
+        hooks?.onTurnStarted?.(agentId, frame.turnId, conn.currentTurnContext);
         break;
       }
       case "consumed": {
@@ -745,7 +764,9 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         break;
       }
       case "event": {
-        hooks?.onAgentEvent(agentId, frame.turnId ?? null, frame.event);
+        // Attach the current turn's context only when the frame belongs to that turn.
+        const ctx = frame.turnId && frame.turnId === conn.currentTurnId ? conn.currentTurnContext : null;
+        hooks?.onAgentEvent(agentId, frame.turnId ?? null, frame.event, ctx);
         break;
       }
       case "context_usage": {

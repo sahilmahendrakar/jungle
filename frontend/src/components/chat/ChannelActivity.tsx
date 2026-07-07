@@ -94,23 +94,37 @@ function AgentRow({
   );
 }
 
+// Used ONLY in DMs now (channels anchor work under the triggering message via TurnChips). A DM
+// is single-threaded, so the strip above the composer is the natural home for its agent's live
+// work — but still filtered to turns actually triggered from THIS DM (an agent working on
+// something you asked elsewhere shouldn't surface in this DM either).
 export function ChannelActivity({
+  channelId,
   busyAgents,
   liveTurns,
   onOpenActivity,
 }: {
+  channelId: string;
   // Agents working/waking in the open conversation, from live `people` status.
   busyAgents: Participant[];
   liveTurns: Map<string, LiveTurn>;
   onOpenActivity: (agentId: string) => void;
 }) {
-  if (!busyAgents.length) return null;
+  // Show an agent only when its current turn's home is this DM (or the turn has no context yet —
+  // a just-started turn in a DM whose only counterpart is this agent).
+  const rows = busyAgents.filter((a) => {
+    const t = liveTurns.get(a.id);
+    if (a.status === "waking") return true; // no turn yet; it woke for this DM's message
+    if (!t || t.done) return true; // status says working but no live turn buffered — keep it
+    return !t.context?.channelId || t.context.channelId === channelId;
+  });
+  if (!rows.length) return null;
   return (
     <div
       data-testid="channel-activity"
       className="mx-3 mb-1 rounded-xl border bg-card/60 p-1 shadow-sm md:mx-5"
     >
-      {busyAgents.map((a) => (
+      {rows.map((a) => (
         <AgentRow key={a.id} agent={a} turn={liveTurns.get(a.id)} onOpenActivity={onOpenActivity} />
       ))}
     </div>

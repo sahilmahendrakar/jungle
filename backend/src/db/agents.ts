@@ -107,6 +107,9 @@ export interface DispatchContext {
   budget: number;
   channelId: string;
   threadRootId: string | null;
+  // The message whose dispatch triggered this turn (chat mentions/DMs; absent for schedule
+  // fires). Lets the UI anchor live work under the message that asked for it.
+  messageId?: string;
   scheduleId?: string;
 }
 
@@ -172,6 +175,22 @@ export async function latestConsumedContext(agentId: string): Promise<DispatchCo
      where agent_id = $1 and delivered_at is not null and context is not null
      order by delivered_at desc, created_at desc limit 1`,
     [agentId],
+  );
+  return rows[0]?.context ?? null;
+}
+
+// The dispatch context of a turn's inbox batch (the runner's `turn_started` names the items).
+// Last-enqueued non-null context wins, matching latestConsumedContext's semantics.
+export async function contextForInboxIds(
+  agentId: string,
+  inboxIds: string[],
+): Promise<DispatchContext | null> {
+  if (!inboxIds.length) return null;
+  const { rows } = await pool.query<{ context: DispatchContext }>(
+    `select context from agent_inbox
+     where agent_id = $1 and id = any($2::uuid[]) and context is not null
+     order by created_at desc limit 1`,
+    [agentId, inboxIds],
   );
   return rows[0]?.context ?? null;
 }

@@ -772,6 +772,7 @@ export function NavItem({
   label,
   trailing,
   status,
+  working,
   title,
   unread,
   badgeCount,
@@ -784,6 +785,7 @@ export function NavItem({
   label: string;
   trailing?: ReactNode;
   status?: AgentStatus; // agent presence dot (always shown for agents, incl. idle)
+  working?: boolean; // a turn is currently running here -> pulsing green dot (channels)
   title?: string;
   unread?: boolean; // has unread messages -> bold + brighter (Slack)
   badgeCount?: number; // when > 0, show a count pill (DMs + mention-containing unreads)
@@ -807,6 +809,13 @@ export function NavItem({
         {icon}
       </span>
       <span className="min-w-0 flex-1 truncate">{label}</span>
+      {working && (
+        <span
+          data-testid="channel-working-dot"
+          title="An agent is working here"
+          className="size-1.5 shrink-0 animate-pulse rounded-full bg-emerald-500"
+        />
+      )}
       {status && (
         <span
           data-testid="status-dot"

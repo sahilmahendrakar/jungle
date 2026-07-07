@@ -1,5 +1,5 @@
 import { useEffect, useRef, type Dispatch, type RefObject, type SetStateAction } from "react";
-import type { ServerEvent } from "@jungle/shared";
+import type { ServerEvent, TurnContext } from "@jungle/shared";
 import {
   WS_BASE,
   getMessages,
@@ -43,9 +43,15 @@ export function useChatSocket(opts: {
   markRead: (channelId: string) => void;
   refreshThreads: () => void;
   reloadChannels: (selectId?: string) => void;
-  // Every agent_event frame (all agents, not just the open Activity view) — feeds the ambient
-  // live-turn buffer behind the channel activity card and the agents overview.
-  ingestLiveEvent: (agentId: string, turnId: string | null, event: unknown) => void;
+  // Every agent_turn/agent_event frame (all agents, not just the open Activity view) — feeds
+  // the ambient live-turn buffer behind the activity surfaces. `event` is null for
+  // context-only frames (agent_turn).
+  ingestLiveEvent: (
+    agentId: string,
+    turnId: string | null,
+    event: unknown,
+    context?: TurnContext | null,
+  ) => void;
   // Desktop-notification decisions live in App (it knows channels, mentions, prefs); the
   // dispatch just reports what happened.
   onNotifiableMessage: (m: Message, isOpen: boolean) => void;
@@ -178,9 +184,14 @@ export function useChatSocket(opts: {
           setProfileId((cur) => (cur === evt.participantId ? null : cur));
           return;
         }
+        if (evt.type === "agent_turn") {
+          // A turn began: record its home (channel/thread/message) in the live-turn buffer.
+          ingestLiveEvent(evt.agentId, evt.turnId, null, evt.context);
+          return;
+        }
         if (evt.type === "agent_event") {
           // Always feed the bounded live-turn buffer (ambient activity surfaces)…
-          ingestLiveEvent(evt.agentId, evt.turnId ?? null, evt.event);
+          ingestLiveEvent(evt.agentId, evt.turnId ?? null, evt.event, evt.context);
           // …but only buffer the full stream while that agent's Activity view is open —
           // otherwise we'd grow memory for every agent forever. When closed, drop the frame;
           // the transcript backfills from the events API when reopened.

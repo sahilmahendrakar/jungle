@@ -1,4 +1,4 @@
-import { Activity, Hash, MessageSquare, MoreVertical, PanelLeft, Trash2, UserPlus, Users } from "lucide-react";
+import { Activity, Bot, Hash, MessageSquare, MoreVertical, PanelLeft, Trash2, UserPlus, Users } from "lucide-react";
 import type { Channel, Participant } from "../../api";
 import { PersonAvatar } from "./panels";
 import { Button } from "@/components/ui/button";
@@ -25,6 +25,9 @@ export function ChannelHeader({
   headerTitle,
   sidebarOpen,
   memberCount,
+  agentCount,
+  agentsActive,
+  rosterOpen,
   personByHandle,
   dmAgent,
   activityOpen,
@@ -32,6 +35,7 @@ export function ChannelHeader({
   onExpandSidebar,
   onOpenProfile,
   onOpenMembers,
+  onOpenRoster,
   onDeleteChannel,
   onToggleActivity,
 }: {
@@ -39,6 +43,10 @@ export function ChannelHeader({
   headerTitle: string | null;
   sidebarOpen: boolean;
   memberCount: number;
+  // Agent members of this channel + whether any is currently working (drives the 🤖 button).
+  agentCount: number;
+  agentsActive: boolean;
+  rosterOpen: boolean;
   personByHandle: (h?: string | null) => Participant | undefined;
   // The other participant in this DM, when it's an sdk agent (drives the activity toggle).
   dmAgent?: Participant;
@@ -47,6 +55,7 @@ export function ChannelHeader({
   onExpandSidebar: () => void;
   onOpenProfile: (id: string) => void;
   onOpenMembers: () => void;
+  onOpenRoster: () => void;
   onDeleteChannel: () => void;
   onToggleActivity: () => void;
 }) {
@@ -135,6 +144,26 @@ export function ChannelHeader({
 
           {channel.kind !== "dm" && (
             <div className="ml-auto flex items-center gap-1">
+              {agentCount > 0 && (
+                <Button
+                  variant={rosterOpen ? "default" : "outline"}
+                  size="sm"
+                  data-testid="roster-button"
+                  onClick={onOpenRoster}
+                  className="relative h-8 gap-1.5 rounded-full px-2.5 text-muted-foreground data-[active=true]:text-foreground"
+                  data-active={rosterOpen}
+                  title="Agents in this channel"
+                >
+                  <Bot className="size-4" />
+                  <span className="text-xs font-medium tabular-nums">{agentCount}</span>
+                  {agentsActive && (
+                    <span
+                      data-testid="roster-active-dot"
+                      className="absolute -right-0.5 -top-0.5 size-2 animate-pulse rounded-full bg-emerald-500 ring-2 ring-background"
+                    />
+                  )}
+                </Button>
+              )}
               <Button
                 variant="outline"
                 size="sm"

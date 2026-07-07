@@ -44,6 +44,8 @@ import { cn } from "@/lib/utils";
 import { AgentActivity } from "./AgentActivity";
 import { DmActivityView } from "./components/chat/DmActivityView";
 import { ChannelActivity } from "./components/chat/ChannelActivity";
+import { ChannelRoster } from "./components/chat/ChannelRoster";
+import { AgentCardProvider } from "./components/chat/AgentHoverCard";
 import {
   ResizeHandle,
   useMediaQuery,
@@ -63,7 +65,7 @@ import { MembersDialog } from "./components/chat/MembersDialog";
 import { DeleteChannelDialog } from "./components/chat/DeleteChannelDialog";
 import { InviteDialog } from "./components/chat/InviteDialog";
 import { useChatSocket } from "./ws/useChatSocket";
-import { useLiveTurns } from "./ws/useLiveTurns";
+import { useLiveTurns, type LiveTurn } from "./ws/useLiveTurns";
 
 
 
@@ -112,8 +114,8 @@ export function App({
   // flash once the message renders, then clears it via onJumpDone.
   const [jumpToId, setJumpToId] = useState<string | null>(null);
   // Bounded always-on buffer of each agent's current turn (ambient activity surfaces).
+  // liveVersion is a throttled re-render tick; the live-turn-derived useMemos below depend on it.
   const { liveTurnsRef, liveVersion, ingestLiveEvent } = useLiveTurns();
-  void liveVersion; // consumed for re-render timing only; the data rides liveTurnsRef
 
   // Threads. The right-side panel is open when a thread is open (threadRootId) or the Threads
   // list is showing (threadsListOpen). Replies + the root are DERIVED from `messages` (the
@@ -133,6 +135,8 @@ export function App({
   const [members, setMembers] = useState<Participant[]>([]);
   const [showMembers, setShowMembers] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  // Channel agent roster (right-panel view; the header 🤖 button toggles it).
+  const [rosterOpen, setRosterOpen] = useState(false);
   // Collapsible sidebar (persisted, desktop) + profile dialog (participant id being viewed)
   const [sidebarOpen, setSidebarOpen] = useState(
     () => localStorage.getItem("jungle.sidebar") !== "closed",
@@ -524,11 +528,26 @@ export function App({
     setSettingsPanelOpen(false);
     setThreadRootId(null);
     setThreadsListOpen(false);
+    setRosterOpen(false);
     setDrawerOpen(false);
   }
   function openSettingsPanel() {
     setSettingsPanelOpen(true);
     setProfileId(null);
+    setThreadRootId(null);
+    setThreadsListOpen(false);
+    setRosterOpen(false);
+    setDrawerOpen(false);
+  }
+  // Toggle the channel agent roster in the right panel (header 🤖 button).
+  function toggleRoster() {
+    if (rosterOpen) {
+      setRosterOpen(false);
+      return;
+    }
+    setRosterOpen(true);
+    setProfileId(null);
+    setSettingsPanelOpen(false);
     setThreadRootId(null);
     setThreadsListOpen(false);
     setDrawerOpen(false);
@@ -539,6 +558,7 @@ export function App({
     setSettingsPanelOpen(false);
     setThreadRootId(null);
     setThreadsListOpen(true);
+    setRosterOpen(false);
     refreshThreads();
     setDrawerOpen(false);
   }
@@ -606,6 +626,11 @@ export function App({
     const sender = people.find((p) => p.handle === m.sender_handle);
     if (!sender || !m.turn_id) return;
     openActivity(sender.id, m.turn_id);
+  }
+
+  // Open a live turn (a trigger-message chip / roster row) in the Activity view, focused on it.
+  function openLiveTurn(turn: LiveTurn) {
+    openActivity(turn.agentId, turn.turnId);
   }
 
   // Jump to a message (search hit / deliverable): land in its channel, open its thread if it
@@ -740,6 +765,32 @@ export function App({
     .filter((m) => m.kind === "agent")
     .map((m) => peopleById.get(m.id) ?? m)
     .filter((m) => m.status === "working" || m.status === "waking");
+  // This channel's agent members (roster panel + header 🤖 count), status-refreshed from `people`.
+  const channelAgents = members
+    .filter((m) => m.kind === "agent")
+    .map((m) => peopleById.get(m.id) ?? m);
+
+  // Live-turn-derived views (recompute on liveVersion, which throttles the event stream):
+  //   - turnsByMessage: running/just-finished turns anchored to a message in the OPEN channel
+  //     (the trigger-message chips), keyed by the triggering message id.
+  //   - workingChannelIds: channels with a turn currently running (sidebar dot + header pulse).
+  const { turnsByMessage, workingChannelIds } = useMemo(() => {
+    const byMessage = new Map<string, LiveTurn[]>();
+    const working = new Set<string>();
+    for (const turn of liveTurnsRef.current.values()) {
+      const ctx = turn.context;
+      if (!turn.done && ctx?.channelId) working.add(ctx.channelId);
+      // Anchor a chip only in the channel the turn belongs to, and only on a message we hold.
+      if (ctx?.channelId === selected && ctx.messageId) {
+        const arr = byMessage.get(ctx.messageId) ?? [];
+        arr.push(turn);
+        byMessage.set(ctx.messageId, arr);
+      }
+    }
+    return { turnsByMessage: byMessage, workingChannelIds: working };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveVersion, selected]);
+  const channelAgentsActive = channelAgents.some((a) => a.status === "working");
   const profilePerson = profileId
     ? people.find((p) => p.id === profileId) ?? (me?.id === profileId ? me : undefined)
     : undefined;
@@ -766,24 +817,45 @@ export function App({
     setThreadsListOpen(false);
   };
 
-  // The right panel hosts one of three views at a time. Profile/settings win over the threads
-  // pane (opening either already cleared the others via the openers above).
-  const rightMode: "profile" | "settings" | "threads" | null = profilePerson
+  // The right panel hosts one view at a time. Profile/settings win over threads/roster (opening
+  // either already cleared the others via the openers above).
+  const rightMode: "profile" | "settings" | "threads" | "roster" | null = profilePerson
     ? "profile"
     : settingsPanelOpen
       ? "settings"
       : threadPanelOpen
         ? "threads"
-        : null;
+        : rosterOpen && sel?.kind !== "dm"
+          ? "roster"
+          : null;
   const rightOpen = rightMode !== null;
   const closeRightPanel = () => {
     setProfileId(null);
     setSettingsPanelOpen(false);
     setThreadRootId(null);
     setThreadsListOpen(false);
+    setRosterOpen(false);
+  };
+
+  // The agent hover-card context: any @mention / sender / roster entry renders a card knowing
+  // only an agent id. `version` (liveVersion) makes open cards recompute their live "now" line.
+  const agentCardValue = {
+    getAgent: (id: string) => peopleById.get(id),
+    getLiveTurn: (id: string) => liveTurnsRef.current.get(id),
+    onMessage: (id: string) => {
+      goToChat();
+      openDm(id);
+    },
+    onOpenActivity: (id: string) => openActivity(id),
+    onOpenProfile: (id: string) => {
+      goToChat();
+      openProfilePanel(id);
+    },
+    version: liveVersion,
   };
 
   return (
+    <AgentCardProvider value={agentCardValue}>
     <div className="relative flex h-screen-dvh w-full overflow-hidden bg-background text-foreground">
       {/* Mobile backdrop: tapping it closes the off-canvas drawer. Desktop (md+) never shows it. */}
       {drawerOpen && (
@@ -835,6 +907,7 @@ export function App({
           setSearchOpen(true);
           setDrawerOpen(false);
         }}
+        workingChannelIds={workingChannelIds}
         onNewChannel={() => setShowNew(true)}
         onAddAgent={() => setShowAddAgent(true)}
         onCollapse={() => {
@@ -935,6 +1008,9 @@ export function App({
           headerTitle={headerTitle}
           sidebarOpen={sidebarOpen}
           memberCount={members.length}
+          agentCount={channelAgents.length}
+          agentsActive={channelAgentsActive}
+          rosterOpen={rosterOpen && sel?.kind !== "dm"}
           personByHandle={personByHandle}
           dmAgent={dmAgentIsSdk}
           activityOpen={inlineActivityOpen}
@@ -942,6 +1018,7 @@ export function App({
           onExpandSidebar={() => setSidebarOpen(true)}
           onOpenProfile={openProfilePanel}
           onOpenMembers={() => setShowMembers(true)}
+          onOpenRoster={toggleRoster}
           onDeleteChannel={() => setShowDeleteConfirm(true)}
           onToggleActivity={() => dmAgentIsSdk && toggleInlineActivity(dmAgentIsSdk.id)}
         />
@@ -962,16 +1039,21 @@ export function App({
             unreadByRoot={unreadByRoot}
             onOpenThread={openThread}
             onOpenTurn={openTurnForMessage}
+            turnsByMessage={turnsByMessage}
+            personById={(id) => peopleById.get(id)}
+            onOpenLiveTurn={openLiveTurn}
             jumpToId={jumpToId}
             onJumpDone={() => setJumpToId(null)}
           />
         )}
 
-        {/* Ambient agent activity — one row per busy agent with a live "doing X" summary,
-            expandable in place to the current turn's transcript. Channels AND DMs. Hidden while
-            the inline activity view is open (it already shows the live transcript). */}
-        {!inlineActivityOpen && (
+        {/* Ambient agent activity — DMs only (a DM is single-threaded, so the strip above the
+            composer is its natural home). Channels anchor live work under the triggering message
+            via the trigger-message chips instead, so an agent working on something you asked in a
+            DIFFERENT channel never shows up here. Hidden while the inline activity view is open. */}
+        {sel?.kind === "dm" && selected && !inlineActivityOpen && (
           <ChannelActivity
+            channelId={selected}
             busyAgents={busyMembers}
             liveTurns={liveTurnsRef.current}
             onOpenActivity={openActivity}
@@ -1081,6 +1163,22 @@ export function App({
               onSendReply={sendThreadReply}
             />
           )}
+
+          {/* Channel agent roster: this channel's agents, active-first, with live activity. */}
+          {rightMode === "roster" && sel && (
+            <ChannelRoster
+              channelName={sel.name}
+              agents={channelAgents}
+              liveTurns={liveTurnsRef.current}
+              confirms={confirms}
+              onClose={() => setRosterOpen(false)}
+              onMessage={(id) => {
+                goToChat();
+                openDm(id);
+              }}
+              onOpenActivity={openActivity}
+            />
+          )}
         </aside>
       )}
 
@@ -1161,6 +1259,7 @@ export function App({
         onJumpToMessage={jumpToSearchResult}
       />
     </div>
+    </AgentCardProvider>
   );
 }
 

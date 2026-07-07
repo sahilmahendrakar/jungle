@@ -200,6 +200,7 @@ async function runAgentReply(
       budget: replyBudget,
       channelId: triggerChannelId,
       threadRootId: existingThreadRootId,
+      messageId: triggerMessage.id,
     });
     await runners.drain(agent.id);
     // Wake-on-message: if the agent's machine is stopped/absent (idle-stop, or never started), a
@@ -410,11 +411,32 @@ export function buildRunnerHooks(): runners.RunnerHooks {
       }
       return surfaceConfirmCard(agent, channelId, confirm.toolName, confirm.input);
     },
+    // A turn began -> tell the workspace where it was triggered from (channel/thread/message),
+    // so clients can show the work where it was requested.
+    onTurnStarted: (agentId, turnId, context) => {
+      broadcastAgentWorkspace(agentId, {
+        type: "agent_turn",
+        agentId,
+        turnId,
+        context: context
+          ? { channelId: context.channelId, threadRootId: context.threadRootId, messageId: context.messageId }
+          : null,
+      });
+    },
     // A runner's SDK stream event -> persist for the Activity feed + broadcast to the agent's
-    // workspace (raw tool output must never leak to other workspaces).
-    onAgentEvent: (agentId, turnId, event) => {
+    // workspace (raw tool output must never leak to other workspaces). The turn's context rides
+    // on every frame so a client that loads mid-turn still learns the turn's home.
+    onAgentEvent: (agentId, turnId, event, context) => {
       void db.insertAgentEvent(agentId, turnId, event).catch((e) => console.error("insertAgentEvent:", e));
-      broadcastAgentWorkspace(agentId, { type: "agent_event", agentId, turnId, event });
+      broadcastAgentWorkspace(agentId, {
+        type: "agent_event",
+        agentId,
+        turnId,
+        event,
+        context: context
+          ? { channelId: context.channelId, threadRootId: context.threadRootId, messageId: context.messageId }
+          : null,
+      });
     },
     // Per-turn context-window occupancy -> persist on the participant row + broadcast so an open
     // profile dialog's meter live-updates (workspace-scoped).
