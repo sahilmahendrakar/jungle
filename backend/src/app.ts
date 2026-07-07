@@ -25,7 +25,9 @@ export function createApp(): express.Express {
   app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Headers", "content-type, authorization, x-workspace-id");
-    res.header("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
+    // PUT is load-bearing: attaching/reconfiguring an agent integration is a PUT — omitting it
+    // here made every cross-origin integration save die in preflight ("Failed to fetch").
+    res.header("Access-Control-Allow-Methods", "GET,PUT,POST,PATCH,DELETE,OPTIONS");
     if (req.method === "OPTIONS") {
       res.sendStatus(204);
       return;

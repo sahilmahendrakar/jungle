@@ -5,6 +5,7 @@ import * as gh from "../../github";
 import * as auth from "../../auth";
 import { wrap, ApiError } from "../errors";
 import { requireRequester } from "../guards";
+import { popupClosePage } from "../oauthPopup";
 
 const router = Router();
 
@@ -12,15 +13,17 @@ const router = Router();
 const FRONTEND_URL = process.env.FRONTEND_URL ?? "http://localhost:5173";
 
 // Pending OAuth round-trips: state -> participantId. In-memory is fine for a single backend.
-const pendingOAuth = new Map<string, { participantId: string; createdAt: number }>();
+// `popup` marks flows run in a popup window — the callback then returns a self-closing page
+// (http/oauthPopup.ts) instead of redirecting the whole window to /settings.
+const pendingOAuth = new Map<string, { participantId: string; popup: boolean; createdAt: number }>();
 const OAUTH_STATE_TTL_MS = 15 * 60 * 1000; // a round-trip that hasn't completed in 15 min is dead
 
 // Record a pending OAuth state, evicting any that have expired (bounds the map — an abandoned
 // authorize that never hits the callback would otherwise linger forever).
-function trackOAuthState(state: string, participantId: string): void {
+function trackOAuthState(state: string, participantId: string, popup = false): void {
   const cutoff = Date.now() - OAUTH_STATE_TTL_MS;
   for (const [k, v] of pendingOAuth) if (v.createdAt < cutoff) pendingOAuth.delete(k);
-  pendingOAuth.set(state, { participantId, createdAt: Date.now() });
+  pendingOAuth.set(state, { participantId, popup, createdAt: Date.now() });
 }
 
 // Step 1 of connect: a human hits this (e.g. a "Connect GitHub" button) and is redirected to
@@ -45,24 +48,29 @@ router.post(
     const p = await db.getParticipantByFirebaseUid(u.uid);
     if (!p) return res.status(409).json({ error: "finish onboarding first" });
     const state = randomBytes(16).toString("hex");
-    trackOAuthState(state, p.id);
+    trackOAuthState(state, p.id, req.body?.popup === true);
     res.json({ url: gh.authorizeUrl(state) });
   }),
 );
 
 // Step 2: GitHub redirects back here with ?code & ?state. Exchange + store the identity.
 router.get("/auth/github/callback", async (req, res) => {
+  const state = (req.query.state as string | undefined) || "";
+  const pending = pendingOAuth.get(state);
   try {
     const code = (req.query.code as string | undefined) || "";
-    const state = (req.query.state as string | undefined) || "";
-    const pending = pendingOAuth.get(state);
     if (!code || !pending) return res.status(400).send("invalid or expired OAuth state");
     pendingOAuth.delete(state);
     const { login } = await gh.exchangeCodeAndStore(pending.participantId, code);
+    if (pending.popup) {
+      return res.send(popupClosePage({ connection: "github", status: "connected", account: login }));
+    }
     // Back to the SPA, which reads ?github=connected to advance/refresh the onboarding step.
     res.redirect(`${FRONTEND_URL}/settings?github=connected&login=${encodeURIComponent(login)}`);
   } catch (e) {
-    res.redirect(`${FRONTEND_URL}/settings?github=error&reason=${encodeURIComponent(String((e as Error).message ?? e))}`);
+    const reason = String((e as Error).message ?? e);
+    if (pending?.popup) return res.send(popupClosePage({ connection: "github", status: "error", reason }));
+    res.redirect(`${FRONTEND_URL}/settings?github=error&reason=${encodeURIComponent(reason)}`);
   }
 });
 

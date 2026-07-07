@@ -5,6 +5,7 @@ import * as db from "../../db";
 import { wrap, ApiError } from "../errors";
 import { requireRequester } from "../guards";
 import { adapterFor } from "../../integrations";
+import { popupClosePage } from "../oauthPopup";
 
 // Per-USER OAuth connections for the connection-based integrations (Linear/Notion/Granola via their
 // remote MCP servers, Google Drive). You connect your accounts once in Settings → Connections, like
@@ -43,6 +44,9 @@ interface PendingConnect {
   participantId: string;
   key: string;
   pending: Record<string, unknown>;
+  // Flow runs in a popup window — the callback returns a self-closing page (http/oauthPopup.ts)
+  // instead of redirecting the whole window to /settings.
+  popup: boolean;
   createdAt: number;
 }
 const pendingConnects = new Map<string, PendingConnect>();
@@ -74,7 +78,7 @@ router.post(
     const adapter = connectionAdapter(key);
     const state = randomBytes(16).toString("hex");
     const start = await adapter.connection!.start({ me, redirectUri: REDIRECT_URI });
-    trackConnect(state, { participantId: me.id, key, pending: start.pending });
+    trackConnect(state, { participantId: me.id, key, pending: start.pending, popup: req.body?.popup === true });
     // The adapter returns an authorize URL without `state` (it can't know ours); append it.
     const url = new URL(start.authorizeUrl);
     url.searchParams.set("state", state);
@@ -112,15 +116,16 @@ router.get("/auth/integrations/callback", async (req, res) => {
       scopes: result.scopes,
       extra: result.extra,
     });
+    if (entry.popup) {
+      return res.send(
+        popupClosePage({ connection: entry.key, status: "connected", account: result.externalAccount ?? undefined }),
+      );
+    }
     res.redirect(backToSettings({ integration: entry.key, status: "connected" }));
   } catch (e) {
-    res.redirect(
-      backToSettings({
-        integration: entry?.key ?? "",
-        status: "error",
-        reason: String((e as Error).message ?? e),
-      }),
-    );
+    const reason = String((e as Error).message ?? e);
+    if (entry?.popup) return res.send(popupClosePage({ connection: entry.key, status: "error", reason }));
+    res.redirect(backToSettings({ integration: entry?.key ?? "", status: "error", reason }));
   }
 });
 

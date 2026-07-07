@@ -1,16 +1,10 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Bot } from "lucide-react";
-import {
-  createParticipant,
-  getGoogleStatus,
-  getIntegrationStatuses,
-  getIntegrationType,
-  type GoogleStatus,
-  type IntegrationStatuses,
-} from "../../api";
+import { createParticipant } from "../../api";
 import { MODEL_OPTIONS, SDK_MODE_OPTIONS } from "../../lib/chat";
 import { SelectMenu } from "./panels";
-import { IntegrationsEditor, type IntegrationDraft } from "./IntegrationsEditor";
+import { IntegrationsEditor, validateIntegrations, type IntegrationDraft } from "./IntegrationsEditor";
+import { useConnections } from "@/lib/connections";
 import {
   Dialog,
   DialogContent,
@@ -42,27 +36,20 @@ export function AddAgentDialog({
   const [agModel, setAgModel] = useState(MODEL_OPTIONS[0].id);
   const [agMode, setAgMode] = useState(SDK_MODE_OPTIONS[0].id); // new agents are sdk runtime
   const [addingAgent, setAddingAgent] = useState(false);
-  const [google, setGoogle] = useState<GoogleStatus | null>(null);
-  const [intStatuses, setIntStatuses] = useState<IntegrationStatuses>({});
-
-  // The creator's connections gate the connection-based integrations (each binds to their account).
-  useEffect(() => {
-    if (!open) return;
-    let cancelled = false;
-    getGoogleStatus()
-      .then((s) => !cancelled && setGoogle(s))
-      .catch(() => !cancelled && setGoogle(null));
-    getIntegrationStatuses()
-      .then((s) => !cancelled && setIntStatuses(s))
-      .catch(() => !cancelled && setIntStatuses({}));
-    return () => {
-      cancelled = true;
-    };
-  }, [open]);
+  // The creator's per-user connections gate the integration rows; missing ones can be linked
+  // inline (popup OAuth) without losing this dialog's draft.
+  const connections = useConnections(open);
 
   async function submitAddAgent() {
     if (!agHandle.trim() || !agName.trim()) {
       onNotice("Agent handle and name are required.");
+      return;
+    }
+    // Every attached integration must be complete (connection linked, repo picked) — surfaced
+    // here instead of silently dropping half-configured ones at create time.
+    const problem = validateIntegrations(integrations, connections);
+    if (problem) {
+      onNotice(problem);
       return;
     }
     setAddingAgent(true);
@@ -71,14 +58,7 @@ export function AddAgentDialog({
         kind: "agent",
         handle: agHandle.trim(),
         displayName: agName.trim(),
-        // Keep connection-based integrations (gmail + linear/notion/granola/drive) only when the
-        // creator has that account connected (each binds to it); keep field-based ones (github)
-        // only when some config is filled in.
-        integrations: integrations.filter((i) => {
-          if (i.key === "gmail") return !!google?.connected;
-          if (getIntegrationType(i.key)?.connection === "oauth") return !!intStatuses[i.key]?.connected;
-          return Object.values(i.config).some((v) => v.trim());
-        }),
+        integrations,
         model: agModel,
         mode: agMode,
       });
@@ -129,12 +109,7 @@ export function AddAgentDialog({
               placeholder="e.g. Deploy Bot"
             />
           </div>
-          <IntegrationsEditor
-            value={integrations}
-            onChange={setIntegrations}
-            google={google ?? undefined}
-            statuses={intStatuses}
-          />
+          <IntegrationsEditor value={integrations} onChange={setIntegrations} connections={connections} />
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <Label>Model</Label>

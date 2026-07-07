@@ -187,6 +187,10 @@ router.put(
       if (!config[field.key]) throw new ApiError(400, `${field.label} is required`);
     }
     const row = await db.setAgentIntegration(agent.id, key, await resolveIntegrationConfig(me, agent.id, key, config));
+    // Integration grants (git creds, MCP servers, prompt blocks) only reach the runner via
+    // `configure` — push a fresh one so a connected runner picks the change up at its next turn
+    // instead of silently keeping the old grants until a reconnect. No-op when offline.
+    await runners.reconfigure(agent.id);
     res.json(row);
   }),
 );
@@ -196,6 +200,8 @@ router.delete(
   wrap(async (req, res) => {
     const { agent } = await requireAgent(req);
     await db.removeAgentIntegration(agent.id, String(req.params.key));
+    // Revoke the grant on a live runner too (same reasoning as the PUT above).
+    await runners.reconfigure(agent.id);
     res.json({ ok: true });
   }),
 );

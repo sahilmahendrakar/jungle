@@ -15,8 +15,8 @@ import type {
   AgentIntegration,
   Schedule,
 } from "@jungle/shared";
-export { INTEGRATION_TYPES, getIntegrationType } from "@jungle/shared";
-export type { IntegrationType } from "@jungle/shared";
+export { INTEGRATION_TYPES, getIntegrationType, CONNECTION_TYPES, getConnectionType, connectionForIntegration } from "@jungle/shared";
+export type { IntegrationType, ConnectionType } from "@jungle/shared";
 
 export type { Participant, Attachment, UnreadThread, AgentEvent, AgentStatus, AgentIntegration };
 export type { Schedule };
@@ -235,10 +235,13 @@ export interface IntegrationConnectionStatus {
 // Per-integration connection status for the current user, keyed by integration key.
 export type IntegrationStatuses = Record<string, IntegrationConnectionStatus>;
 
-// Begin connecting: returns the provider authorize URL for the SPA to redirect to (full page).
-export function integrationConnectUrl(key: string): Promise<{ url: string }> {
+// Begin connecting: returns the provider authorize URL for the SPA to navigate to. With
+// `popup: true` the callback returns a self-closing page instead of redirecting to /settings,
+// so the flow can run in window.open without losing SPA state (see lib/connections.tsx).
+export function integrationConnectUrl(key: string, opts?: { popup?: boolean }): Promise<{ url: string }> {
   return request(`/api/integrations/${key}/connect-url`, {
     method: "POST",
+    json: { popup: opts?.popup === true },
     auth: true,
     devAuth: true,
     errorMessage: "failed to start connect",
@@ -622,9 +625,10 @@ export function revokeInvite(token: string): Promise<{ ok: boolean }> {
   });
 }
 
-export function githubConnectUrl(): Promise<{ url: string }> {
+export function githubConnectUrl(opts?: { popup?: boolean }): Promise<{ url: string }> {
   return request(`/api/github/connect-url`, {
     method: "POST",
+    json: { popup: opts?.popup === true },
     auth: true,
     errorMessage: "failed to start GitHub connect",
   });
@@ -657,9 +661,10 @@ export function getGithubStatus(): Promise<GithubStatus> {
 // --- Google (Gmail) connection: per-user OAuth, mirrors the GitHub connect flow above. Backs
 // the Gmail agent integration; surfaced in Settings → Connections. ---
 
-export function googleConnectUrl(): Promise<{ url: string }> {
+export function googleConnectUrl(opts?: { popup?: boolean }): Promise<{ url: string }> {
   return request(`/api/google/connect-url`, {
     method: "POST",
+    json: { popup: opts?.popup === true },
     auth: true,
     errorMessage: "failed to start Google connect",
   });

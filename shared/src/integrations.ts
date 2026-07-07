@@ -10,10 +10,24 @@ export interface IntegrationConfigField {
   placeholder?: string;
 }
 
+// A per-USER account link that integrations are built on. Every integration relies on exactly
+// one connection (an integration = a connection + per-agent settings): GitHub backs the github
+// integration, the Google account backs gmail, and each remote-MCP integration (Linear/Notion/
+// Granola/Drive) has its own. Connections are managed once in Settings → Connections; the
+// `kind` says which OAuth route family serves it (their wire shapes differ, the UX is uniform).
+export interface ConnectionType {
+  key: string; // "github" | "google" | <integration key>
+  name: string;
+  description: string;
+  kind: "github" | "google" | "integration";
+}
+
 export interface IntegrationType {
   key: string;
   name: string;
   description: string;
+  // The per-user connection this integration is built on (see ConnectionType / CONNECTION_TYPES).
+  connectionKey: string;
   configFields: IntegrationConfigField[];
   // Shown in the picker, disabled — the integration type exists in the catalog but isn't
   // wired up to grant anything yet.
@@ -33,6 +47,7 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     key: "github",
     name: "GitHub",
     description: "Pick a repo. Agent can clone, read code, open PRs & commit via git + gh CLI.",
+    connectionKey: "github",
     configFields: [{ key: "repo", label: "Repository", placeholder: "owner/name" }],
   },
   {
@@ -42,6 +57,7 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     // Connection-based, not a typed field: the mailbox comes from the attaching user's connected
     // Google account (see Settings → Connections), so there are no free-text config fields. The
     // frontend renders this card specially (connection status + a send-approval toggle).
+    connectionKey: "google",
     configFields: [],
   },
   {
@@ -50,6 +66,7 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     description: "Read, create & update Linear issues, projects & comments via Linear's MCP server.",
     // Connection-based (OAuth to Linear's MCP server); the only per-agent config is the write-
     // approval toggle, rendered specially by the connection card.
+    connectionKey: "linear",
     configFields: [],
     connection: "oauth",
   },
@@ -57,6 +74,7 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     key: "google-drive",
     name: "Google Drive",
     description: "Search, read, create & update files in a connected Google Drive.",
+    connectionKey: "google-drive",
     configFields: [],
     connection: "oauth",
   },
@@ -64,6 +82,7 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     key: "notion",
     name: "Notion",
     description: "Search, read & write pages and databases in a connected Notion workspace.",
+    connectionKey: "notion",
     configFields: [],
     connection: "oauth",
   },
@@ -71,11 +90,43 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     key: "granola",
     name: "Granola",
     description: "Search and read your Granola meeting notes and transcripts.",
+    connectionKey: "granola",
     configFields: [],
     connection: "oauth",
     readOnly: true,
   },
 ];
+
+// The per-user connection catalog — everything a user can link in Settings → Connections.
+// GitHub and Google are first-class OAuth flows with their own routes; the rest ride the
+// generic /api/integrations/:key connection routes (kind "integration").
+export const CONNECTION_TYPES: ConnectionType[] = [
+  {
+    key: "github",
+    name: "GitHub",
+    description: "Repo access for agents — clone, read code, commit & open PRs via the Jungle GitHub App.",
+    kind: "github",
+  },
+  {
+    key: "google",
+    name: "Google",
+    description: "Backs the Gmail integration — agents read, search & send email from this account.",
+    kind: "google",
+  },
+  ...INTEGRATION_TYPES.filter((t) => t.connection === "oauth" && !t.comingSoon).map(
+    (t): ConnectionType => ({ key: t.key, name: t.name, description: t.description, kind: "integration" }),
+  ),
+];
+
+export function getConnectionType(key: string): ConnectionType | undefined {
+  return CONNECTION_TYPES.find((c) => c.key === key);
+}
+
+// The connection an integration is built on (e.g. gmail → the google connection).
+export function connectionForIntegration(integrationKey: string): ConnectionType | undefined {
+  const t = getIntegrationType(integrationKey);
+  return t ? getConnectionType(t.connectionKey) : undefined;
+}
 
 export function getIntegrationType(key: string): IntegrationType | undefined {
   return INTEGRATION_TYPES.find((t) => t.key === key);

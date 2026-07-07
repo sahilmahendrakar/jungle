@@ -24,11 +24,16 @@ import {
   listAgentIntegrations,
   setAgentIntegration,
   removeAgentIntegration,
-  getGoogleStatus,
-  getIntegrationStatuses,
 } from "../../api";
-import type { Attachment, Participant, AgentStatus, GoogleStatus, IntegrationStatuses } from "../../api";
-import { IntegrationsEditor, type IntegrationDraft } from "./IntegrationsEditor";
+import type { Attachment, Participant, AgentStatus } from "../../api";
+import {
+  IntegrationsEditor,
+  integrationFingerprint,
+  integrationsFingerprint,
+  validateIntegrations,
+  type IntegrationDraft,
+} from "./IntegrationsEditor";
+import { useConnections } from "@/lib/connections";
 import {
   fmtBytes,
   EFFORT_OPTIONS,
@@ -195,8 +200,8 @@ export function ParticipantProfilePanel({
   const [deleting, setDeleting] = useState(false);
   const [integrations, setIntegrations] = useState<IntegrationDraft[]>([]);
   const [origIntegrations, setOrigIntegrations] = useState<IntegrationDraft[]>([]);
-  const [google, setGoogle] = useState<GoogleStatus | null>(null);
-  const [intStatuses, setIntStatuses] = useState<IntegrationStatuses>({});
+  // The viewer's per-user connections gate the integration rows (inline connect / approval toggle).
+  const connections = useConnections(isAgent);
 
   useEffect(() => {
     if (!isAgent) return;
@@ -207,13 +212,6 @@ export function ParticipantProfilePanel({
       setIntegrations(draft);
       setOrigIntegrations(draft);
     });
-    // The viewer's connections gate the connection-based integration cards (attach/approval toggle).
-    getGoogleStatus()
-      .then((s) => !cancelled && setGoogle(s))
-      .catch(() => !cancelled && setGoogle(null));
-    getIntegrationStatuses()
-      .then((s) => !cancelled && setIntStatuses(s))
-      .catch(() => !cancelled && setIntStatuses({}));
     return () => {
       cancelled = true;
     };
@@ -233,22 +231,26 @@ export function ParticipantProfilePanel({
     }
   }
 
-  const integrationsKey = (list: IntegrationDraft[]) =>
-    [...list]
-      .sort((a, b) => a.key.localeCompare(b.key))
-      .map((v) => `${v.key}:${JSON.stringify(v.config)}`)
-      .join("|");
-
+  // Integration changes compare canonical fingerprints (editable fields only) — raw JSON
+  // compares choked on server-resolved fields vs local string drafts and left the Save button
+  // stuck dirty after a successful save.
   const dirty =
     name.trim() !== person.display_name ||
     persona.trim() !== (person.persona ?? "") ||
     mode !== (person.mode ?? "default") ||
     model !== (person.model ?? MODEL_OPTIONS[0].id) ||
     effort !== (person.effort ?? EFFORT_OPTIONS[1].id) ||
-    integrationsKey(integrations) !== integrationsKey(origIntegrations);
+    integrationsFingerprint(integrations) !== integrationsFingerprint(origIntegrations);
 
   async function save() {
     if (!dirty || saving || !name.trim()) return;
+    // Surface incomplete integrations (missing connection / repo) before hitting the server,
+    // instead of failing halfway through the write sequence.
+    const problem = validateIntegrations(integrations, connections);
+    if (problem) {
+      setErr(problem);
+      return;
+    }
     setSaving(true);
     setErr("");
     try {
@@ -265,18 +267,22 @@ export function ParticipantProfilePanel({
         effort,
         persona: persona.trim(),
       };
-      const updated = await updateAgent(person.id, patch);
       const nextKeys = new Set(integrations.map((v) => v.key));
       for (const orig of origIntegrations) {
         if (!nextKeys.has(orig.key)) await removeAgentIntegration(person.id, orig.key);
       }
       for (const entry of integrations) {
         const prev = origIntegrations.find((v) => v.key === entry.key);
-        if (!prev || JSON.stringify(prev.config) !== JSON.stringify(entry.config)) {
+        if (!prev || integrationFingerprint(prev) !== integrationFingerprint(entry)) {
           await setAgentIntegration(person.id, entry.key, entry.config);
         }
       }
-      setOrigIntegrations(integrations);
+      const updated = await updateAgent(person.id, patch);
+      // Reset the editor to server truth (resolved configs) so the dirty check starts clean.
+      const rows = await listAgentIntegrations(person.id);
+      const draft = rows.map((r) => ({ key: r.integration_key, config: r.config as Record<string, string> }));
+      setIntegrations(draft);
+      setOrigIntegrations(draft);
       onSaved(updated);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
@@ -403,12 +409,7 @@ export function ParticipantProfilePanel({
                 Lower effort spends fewer tokens. Applies at the agent's next turn.
               </p>
             </div>
-            <IntegrationsEditor
-              value={integrations}
-              onChange={setIntegrations}
-              google={google ?? undefined}
-              statuses={intStatuses}
-            />
+            <IntegrationsEditor value={integrations} onChange={setIntegrations} connections={connections} />
             <MemoryCard person={person} />
             <ContextUsageCard person={person} />
             <Button
