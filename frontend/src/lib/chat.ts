@@ -34,10 +34,12 @@ export const EFFORT_OPTIONS = [
 export interface ToolConfirm {
   confirmId: string;
   channelId: string;
+  agentId?: string;
   agentName: string;
   agentHandle: string;
   tool: string;
   input: unknown;
+  createdAt?: string;
   status?: "resolved";
   result?: "allow" | "deny";
   by?: string;
@@ -108,6 +110,25 @@ export const newId = () =>
 
 export const fmtTime = (iso: string) =>
   new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+
+// Coarse relative time for schedule next-/last-run columns: "in 12m", "in 3h", "2d ago".
+// Beyond a week it falls back to an absolute date. null/invalid -> "—".
+export const fmtRelative = (iso: string | null | undefined): string => {
+  if (!iso) return "—";
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return "—";
+  const diff = t - Date.now();
+  const future = diff >= 0;
+  const abs = Math.abs(diff);
+  const mins = Math.round(abs / 60_000);
+  if (mins < 1) return "just now";
+  let text: string;
+  if (mins < 60) text = `${mins}m`;
+  else if (mins < 60 * 24) text = `${Math.round(mins / 60)}h`;
+  else if (mins < 60 * 24 * 7) text = `${Math.round(mins / (60 * 24))}d`;
+  else return new Date(t).toLocaleDateString([], { month: "short", day: "numeric" });
+  return future ? `in ${text}` : `${text} ago`;
+};
 
 // Status priority for a channel row with several agent members: the most noteworthy wins.
 export const STATUS_RANK: Record<AgentStatus, number> = { working: 0, waking: 1, idle: 2, sleeping: 3 };

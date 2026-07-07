@@ -7,6 +7,7 @@ import {
   FilePlus2,
   FileText,
   Globe,
+  Inbox,
   Loader2,
   MessageSquare,
   Search,
@@ -27,6 +28,7 @@ import {
   inputStr,
   pretty,
   turnSummary,
+  type InboundItem,
   type Item,
   type RawItem,
   type ResultItem,
@@ -218,6 +220,48 @@ function ThinkingRow({ item }: { item: ThinkingItem }) {
   );
 }
 
+const INBOUND_LABEL: Record<InboundItem["source"], string> = {
+  trigger: "Woke up on",
+  inbox: "Received while working",
+  compact: "Compacting context",
+};
+
+// A message that fed this agent from outside its own turn: what woke it, a mid-turn inbox
+// delivery, or `/compact`. Rendered distinctly from the agent's own output so it reads as
+// "incoming" rather than something the agent said or did.
+function InboundRow({ item }: { item: InboundItem }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="min-w-0 rounded-md border border-dashed bg-muted/30">
+      <button
+        type="button"
+        data-testid="activity-inbound"
+        onClick={() => setOpen((o) => !o)}
+        className="group flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left transition-colors hover:bg-muted/60"
+      >
+        <Inbox className="size-3.5 shrink-0 text-muted-foreground" />
+        <span className="min-w-0 flex-1 truncate text-[13px]">
+          <span className="font-medium text-foreground/90">{INBOUND_LABEL[item.source]}</span>
+          {!open && item.text.trim() && (
+            <span className="ml-1.5 text-muted-foreground">{clip(item.text)}</span>
+          )}
+        </span>
+        <ChevronRight
+          className={cn(
+            "size-3.5 shrink-0 text-muted-foreground/50 transition-transform group-hover:text-muted-foreground",
+            open && "rotate-90",
+          )}
+        />
+      </button>
+      {open && item.text.trim() && (
+        <div className="ml-7 mr-2 mb-1.5">
+          <OutputBlock text={item.text} isError={false} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function RawRow({ item }: { item: RawItem }) {
   const [open, setOpen] = useState(false);
   const label = String((item.value as { type?: string })?.type ?? "event");
@@ -240,7 +284,9 @@ function RawRow({ item }: { item: RawItem }) {
   );
 }
 
-function ItemRow({ item, turnDone }: { item: Item; turnDone: boolean }) {
+// One renderable transcript item. Exported for the ambient channel-activity card, which renders
+// a live turn's items without the TurnSection chrome.
+export function ItemRow({ item, turnDone }: { item: Item; turnDone: boolean }) {
   switch (item.kind) {
     case "text":
       return (
@@ -272,6 +318,8 @@ function ItemRow({ item, turnDone }: { item: Item; turnDone: boolean }) {
       );
     case "raw":
       return <RawRow item={item} />;
+    case "inbound":
+      return <InboundRow item={item} />;
   }
 }
 
@@ -298,7 +346,7 @@ export function TurnSection({
   const startedAt = turn.events[0]?.created_at;
 
   return (
-    <div data-testid="activity-turn" className="rounded-lg border bg-card">
+    <div data-testid="activity-turn" data-turn-id={turn.turnId} className="rounded-lg border bg-card">
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}

@@ -4,23 +4,52 @@
 //   - queue holds {inboxId, text}. When idle and queue non-empty, drain ALL
 //     queued items as one batch, emit turn_started + consumed, and run one
 //     streaming query() whose generator yields the batch as a single user
-//     message. While the query runs, if more items arrive AND no model change
-//     is pending, the generator yields them as a follow-up user message at the
-//     turn boundary (after the previous turn's `result`). Otherwise the
-//     generator returns, the query ends, and the loop restarts (used to apply
-//     a pending model change via query restart with resume).
+//     message. Messages arriving while the query runs ARE streamed into it as
+//     follow-up user messages (mid-turn splice): the CLI either folds one
+//     into the turn in progress or queues it as the next turn — both fully
+//     supported, exactly like typing into interactive Claude Code.
+//   - Ending the query is the delicate part. The CLI treats stdin EOF (our
+//     input generator returning) as "no more input": once `inputClosed` is
+//     set, EVERY control request — hook callbacks, canUseTool, in-process
+//     SDK-MCP calls — throws "Stream closed". Closing the input while a
+//     spliced follow-up turn is still queued therefore runs that turn with
+//     dead wiring: PreToolUse hooks error out (so default-mode confirmation
+//     gating silently FALLS THROUGH TO ALLOW) and every send_message fails
+//     with "Stream closed". That — our own premature close in the old
+//     endTurnIfQuiescent, not a CLI defect — was the long-open prod "agent
+//     goes mute for a whole turn" bug (root-caused 2026-07-06 via CLI debug
+//     stderr: sendRequest throwing on inputClosed; deterministic repro in
+//     /tmp/splice-repro and backend/test/integration-sdk.mjs).
+//   - So the close rule is: at a `result`, close immediately only when every
+//     user message we yielded has produced a result (yields <= results).
+//     A spliced message may FOLD into the running turn (one result for two
+//     yields — undetectable from the stream), so when yields > results we
+//     instead close after a short quiescence window with no stream activity;
+//     any activity means the queued turn started, and its own result
+//     re-evaluates the rule. A pending model change still ends the query
+//     directly (restart with resume).
 import {
   query,
   type EffortLevel,
+  type McpServerConfig,
   type Query,
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { log } from "./log.js";
 import { Connection } from "./connection.js";
-import { createJungleMcpServer, type SendMessageResult } from "./send-message-tool.js";
+import {
+  createJungleMcpServer,
+  type SendMessageResult,
+  type ReadHistoryResult,
+  type ScheduleCreateResult,
+  type ScheduleListResult,
+  type ScheduleCancelResult,
+} from "./send-message-tool.js";
+import { createGmailMcpServer } from "./gmail-tool.js";
+import { createDriveMcpServer } from "./drive-tool.js";
 import { applyGitCredentials, cloneRepoIfNeeded, getGhToken } from "./git.js";
 import { loadState, saveState } from "./state.js";
 import {
@@ -34,6 +63,7 @@ import {
   type BackendToRunner,
   type ConfigureFrame,
   type EnqueueAttachment,
+  type McpIntegrationGrant,
   type PermissionMode,
 } from "./protocol.js";
 
@@ -55,8 +85,30 @@ export interface RunnerEnv {
 const SAFE_TOOLS = new Set([
   "ToolSearch", "Read", "Glob", "Grep", "WebSearch", "WebFetch",
   "TodoWrite", "Task", "NotebookRead", "BashOutput", "TaskOutput",
-  "ListMcpResources", "ReadMcpResource",
+  "ListMcpResources", "ReadMcpResource", "mcp__jungle__read_history",
+  // Gmail read/search: never mutate the mailbox, so no confirmation.
+  "mcp__gmail__gmail_search", "mcp__gmail__gmail_read_message",
+  // Google Drive read: search/list/get never mutate, so no confirmation.
+  "mcp__gdrive__drive_search", "mcp__gdrive__drive_list", "mcp__gdrive__drive_get_file",
+  // Schedule tools are bounded jungle-app operations with backend-enforced guardrails (caps,
+  // min interval, prompt cap) and full human visibility/undo on the Scheduled page — a confirm
+  // card would be noise, not safety.
+  "mcp__jungle__schedule_create", "mcp__jungle__schedule_list", "mcp__jungle__schedule_cancel",
 ]);
+
+// Gmail write tools: gated through the human confirmation card when the integration's
+// requireSendApproval is on, auto-allowed when the user turned that off (see preToolUseHook).
+const GMAIL_READ_TOOLS = ["mcp__gmail__gmail_search", "mcp__gmail__gmail_read_message"];
+const GMAIL_WRITE_TOOLS = new Set([
+  "mcp__gmail__gmail_send",
+  "mcp__gmail__gmail_create_draft",
+  "mcp__gmail__gmail_modify_labels",
+]);
+
+// Google Drive read/write tools — same gating model as Gmail (writes honor the integration's
+// requireApproval toggle in preToolUseHook; reads always run).
+const DRIVE_READ_TOOLS = ["mcp__gdrive__drive_search", "mcp__gdrive__drive_list", "mcp__gdrive__drive_get_file"];
+const DRIVE_WRITE_TOOLS = new Set(["mcp__gdrive__drive_create_file", "mcp__gdrive__drive_update_file"]);
 
 // Fallback context reading derived from a `result` SDK message when the
 // getContextUsage() control request is unavailable. The turn's final input
@@ -90,6 +142,22 @@ function contextFromResult(
   return { tokens, maxTokens };
 }
 
+// True when an SDK `user` stream message carries a tool_result whose body is the CLI's
+// "Stream closed" MCP-transport error — the symptom of a stale in-process MCP connection.
+// That exact string only comes from a broken MCP stream (not from a tool's own output), so
+// matching it is specific enough to trigger a reconnect. See runTurn's reconnect logic.
+function messageHasStreamClosed(message: unknown): boolean {
+  const content = (message as any)?.message?.content;
+  if (!Array.isArray(content)) return false;
+  return content.some(
+    (c: any) =>
+      c?.type === "tool_result" &&
+      c?.is_error === true &&
+      typeof c?.content === "string" &&
+      c.content.includes("Stream closed"),
+  );
+}
+
 export class Runner {
   private conn: Connection;
 
@@ -106,6 +174,23 @@ export class Runner {
   private systemPromptAppend = "";
   private configured = false;
 
+  // Gmail integration state (from `configure`; token refreshed by `gmail_credentials`). null =
+  // no Gmail attached. Read fresh by the gmail MCP server on each tool call, so a mid-turn refresh
+  // is picked up without rebuilding the server.
+  private gmailToken: string | null = null;
+  private gmailSettings: { email: string; requireSendApproval: boolean } | null = null;
+
+  // Google Drive integration state (in-process, like Gmail): settings from `configure`; the token
+  // lives in integrationTokens under key "google-drive" (refreshed by `integration_credentials`).
+  private driveSettings: { email: string; requireApproval: boolean } | null = null;
+
+  // Remote-MCP integrations (Linear/Notion/Granola/…) from `configure`: the grants (key, url,
+  // safeTools, requireApproval). Access tokens for BOTH the remote-MCP integrations and the
+  // in-process Drive server live in integrationTokens, keyed by integration key (seeded from the
+  // configure grants, refreshed mid-session by `integration_credentials`).
+  private mcpIntegrations: McpIntegrationGrant[] = [];
+  private integrationTokens = new Map<string, string>();
+
   // Session persistence.
   private sessionId: string | null = null;
 
@@ -119,28 +204,42 @@ export class Runner {
   // with real messages and is naturally coalesced if pressed repeatedly.
   private compactRequested = false;
 
-  // Streaming-input generator plumbing: the running query's generator awaits
-  // `nextBatch`; we resolve it with a batch (follow-up turn) or null (end query).
+  // Streaming-input generator plumbing: the running query's generator awaits this between
+  // yields; deliverFollowupBatch resolves it with items (mid-turn splice) and endTurn()
+  // resolves it with null (generator returns → stdin closes → query ends).
   private batchResolver: ((batch: QueueItem[] | null) => void) | null = null;
+
+  // Close bookkeeping for the ACTIVE query (reset each runTurn): how many user messages the
+  // generator has yielded vs how many `result`s the CLI has emitted. Closing the input is
+  // only safe when yields <= results (see the close-rule note at the top of this file);
+  // otherwise quiesceTimer closes after a silent window (a spliced message that FOLDED into
+  // the running turn never gets its own result).
+  private turnYields = 0;
+  private turnResults = 0;
+  private quiesceTimer: NodeJS.Timeout | null = null;
+  private static readonly QUIESCE_MS = 3_000;
+
+  // Long-term memory reporting: hash of the MEMORY.md content most recently sent to the
+  // backend (`memory` frame), so we only report actual changes. null = nothing reported yet
+  // on this process; the post-configure report seeds it.
+  private lastMemoryHash: string | null = null;
 
   // In-flight request/response correlation.
   private pendingSendMessages = new Map<string, (r: SendMessageResult) => void>();
+  private pendingReadHistory = new Map<string, (r: ReadHistoryResult) => void>();
+  private pendingScheduleCreate = new Map<string, (r: ScheduleCreateResult) => void>();
+  private pendingScheduleList = new Map<string, (r: ScheduleListResult) => void>();
+  private pendingScheduleCancel = new Map<string, (r: ScheduleCancelResult) => void>();
   private pendingConfirms = new Map<
     string,
     (r: { allow: boolean; message?: string; updatedInput?: Record<string, unknown> }) => void
   >();
-
-  private mcpServer: ReturnType<typeof createJungleMcpServer>;
 
   // Backend HTTP origin for attachment transfer, derived from the WS URL.
   private readonly httpBase: string;
 
   constructor(private readonly env: RunnerEnv) {
     this.httpBase = httpBaseFromWsUrl(env.wsUrl);
-    this.mcpServer = createJungleMcpServer(
-      (id, input) => this.bridgeSendMessage(id, input),
-      (filePath) => uploadFile(this.httpBase, this.env.token, this.workspace, filePath),
-    );
     this.conn = new Connection(env.wsUrl, env.token, {
       onFrame: (f) => this.handleFrame(f),
       onOpen: () => this.onOpen(),
@@ -225,6 +324,38 @@ export class Runner {
         }
         break;
       }
+      case "read_history_result": {
+        const resolve = this.pendingReadHistory.get(frame.id);
+        if (resolve) {
+          this.pendingReadHistory.delete(frame.id);
+          resolve(frame.result);
+        }
+        break;
+      }
+      case "schedule_create_result": {
+        const resolve = this.pendingScheduleCreate.get(frame.id);
+        if (resolve) {
+          this.pendingScheduleCreate.delete(frame.id);
+          resolve(frame.result);
+        }
+        break;
+      }
+      case "schedule_list_result": {
+        const resolve = this.pendingScheduleList.get(frame.id);
+        if (resolve) {
+          this.pendingScheduleList.delete(frame.id);
+          resolve(frame.result);
+        }
+        break;
+      }
+      case "schedule_cancel_result": {
+        const resolve = this.pendingScheduleCancel.get(frame.id);
+        if (resolve) {
+          this.pendingScheduleCancel.delete(frame.id);
+          resolve(frame.result);
+        }
+        break;
+      }
       case "confirm_result": {
         const resolve = this.pendingConfirms.get(frame.id);
         if (resolve) {
@@ -239,6 +370,17 @@ export class Runner {
       }
       case "git_credentials":
         void applyGitCredentials(frame.token, frame.login);
+        break;
+      case "gmail_credentials":
+        // A running turn's gmail server reads this via getToken on its next call — no rebuild.
+        this.gmailToken = frame.accessToken;
+        break;
+      case "integration_credentials":
+        // Fresh token for a remote-MCP integration or the in-process Drive server (keyed by
+        // integration key). Remote MCP headers are fixed when query() is built, so this applies to
+        // the NEXT turn; the in-process Drive server reads it live via getToken. The backend
+        // refreshes before each drain so every turn starts fresh either way.
+        this.integrationTokens.set(frame.key, frame.accessToken);
         break;
       default:
         log.warn("unknown frame from backend", { type: (frame as any).type });
@@ -258,9 +400,33 @@ export class Runner {
       await applyGitCredentials(frame.git.token, frame.git.login);
       if (frame.git.repoUrl) await cloneRepoIfNeeded(frame.git.repoUrl);
     }
+    // Gmail needs no filesystem setup — just hold the token/settings; the gmail MCP server is
+    // built per turn (and only when a token is present). Absent frame.gmail clears it (integration
+    // removed / backing account disconnected).
+    if (frame.gmail) {
+      this.gmailToken = frame.gmail.accessToken;
+      this.gmailSettings = { email: frame.gmail.email, requireSendApproval: frame.gmail.requireSendApproval };
+    } else {
+      this.gmailToken = null;
+      this.gmailSettings = null;
+    }
+    // Remote-MCP integrations: replace the set wholesale (absent = none attached) and seed the
+    // token map from each grant. Later `integration_credentials` frames update the tokens in place.
+    this.mcpIntegrations = frame.mcpIntegrations ?? [];
+    this.integrationTokens = new Map(this.mcpIntegrations.map((g) => [g.key, g.accessToken]));
+    // Google Drive (in-process, like Gmail): hold settings + seed its token under "google-drive".
+    if (frame.drive) {
+      this.integrationTokens.set("google-drive", frame.drive.accessToken);
+      this.driveSettings = { email: frame.drive.email, requireApproval: frame.drive.requireApproval };
+    } else {
+      this.driveSettings = null;
+    }
     this.configured = true;
     void saveState({ sessionId: this.sessionId, model: this.model });
     this.sendState();
+    // Report the current MEMORY.md once per (re)configure so the backend's mirror heals any
+    // drift (e.g. rows migrated before memory existed, or a report lost across a disconnect).
+    void this.reportMemoryIfChanged();
     this.maybeStartTurn();
   }
 
@@ -272,7 +438,8 @@ export class Runner {
       }
     }
     log.info("enqueued items", { count: items.length, queueDepth: this.queue.length });
-    // If a turn is running and there's a pending follow-up request, satisfy it.
+    // If a turn is running and the generator is awaiting a follow-up, splice the new items
+    // into the live query (the CLI folds or queues them — both safe while stdin is open).
     if (this.running && this.batchResolver && this.pendingModel === null) {
       this.deliverFollowupBatch();
     } else {
@@ -361,6 +528,8 @@ export class Runner {
     const firstBatch = this.queue;
     this.queue = [];
     const turnId = randomUUID();
+    this.turnYields = 0;
+    this.turnResults = 0;
 
     const inboxIds = firstBatch.map((i) => i.inboxId);
     this.conn.send({ type: "turn_started", turnId, inboxIds });
@@ -369,6 +538,58 @@ export class Runner {
     this.sendState();
 
     const resumeId = await this.resumableSessionId();
+    // Build a fresh in-process MCP server per turn. Each query() connects the server to its own
+    // in-memory transport; the SDK's per-query cleanup closes that transport on teardown, which
+    // (via the MCP Server's single-transport Protocol) nulls the server's transport binding. A
+    // server SHARED across turns therefore races: the previous turn's async cleanup can null the
+    // binding the current turn just established, leaving send_message with no transport — the CLI
+    // then surfaces "Stream closed" to the model. A per-turn server has no cross-turn aliasing.
+    const mcpServer = this.buildJungleServer();
+    // Attach the gmail server only when a Gmail integration is connected. Read/search tools are
+    // auto-allowed; write tools are auto-allowed only when the user turned approval off — otherwise
+    // they're left off allowedTools so they route through the confirmation card (preToolUseHook).
+    const gmailServer = this.gmailToken ? this.buildGmailServer() : null;
+    const allowedTools = [
+      "mcp__jungle__send_message",
+      "mcp__jungle__read_history",
+      "mcp__jungle__schedule_create",
+      "mcp__jungle__schedule_list",
+      "mcp__jungle__schedule_cancel",
+    ];
+    if (gmailServer) {
+      allowedTools.push(...GMAIL_READ_TOOLS);
+      if (this.gmailSettings && !this.gmailSettings.requireSendApproval) {
+        allowedTools.push(...GMAIL_WRITE_TOOLS);
+      }
+    }
+    // Google Drive: in-process server (like Gmail). Read tools auto-allowed; write tools auto-
+    // allowed only when the approval toggle is off, else routed through the confirmation card.
+    const driveServer = this.driveSettings ? this.buildDriveServer() : null;
+    if (driveServer) {
+      allowedTools.push(...DRIVE_READ_TOOLS);
+      if (!this.driveSettings!.requireApproval) allowedTools.push(...DRIVE_WRITE_TOOLS);
+    }
+    // Mount each connected remote-MCP integration as a remote HTTP server with a Bearer header
+    // built from the current token. Read-only (safe) tools are auto-allowed; when the agent's
+    // approval toggle is off, allow all of that server's tools; otherwise non-safe tools route
+    // through the confirmation card (preToolUseHook honors this in every permission mode).
+    const mcpServers: Record<string, McpServerConfig> = { jungle: mcpServer };
+    if (gmailServer) mcpServers.gmail = gmailServer;
+    if (driveServer) mcpServers.gdrive = driveServer;
+    for (const grant of this.mcpIntegrations) {
+      const token = this.integrationTokens.get(grant.key) ?? grant.accessToken;
+      mcpServers[grant.key] = { type: "http", url: grant.url, headers: { Authorization: `Bearer ${token}` } };
+      allowedTools.push(...grant.safeTools);
+      if (!grant.requireApproval) allowedTools.push(`mcp__${grant.key}__*`);
+    }
+    // Inject the agent's memory INDEX into this turn's system prompt (fresh each turn, so
+    // edits made last turn apply immediately). Linked memory files are Read on demand.
+    const memoryIndex = await this.readMemoryIndex();
+    const systemAppend =
+      this.systemPromptAppend +
+      (memoryIndex
+        ? `\n\n— Your memory index (current MEMORY.md; Read linked memory files when relevant) —\n${memoryIndex}`
+        : "");
     const q = query({
       prompt: this.makeInputGenerator(firstBatch, turnId, compacting),
       options: {
@@ -380,10 +601,10 @@ export class Runner {
         systemPrompt: {
           type: "preset",
           preset: "claude_code",
-          append: this.systemPromptAppend || undefined,
+          append: systemAppend || undefined,
         },
-        mcpServers: { jungle: this.mcpServer },
-        allowedTools: ["mcp__jungle__send_message"],
+        mcpServers,
+        allowedTools,
         // A PreToolUse hook returning permissionDecision "ask" is required to
         // route tool calls to canUseTool: in the non-interactive SDK, `default`
         // mode otherwise auto-approves built-in tools and the callback never
@@ -401,12 +622,51 @@ export class Runner {
 
     let ok = true;
     let error: string | undefined;
+    // A mid-turn session re-init leaves the CLI's client connection to our in-process
+    // "jungle" SDK-MCP server stale: send_message then fails INSTANTLY with "Stream closed"
+    // for the rest of the query, while CLI-native tools (Bash, Read) keep working. Two known
+    // triggers: context compaction (announced by a `compact_boundary` event) and launching an
+    // async Agent/Task subagent. We reconnect the server in place (no query restart, so the
+    // model keeps its context) — proactively on `compact_boundary`, and reactively whenever a
+    // tool result comes back "Stream closed" (covers the subagent case and any other cause).
+    // `reconnecting` serializes overlapping triggers so the model's rapid retries don't fire a
+    // storm of reconnects. `init` fires once per streamed user message, so it is NOT a re-init
+    // signal and must not be used as one.
+    let reconnecting = false;
+    const reconnectJungle = async () => {
+      if (reconnecting) return;
+      reconnecting = true;
+      await this.reconnectJungleMcp(q);
+      reconnecting = false;
+    };
     try {
       for await (const message of q) {
         // Forward every SDK stream message verbatim.
         this.conn.send({ type: "event", turnId, event: message });
 
+        // Stream activity while the quiescence window is armed: a new turn's activity
+        // (init/assistant/user — the CLI dequeued a spliced follow-up) cancels the window
+        // outright — that turn's own result re-runs the close rule, and a long tool call's
+        // event gaps must never fire a mid-turn close. Anything else (stray system events
+        // trailing the result) just pushes the window out.
+        if (this.quiesceTimer) {
+          const t = (message as any).type;
+          if (t === "assistant" || t === "user" || ((message as any).subtype === "init" && t === "system")) {
+            clearTimeout(this.quiesceTimer);
+            this.quiesceTimer = null;
+          } else {
+            this.armQuiesceTimer();
+          }
+        }
+
+        if ((message as any).type === "system" && (message as any).subtype === "compact_boundary") {
+          await reconnectJungle();
+        } else if ((message as any).type === "user" && messageHasStreamClosed(message)) {
+          await reconnectJungle();
+        }
+
         if ((message as any).type === "result") {
+          this.turnResults++;
           const sid = (message as any).session_id;
           if (typeof sid === "string" && sid.length > 0 && sid !== this.sessionId) {
             this.sessionId = sid;
@@ -420,13 +680,17 @@ export class Runner {
           // Report context occupancy while the query is still alive (a control
           // request needs the subprocess up — it exits once this loop ends).
           await this.reportContextUsage(q, message);
-          // Turn boundary: the `result` ends this turn's model work. If nothing is queued
-          // to continue with, close the streaming input so the query completes, the CLI
-          // subprocess exits, and runTurn falls through to turn_done + idle. Without this the
-          // generator would await the next batch forever — subprocess stays alive, `running`
-          // never clears, and the agent is stuck "working" (idle-stop never fires). Follow-up
-          // work that arrived mid-turn was already handed to the generator by handleEnqueue.
-          this.endTurnIfQuiescent();
+          // A `result` ended one turn of model work. Close the streaming input only when it
+          // is SAFE — closing while a spliced follow-up turn is still queued runs that turn
+          // with dead hook/MCP wiring (see the close-rule note at the top of this file).
+          // yields <= results ⇒ nothing outstanding ⇒ close now (the common no-splice case).
+          // yields > results ⇒ a spliced message either QUEUED (its turn's events will land
+          // within ms — the armed timer gets pushed out and its own result re-runs this) or
+          // FOLDED into the turn that just ended (no further events — the window elapses and
+          // closes). Without closing here the generator would hold the stream open forever —
+          // subprocess stays alive, `running` never clears, the agent is stuck "working".
+          if (this.turnResults >= this.turnYields) this.endTurn();
+          else this.armQuiesceTimer();
         }
       }
     } catch (err) {
@@ -437,9 +701,17 @@ export class Runner {
       this.activeQuery = null;
       this.batchResolver = null;
       this.running = false;
+      if (this.quiesceTimer) {
+        clearTimeout(this.quiesceTimer);
+        this.quiesceTimer = null;
+      }
     }
 
     this.conn.send({ type: "turn_done", turnId, ok, error });
+
+    // If the turn changed MEMORY.md, mirror it to the backend (profile panel's Memory section).
+    // After turn_done so a slow read can't delay the idle transition; best-effort by design.
+    void this.reportMemoryIfChanged();
 
     // Apply a pending model change now (at the turn boundary).
     if (this.pendingModel !== null) {
@@ -452,6 +724,67 @@ export class Runner {
     this.sendState();
     // Loop: if more work queued (or a model change left items behind), start again.
     this.maybeStartTurn();
+  }
+
+  // Build the in-process "jungle" SDK-MCP server (send_message, read_history, schedule_*), wired
+  // to this runner's backend bridges. A fresh instance is used per turn and per reconnect — each
+  // query() binds a server to its own transport, so instances must not be shared across connections.
+  private buildJungleServer() {
+    return createJungleMcpServer({
+      sendMessage: (id, input) => this.bridgeSendMessage(id, input),
+      uploadFile: (filePath) => uploadFile(this.httpBase, this.env.token, this.workspace, filePath),
+      readHistory: (id, input) => this.bridgeReadHistory(id, input),
+      scheduleCreate: (id, input) => this.bridgeScheduleCreate(id, input),
+      scheduleList: (id) => this.bridgeScheduleList(id),
+      scheduleCancel: (id, input) => this.bridgeScheduleCancel(id, input),
+    });
+  }
+
+  // The in-process "gmail" SDK-MCP server (gmail_search/read/send/draft/modify), reading the
+  // current OAuth access token fresh on each call so a mid-turn `gmail_credentials` refresh applies
+  // without a rebuild. Built per turn (and per reconnect) alongside the jungle server.
+  private buildGmailServer() {
+    return createGmailMcpServer(() => this.gmailToken);
+  }
+
+  // The in-process "gdrive" SDK-MCP server (drive_*), reading the current OAuth access token fresh
+  // on each call (integrationTokens["google-drive"]) so a mid-turn `integration_credentials`
+  // refresh applies without a rebuild. Built per turn alongside the jungle/gmail servers.
+  private buildDriveServer() {
+    return createDriveMcpServer(() => this.integrationTokens.get("google-drive") ?? null);
+  }
+
+  // Rebuild the CLI's connection to our in-process "jungle" SDK-MCP server after a mid-turn
+  // session re-init (see the reconnect comment in runTurn). reconnectMcpServer() rejects for
+  // in-process (sdk) servers, so we cycle setMcpServers instead: removing 'jungle' tears down the
+  // stale transport on both sides, then re-adding a fresh instance makes the CLI drop and
+  // re-initialize its client — restoring send_message without restarting the query (the model
+  // keeps its context). Best-effort: harmless when the connection was already healthy, and a
+  // failure here must never break the turn.
+  private async reconnectJungleMcp(q: Query): Promise<void> {
+    try {
+      const servers: Record<string, McpServerConfig> = {
+        jungle: this.buildJungleServer(),
+      };
+      if (this.gmailToken) servers.gmail = this.buildGmailServer();
+      if (this.driveSettings) servers.gdrive = this.buildDriveServer();
+      // Re-mount remote-MCP integrations too, with the current token per key.
+      for (const grant of this.mcpIntegrations) {
+        const token = this.integrationTokens.get(grant.key) ?? grant.accessToken;
+        servers[grant.key] = { type: "http", url: grant.url, headers: { Authorization: `Bearer ${token}` } };
+      }
+      await q.setMcpServers({});
+      await q.setMcpServers(servers);
+      log.info("rebuilt MCP connections after mid-turn session re-init");
+    } catch (err) {
+      log.warn("failed to rebuild jungle MCP connection", { err: String(err) });
+    }
+  }
+
+  // The remote-MCP grant a tool call belongs to, if any. Tool names are mcp__<key>__<tool>; match
+  // by the fully-qualified prefix so keys/tools containing underscores or hyphens are handled.
+  private remoteMcpGrantFor(toolName: string): McpIntegrationGrant | null {
+    return this.mcpIntegrations.find((g) => toolName.startsWith(`mcp__${g.key}__`)) ?? null;
   }
 
   // After a turn's result, tell the backend how full the context window is.
@@ -481,8 +814,20 @@ export class Runner {
     this.conn.send({ type: "context_usage", tokens, maxTokens, percent });
   }
 
-  // Streaming-input generator. Yields the first batch, then awaits follow-up
-  // batches at each turn boundary until told to stop (null).
+  // Emit a synthetic "jungle_inbound" event through the existing event-frame path (the same
+  // one that carries SDK stream messages), so the backend persists it into agent_events and
+  // broadcasts it exactly like any other turn event — no protocol/backend changes needed. This
+  // is what lets the Activity transcript show what actually fed the agent: the message that
+  // woke it, a mid-turn inbox delivery, or a `/compact`.
+  private sendInboundEvent(turnId: string, source: "trigger" | "inbox" | "compact", text: string): void {
+    this.conn.send({ type: "event", turnId, event: { type: "jungle_inbound", source, text } });
+  }
+
+  // Streaming-input generator. Yields the first batch (or `/compact`), then loops: awaiting
+  // either a spliced follow-up batch (yielded into the live query — the CLI folds it into the
+  // running turn or queues it as the next one) or null from endTurn() / a model change, which
+  // makes the generator return so stdin closes and the query ends. turnYields counts every
+  // user message handed to the CLI — the close rule in runTurn compares it against results.
   private async *makeInputGenerator(
     firstBatch: QueueItem[],
     turnId: string,
@@ -490,13 +835,19 @@ export class Runner {
   ): AsyncGenerator<SDKUserMessage> {
     // A compact turn's only input is the `/compact` slash command; the CLI runs
     // compaction, emits a compact_boundary + result, and the query ends.
-    yield compacting
-      ? ({
-          type: "user",
-          message: { role: "user", content: "/compact" },
-          parent_tool_use_id: null,
-        } as SDKUserMessage)
-      : await this.toUserMessage(firstBatch);
+    if (compacting) {
+      this.sendInboundEvent(turnId, "compact", "/compact");
+      this.turnYields++;
+      yield {
+        type: "user",
+        message: { role: "user", content: "/compact" },
+        parent_tool_use_id: null,
+      } as SDKUserMessage;
+    } else {
+      const first = await this.toUserMessageAndNotify(firstBatch, turnId, "trigger");
+      this.turnYields++;
+      yield first;
+    }
 
     while (true) {
       // If a model change is pending, end the query so it can restart with the new model.
@@ -504,7 +855,8 @@ export class Runner {
 
       const batch = await new Promise<QueueItem[] | null>((resolve) => {
         this.batchResolver = resolve;
-        // If items arrived after we drained but before we set the resolver, deliver now.
+        // Items that arrived while we were yielding (batchResolver momentarily unset) —
+        // deliver them now.
         if (this.queue.length > 0 && this.pendingModel === null) {
           this.batchResolver = null;
           const items = this.queue;
@@ -515,25 +867,50 @@ export class Runner {
       });
 
       if (batch === null || batch.length === 0) return;
-      yield await this.toUserMessage(batch);
+      const msg = await this.toUserMessageAndNotify(batch, turnId, "inbox");
+      this.turnYields++;
+      yield msg;
     }
   }
 
-  // At a turn boundary (a `result` was just seen), end the streaming-input query if there's
-  // nothing more to feed it: resolve the awaited batch with null so makeInputGenerator
-  // returns, the CLI subprocess exits, and runTurn falls through to turn_done + state:idle.
-  // No-op when a follow-up batch was already delivered (batchResolver consumed) or a model
-  // change is pending (handleSetModel already ended the query to restart with the new model).
-  private endTurnIfQuiescent(): void {
+  // End the streaming-input query by resolving the awaited batch with null so
+  // makeInputGenerator returns, stdin closes, the CLI subprocess finishes, and runTurn falls
+  // through to turn_done + state:idle. ONLY safe when no spliced turn is still pending in the
+  // CLI — callers go through the close rule in runTurn's result branch (or the quiescence
+  // window), never directly on enqueue. No-op while the generator is mid-yield (batchResolver
+  // unset); the close rule re-fires at the next result.
+  private endTurn(): void {
     if (!this.batchResolver) return;
-    if (this.pendingModel !== null) return;
-    if (this.queue.length > 0) return;
+    if (this.quiesceTimer) {
+      clearTimeout(this.quiesceTimer);
+      this.quiesceTimer = null;
+    }
     const resolve = this.batchResolver;
     this.batchResolver = null;
     resolve(null);
   }
 
-  // Called when items arrive while a turn is running and a follow-up is awaited.
+  // Arm (or re-arm) the quiescence window: yields > results at a `result` means a spliced
+  // message is unaccounted for — either its turn is about to start (an init/assistant/user
+  // event cancels this) or it folded into the turn that just ended (silence: this fires and
+  // closes the query).
+  private armQuiesceTimer(): void {
+    if (this.quiesceTimer) clearTimeout(this.quiesceTimer);
+    this.quiesceTimer = setTimeout(() => {
+      this.quiesceTimer = null;
+      log.info("quiescence window elapsed — closing input", {
+        yields: this.turnYields,
+        results: this.turnResults,
+      });
+      this.endTurn();
+    }, Runner.QUIESCE_MS);
+    this.quiesceTimer.unref?.();
+  }
+
+  // Splice newly-arrived items into the live query: resolve the generator's pending await so
+  // it yields them as a follow-up user message on the CLI's stdin. The CLI folds them into
+  // the running turn or queues them as the next turn — both fully wired (hooks, MCP) as long
+  // as stdin stays open, which the close rule guarantees.
   private deliverFollowupBatch(): void {
     if (!this.batchResolver) return;
     const items = this.queue;
@@ -599,11 +976,29 @@ export class Runner {
     } as SDKUserMessage;
   }
 
+  // toUserMessage, plus a jungle_inbound event carrying the same text so the Activity
+  // transcript can show what fed this turn (the trigger, or a mid-turn inbox delivery).
+  private async toUserMessageAndNotify(
+    batch: QueueItem[],
+    turnId: string,
+    source: "trigger" | "inbox",
+  ): Promise<SDKUserMessage> {
+    const msg = await this.toUserMessage(batch);
+    const content = msg.message.content;
+    const text =
+      typeof content === "string"
+        ? content
+        : ((content.find((b) => b.type === "text") as { text?: string } | undefined)?.text ?? "");
+    this.sendInboundEvent(turnId, source, text);
+    return msg;
+  }
+
   // ---- PreToolUse hook: force prompting modes through canUseTool ----
 
   private async preToolUseHook(input: {
     hook_event_name: string;
     tool_name?: string;
+    tool_input?: unknown;
   }): Promise<{
     continue?: boolean;
     hookSpecificOutput?: {
@@ -613,6 +1008,34 @@ export class Runner {
   }> {
     // Always let the auto-allowed send_message tool through untouched.
     if (input.tool_name === "mcp__jungle__send_message") return { continue: true };
+    // Writes to the agent's own MEMORY.md never need a human: memory upkeep is expected,
+    // bounded behavior (the system prompt asks for it), and a confirm card on every remembered
+    // fact would train agents (and users) to stop using memory at all.
+    if (
+      (input.tool_name === "Write" || input.tool_name === "Edit") &&
+      this.isMemoryPath((input.tool_input as { file_path?: unknown } | undefined)?.file_path)
+    ) {
+      return { continue: true };
+    }
+    // Gmail write tools honor the integration's explicit send-approval toggle, independent of the
+    // agent's permission mode: gated (ask) when requireSendApproval is on, auto-allowed when off.
+    if (GMAIL_WRITE_TOOLS.has(input.tool_name ?? "")) {
+      if (!this.gmailSettings?.requireSendApproval) return { continue: true };
+      return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "ask" } };
+    }
+    // Google Drive write tools honor the integration's approval toggle in every permission mode.
+    if (DRIVE_WRITE_TOOLS.has(input.tool_name ?? "")) {
+      if (!this.driveSettings?.requireApproval) return { continue: true };
+      return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "ask" } };
+    }
+    // Remote-MCP integration tools honor their per-agent approval toggle in EVERY permission mode:
+    // read-only (safe) tools run freely; other tools ask when approval is on, run when it's off.
+    const grant = this.remoteMcpGrantFor(input.tool_name ?? "");
+    if (grant) {
+      if (grant.safeTools.includes(input.tool_name ?? "")) return { continue: true };
+      if (!grant.requireApproval) return { continue: true };
+      return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "ask" } };
+    }
     // In default mode, ask a human only for tools that can change something. Read-only and
     // SDK-internal tools (ToolSearch loads MCP schemas, TodoWrite is bookkeeping, …) run
     // freely — a confirmation card for "ToolSearch" is meaningless noise to users.
@@ -690,6 +1113,83 @@ export class Runner {
     });
   }
 
+  // ---- read_history bridge ----
+
+  private bridgeReadHistory(
+    id: string,
+    input: { to: string; threadRootId?: string; beforeSeq?: string; limit?: number },
+  ): Promise<ReadHistoryResult> {
+    return new Promise((resolve) => {
+      this.pendingReadHistory.set(id, resolve);
+      const sent = this.conn.send({ type: "read_history", id, input });
+      if (!sent) {
+        this.pendingReadHistory.delete(id);
+        resolve({ ok: false, error: "backend unreachable" });
+      }
+      setTimeout(() => {
+        if (this.pendingReadHistory.delete(id)) {
+          resolve({ ok: false, error: "timed out waiting for backend" });
+        }
+      }, 60_000).unref?.();
+    });
+  }
+
+  // ---- schedule_* bridges ----
+
+  private bridgeScheduleCreate(
+    id: string,
+    input: { prompt: string; cron?: string; timezone?: string; runAt?: string; channel?: string },
+  ): Promise<ScheduleCreateResult> {
+    return new Promise((resolve) => {
+      this.pendingScheduleCreate.set(id, resolve);
+      const sent = this.conn.send({ type: "schedule_create", id, input });
+      if (!sent) {
+        this.pendingScheduleCreate.delete(id);
+        resolve({ ok: false, error: "backend unreachable" });
+      }
+      setTimeout(() => {
+        if (this.pendingScheduleCreate.delete(id)) {
+          resolve({ ok: false, error: "timed out waiting for backend" });
+        }
+      }, 60_000).unref?.();
+    });
+  }
+
+  private bridgeScheduleList(id: string): Promise<ScheduleListResult> {
+    return new Promise((resolve) => {
+      this.pendingScheduleList.set(id, resolve);
+      const sent = this.conn.send({ type: "schedule_list", id, input: {} });
+      if (!sent) {
+        this.pendingScheduleList.delete(id);
+        resolve({ ok: false, error: "backend unreachable" });
+      }
+      setTimeout(() => {
+        if (this.pendingScheduleList.delete(id)) {
+          resolve({ ok: false, error: "timed out waiting for backend" });
+        }
+      }, 60_000).unref?.();
+    });
+  }
+
+  private bridgeScheduleCancel(
+    id: string,
+    input: { scheduleId: string },
+  ): Promise<ScheduleCancelResult> {
+    return new Promise((resolve) => {
+      this.pendingScheduleCancel.set(id, resolve);
+      const sent = this.conn.send({ type: "schedule_cancel", id, input });
+      if (!sent) {
+        this.pendingScheduleCancel.delete(id);
+        resolve({ ok: false, error: "backend unreachable" });
+      }
+      setTimeout(() => {
+        if (this.pendingScheduleCancel.delete(id)) {
+          resolve({ ok: false, error: "timed out waiting for backend" });
+        }
+      }, 60_000).unref?.();
+    });
+  }
+
   private childEnv(): Record<string, string> {
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {
@@ -706,6 +1206,109 @@ export class Runner {
     const gh = getGhToken();
     if (gh) env.GH_TOKEN = gh;
     return env;
+  }
+
+  // ---- long-term memory ----
+  //
+  // Agents use Claude Code's NATIVE memory system: a directory of markdown files (one per
+  // durable fact) indexed by a MEMORY.md, living under CLAUDE_CONFIG_DIR/projects/<slug>/memory
+  // — which is on the workspace volume (childEnv sets CLAUDE_CONFIG_DIR=<workspace>/.claude),
+  // so it survives machine recreation. The claude_code system-prompt preset already teaches the
+  // model this format and location; steering it to a different bespoke file was observed to
+  // lose against the preset's trained-in convention. The runner's roles are: (1) auto-allow
+  // writes inside the memory dir (preToolUseHook) so memory upkeep never hits a confirm card,
+  // (2) inject the INDEX into each turn's system prompt so what the agent knows is
+  // deterministic (linked files are Read on demand — Read is a safe tool), and (3) mirror
+  // index+files to the backend for the profile panel's read-only Memory section.
+
+  private memoryDir(): string {
+    // Same project-dir slug convention as resumableSessionId (CLAUDE_CONFIG_DIR layout).
+    const slug = this.workspace.replace(/[^a-zA-Z0-9]/g, "-");
+    return path.join(this.workspace, ".claude", "projects", slug, "memory");
+  }
+
+  // A plain fallback file some agents may write anyway (and the location our system prompt
+  // mentions as equivalent); treated as part of memory for allowlisting + injection + mirror.
+  private legacyMemoryPath(): string {
+    return path.join(this.workspace, "MEMORY.md");
+  }
+
+  // Does a tool call's file_path target the agent's memory (native dir or fallback file)?
+  // Resolved against the workspace so relative and absolute paths both match.
+  private isMemoryPath(filePath: unknown): boolean {
+    if (typeof filePath !== "string" || !filePath) return false;
+    const resolved = path.resolve(this.workspace, filePath);
+    return (
+      resolved === this.legacyMemoryPath() ||
+      resolved === this.memoryDir() ||
+      resolved.startsWith(this.memoryDir() + path.sep)
+    );
+  }
+
+  // Injection cap: the index rides in every turn's system prompt, so a runaway file can't be
+  // allowed to eat the context window.
+  private static readonly MEMORY_INDEX_MAX_CHARS = 8_000;
+  // Mirror cap: index + all memory files, for the profile viewer (backend clamps again).
+  private static readonly MEMORY_MIRROR_MAX_CHARS = 32_000;
+
+  private async readFileTrimmed(p: string): Promise<string | null> {
+    try {
+      const raw = (await fs.readFile(p, "utf8")).trim();
+      return raw || null;
+    } catch {
+      return null;
+    }
+  }
+
+  // The memory INDEX injected into each turn's system prompt: the native dir's MEMORY.md,
+  // plus the fallback /workspace/MEMORY.md if an agent used that instead.
+  private async readMemoryIndex(): Promise<string | null> {
+    const parts: string[] = [];
+    const native = await this.readFileTrimmed(path.join(this.memoryDir(), "MEMORY.md"));
+    if (native) parts.push(native);
+    const legacy = await this.readFileTrimmed(this.legacyMemoryPath());
+    if (legacy) parts.push(legacy);
+    if (!parts.length) return null;
+    const joined = parts.join("\n\n");
+    return joined.length <= Runner.MEMORY_INDEX_MAX_CHARS
+      ? joined
+      : joined.slice(0, Runner.MEMORY_INDEX_MAX_CHARS) +
+          "\n\n[memory index truncated — prune MEMORY.md down]";
+  }
+
+  // Everything for the backend mirror: the index first, then each memory file under the
+  // native dir (alphabetical), each with a filename heading so the viewer reads naturally.
+  private async readMemoryMirror(): Promise<string> {
+    const parts: string[] = [];
+    const index = await this.readMemoryIndex();
+    if (index) parts.push(index);
+    try {
+      const entries = (await fs.readdir(this.memoryDir())).filter(
+        (f) => f.endsWith(".md") && f !== "MEMORY.md",
+      );
+      entries.sort();
+      for (const f of entries) {
+        const body = await this.readFileTrimmed(path.join(this.memoryDir(), f));
+        if (body) parts.push(`---\n**${f}**\n\n${body}`);
+      }
+    } catch {
+      // no memory dir yet — index (or nothing) is the whole mirror
+    }
+    return parts.join("\n\n").slice(0, Runner.MEMORY_MIRROR_MAX_CHARS);
+  }
+
+  // Mirror memory to the backend when it changed since the last report ("" = absent/empty, so
+  // wiped memory clears the backend copy too). Best-effort: never throws, and the hash is only
+  // advanced on a successful send so a dropped frame is retried at the next boundary.
+  private async reportMemoryIfChanged(): Promise<void> {
+    try {
+      const content = await this.readMemoryMirror();
+      const hash = createHash("sha256").update(content).digest("hex");
+      if (hash === this.lastMemoryHash) return;
+      if (this.conn.send({ type: "memory", content })) this.lastMemoryHash = hash;
+    } catch (err) {
+      log.warn("memory report failed", { err: String(err) });
+    }
   }
 
   // Only pass `resume` when the session transcript actually exists — a stale sessionId

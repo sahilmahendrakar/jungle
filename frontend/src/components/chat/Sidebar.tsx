@@ -1,6 +1,20 @@
-import { Bot, Hash, LogOut, MessagesSquare, PanelLeftClose } from "lucide-react";
+import {
+  Bot,
+  CalendarClock,
+  Hash,
+  LogOut,
+  MessagesSquare,
+  Moon,
+  MonitorSmartphone,
+  Package,
+  PanelLeftClose,
+  Search,
+  ShieldQuestion,
+  Sun,
+} from "lucide-react";
 import type { Channel, Participant, Membership } from "../../api";
 import { firebaseEnabled } from "../../firebase";
+import { useTheme, type ThemePreference } from "../../theme";
 import { EmptyHint, NavItem, PersonAvatar, SectionHeader } from "./panels";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 import {
@@ -9,6 +23,41 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+
+// Cycle light -> dark -> system with one button (label shows the CURRENT preference).
+const THEME_CYCLE: Record<ThemePreference, ThemePreference> = {
+  light: "dark",
+  dark: "system",
+  system: "light",
+};
+
+function ThemeToggle() {
+  const { preference, setPreference } = useTheme();
+  const icon =
+    preference === "dark" ? (
+      <Moon className="size-4" />
+    ) : preference === "light" ? (
+      <Sun className="size-4" />
+    ) : (
+      <MonitorSmartphone className="size-4" />
+    );
+  const label =
+    preference === "system" ? "Theme: system" : preference === "dark" ? "Theme: dark" : "Theme: light";
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          data-testid="theme-toggle"
+          onClick={() => setPreference(THEME_CYCLE[preference])}
+          className="flex size-8 shrink-0 items-center justify-center rounded-md text-sidebar-foreground/70 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
+        >
+          {icon}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent>{label} — click to change</TooltipContent>
+    </Tooltip>
+  );
+}
 
 // The left nav shell: workspace header, Threads/Channels/DMs/People lists, and the user footer.
 // Desktop (md+): in-flow, collapsible via a drag-resizable width. Mobile (<md): a fixed off-canvas
@@ -31,6 +80,17 @@ export function Sidebar({
   onSelectChannel,
   onOpenDm,
   onOpenThreads,
+  onOpenScheduled,
+  scheduledActive,
+  onOpenAgents,
+  agentsActive,
+  onOpenApprovals,
+  approvalsActive,
+  approvalsCount,
+  onOpenDeliverables,
+  deliverablesActive,
+  onOpenSearch,
+  workingChannelIds,
   onNewChannel,
   onAddAgent,
   onCollapse,
@@ -60,6 +120,17 @@ export function Sidebar({
   onSelectChannel: (id: string) => void;
   onOpenDm: (otherId: string) => void;
   onOpenThreads: () => void;
+  onOpenScheduled: () => void;
+  scheduledActive: boolean;
+  onOpenAgents: () => void;
+  agentsActive: boolean;
+  onOpenApprovals: () => void;
+  approvalsActive: boolean;
+  approvalsCount: number;
+  onOpenDeliverables: () => void;
+  deliverablesActive: boolean;
+  onOpenSearch: () => void;
+  workingChannelIds: Set<string>; // channels with a turn currently running (pulsing dot)
   onNewChannel: () => void;
   onAddAgent: () => void;
   onCollapse: () => void;
@@ -121,6 +192,27 @@ export function Sidebar({
 
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div className="px-2 py-3">
+            {/* Search: the ⌘K palette (messages, channels, people). */}
+            <NavItem
+              testId="search-nav"
+              active={false}
+              onClick={onOpenSearch}
+              icon={<Search className="size-4 opacity-70" />}
+              label="Search"
+              trailing={
+                <kbd className="hidden rounded border border-sidebar-border px-1 font-mono text-[10px] text-sidebar-foreground/40 md:inline">
+                  ⌘K
+                </kbd>
+              }
+            />
+            {/* Agents: mission control — every agent, its live status, and what it's doing. */}
+            <NavItem
+              testId="agents-nav"
+              active={agentsActive}
+              onClick={onOpenAgents}
+              icon={<Bot className="size-4 opacity-70" />}
+              label="Agents"
+            />
             {/* Threads: my followed threads with unread replies (participation-gated). */}
             <NavItem
               testId="threads-nav"
@@ -131,6 +223,33 @@ export function Sidebar({
               unread={totalThreadUnread > 0}
               badgeCount={totalThreadUnread}
               badgeMention={totalThreadUnread > 0}
+            />
+            {/* Approvals: tool confirmations waiting on a human — badge = blocked agents. */}
+            <NavItem
+              testId="approvals-nav"
+              active={approvalsActive}
+              onClick={onOpenApprovals}
+              icon={<ShieldQuestion className="size-4 opacity-70" />}
+              label="Approvals"
+              unread={approvalsCount > 0}
+              badgeCount={approvalsCount}
+              badgeMention={approvalsCount > 0}
+            />
+            {/* Deliverables: the durable "what agents shipped" feed. */}
+            <NavItem
+              testId="deliverables-nav"
+              active={deliverablesActive}
+              onClick={onOpenDeliverables}
+              icon={<Package className="size-4 opacity-70" />}
+              label="Deliverables"
+            />
+            {/* Scheduled: workspace-wide scheduled agent turns (a main-column view in-layout). */}
+            <NavItem
+              testId="scheduled-nav"
+              active={scheduledActive}
+              onClick={onOpenScheduled}
+              icon={<CalendarClock className="size-4 opacity-70" />}
+              label="Scheduled"
             />
 
             <div className="h-3" />
@@ -152,6 +271,7 @@ export function Sidebar({
                   icon={<Hash className="size-4 opacity-70" />}
                   label={c.name}
                   unread={unread}
+                  working={workingChannelIds.has(c.id)}
                   // Slack: regular channel unreads are bold-only; only a mention shows a count badge.
                   badgeCount={c.has_mention ? c.unread_count ?? 0 : 0}
                   badgeMention={c.has_mention}
@@ -242,6 +362,7 @@ export function Sidebar({
                 <div className="truncate text-xs text-sidebar-foreground/50">@{me.handle}</div>
               </div>
             </button>
+            <ThemeToggle />
             <Tooltip>
               <TooltipTrigger asChild>
                 <button

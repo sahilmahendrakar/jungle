@@ -1,102 +1,281 @@
-import { useEffect, useState } from "react";
+import { useMemo, useState } from "react";
 import { useAuth } from "./auth";
-import {
-  disconnectGithub,
-  getGithubStatus,
-  githubConnectUrl,
-  type GithubStatus,
-} from "./api";
 import { navigate } from "./route";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { avatarClass, initials } from "@/lib/people";
 import { cn } from "@/lib/utils";
+import { BrandTile, useConnections, type ConnectionState } from "@/lib/connections";
 import {
   ArrowLeft,
+  Bell,
   Check,
+  ChevronDown,
   ExternalLink,
   Loader2,
   LogOut,
   Mail,
+  Search,
   Settings as SettingsIcon,
   Unlink,
   X,
 } from "lucide-react";
+import {
+  notificationsEnabled,
+  notificationPermission,
+  requestNotificationPermission,
+  setNotificationsEnabled,
+} from "./lib/notifications";
 
-function GithubMark({ className }: { className?: string }) {
+// One thin connection row: brand tile + name + live status, expanding on click to the
+// connect/disconnect controls (and, for GitHub, the App-installation details).
+function ConnectionRow({
+  conn,
+  expanded,
+  onToggle,
+  connecting,
+  onConnect,
+  onDisconnect,
+}: {
+  conn: ConnectionState;
+  expanded: boolean;
+  onToggle: () => void;
+  connecting: boolean;
+  onConnect: () => void;
+  onDisconnect: () => void;
+}) {
+  const [confirmUnlink, setConfirmUnlink] = useState(false);
   return (
-    <svg viewBox="0 0 16 16" fill="currentColor" className={className} aria-hidden>
-      <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z" />
-    </svg>
+    <div className="overflow-hidden rounded-xl border bg-card transition-colors">
+      <button
+        type="button"
+        onClick={onToggle}
+        data-testid={`connection-row-${conn.key}`}
+        aria-expanded={expanded}
+        className="flex w-full items-center gap-3 px-3 py-2.5 text-left hover:bg-accent/50"
+      >
+        <BrandTile brand={conn.key} />
+        <span className="min-w-0 flex-1">
+          <span className="block text-sm font-medium leading-tight">{conn.name}</span>
+          {conn.connected ? (
+            <span className="flex items-center gap-1 text-xs text-emerald-600">
+              <span className="size-1.5 rounded-full bg-emerald-500" />
+              <span className="truncate">{conn.account || "Connected"}</span>
+            </span>
+          ) : (
+            <span className="text-xs text-muted-foreground">Not connected</span>
+          )}
+        </span>
+        {!conn.connected && (
+          <span className="rounded-full border px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+            Connect
+          </span>
+        )}
+        <ChevronDown
+          className={cn("size-4 shrink-0 text-muted-foreground transition-transform", expanded && "rotate-180")}
+        />
+      </button>
+
+      {expanded && (
+        <div className="space-y-3 border-t bg-muted/30 px-3 py-3">
+          <p className="text-xs leading-relaxed text-muted-foreground">{conn.description}</p>
+
+          {/* GitHub also surfaces its App installation state — repo access rides the App, not
+              just the account link. */}
+          {conn.key === "github" && conn.connected && conn.github && (
+            <GithubAppDetails github={conn.github} />
+          )}
+
+          <div className="flex items-center justify-between gap-2">
+            {conn.connected ? (
+              !confirmUnlink ? (
+                <Button
+                  data-testid={`settings-disconnect-${conn.key}`}
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setConfirmUnlink(true)}
+                  className="gap-1.5 text-muted-foreground hover:text-destructive"
+                >
+                  <Unlink className="size-3.5" />
+                  Disconnect
+                </Button>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-muted-foreground">
+                    Agents using this connection will lose access.
+                  </span>
+                  <Button variant="ghost" size="sm" onClick={() => setConfirmUnlink(false)}>
+                    Cancel
+                  </Button>
+                  <Button
+                    data-testid={`settings-disconnect-${conn.key}-confirm`}
+                    variant="destructive"
+                    size="sm"
+                    onClick={() => {
+                      setConfirmUnlink(false);
+                      onDisconnect();
+                    }}
+                  >
+                    Disconnect
+                  </Button>
+                </div>
+              )
+            ) : (
+              <Button
+                data-testid={`settings-connect-${conn.key}`}
+                size="sm"
+                onClick={onConnect}
+                disabled={connecting}
+                className="gap-1.5"
+              >
+                {connecting ? <Loader2 className="size-3.5 animate-spin" /> : null}
+                {connecting ? "Waiting for authorization…" : `Connect ${conn.name}`}
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
-// The account + GitHub settings body, shared by the right-panel `SettingsPanel` and the legacy
-// full-page `/settings` route. Pulls the current user from the auth context, so it must render
-// under an AuthProvider (i.e. only in Firebase mode).
+// GitHub App installation status inside the GitHub row's expansion: agents can only work on
+// repos where the Jungle GitHub App is installed, which is separate from the account link.
+function GithubAppDetails({ github }: { github: NonNullable<ConnectionState["github"]> }) {
+  const needsInstall = github.repoCount === 0;
+  return (
+    <div className="rounded-lg border bg-background p-3" data-testid="settings-github-app">
+      {needsInstall ? (
+        <div className="space-y-2">
+          <p className="text-xs text-muted-foreground">
+            Agents can only work on repositories where the{" "}
+            <span className="font-medium text-foreground">Jungle GitHub App</span> is installed.
+            {github.installationCount > 0
+              ? " You have an installation, but no repositories are granted yet."
+              : " Install it on your account or organization to add repos."}
+          </p>
+          {github.installUrl && (
+            <Button asChild size="sm" className="gap-1.5">
+              <a
+                href={github.installUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                data-testid="settings-install-github-app"
+              >
+                Install GitHub App
+                <ExternalLink className="size-3 opacity-60" />
+              </a>
+            </Button>
+          )}
+        </div>
+      ) : (
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1 text-xs text-emerald-600">
+            <Check className="size-3.5 shrink-0" />
+            {github.repoCount} repositor{github.repoCount === 1 ? "y" : "ies"} available to agents
+          </div>
+          {github.installUrl && (
+            <Button variant="outline" size="sm" asChild className="h-7 gap-1.5 text-xs">
+              <a
+                href={github.installUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                data-testid="settings-manage-github-app"
+              >
+                Manage access
+                <ExternalLink className="size-3 opacity-60" />
+              </a>
+            </Button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The account + connections settings body, shared by the right-panel `SettingsPanel` and the
+// legacy full-page `/settings` route. Pulls the current user from the auth context, so it must
+// render under an AuthProvider (i.e. only in Firebase mode).
+// Desktop notifications: permission request + on/off preference (lib/notifications.ts owns the
+// mechanics; the rules of what pings — DMs, mentions, approvals — live in App).
+function NotificationsSection() {
+  const [enabled, setEnabled] = useState(notificationsEnabled());
+  const [perm, setPerm] = useState(notificationPermission());
+  const active = enabled && perm === "granted";
+
+  async function toggle() {
+    if (active) {
+      setNotificationsEnabled(false);
+      setEnabled(false);
+      return;
+    }
+    const p = await requestNotificationPermission();
+    setPerm(p);
+    if (p === "granted") {
+      setNotificationsEnabled(true);
+      setEnabled(true);
+    }
+  }
+
+  return (
+    <section className="mt-8 space-y-3">
+      <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Notifications
+      </h2>
+      <div className="rounded-xl border bg-card p-4">
+        <div className="flex items-center gap-3">
+          <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10">
+            <Bell className="size-5 text-primary" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-medium">Desktop notifications</div>
+            <div className="text-xs text-muted-foreground">
+              {perm === "unsupported"
+                ? "Not supported in this browser."
+                : perm === "denied"
+                  ? "Blocked in your browser settings — allow notifications for this site to enable."
+                  : active
+                    ? "On — DMs, mentions, and approvals ping you when you're not looking."
+                    : "Get pinged for DMs, mentions, and approvals when the tab isn't focused."}
+            </div>
+          </div>
+          <Button
+            data-testid="settings-notifications-toggle"
+            onClick={toggle}
+            disabled={perm === "unsupported" || perm === "denied"}
+            size="sm"
+            variant={active ? "outline" : "default"}
+            className="shrink-0"
+          >
+            {active ? "Turn off" : "Turn on"}
+          </Button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function SettingsContent() {
-  const { me, refreshMe, signOut } = useAuth();
+  const { me, signOut } = useAuth();
   const profile = me?.profile;
-  // GitHub connection is per-workspace participant. Resolve the active membership (the workspace
-  // stored by AuthGate), falling back to the first.
+  // Resolve the active membership (the workspace stored by AuthGate), falling back to the first.
   const activeWsId = typeof localStorage !== "undefined" ? localStorage.getItem("jungle.workspace") : null;
   const membership =
     me?.memberships.find((m) => m.workspace.id === activeWsId) ?? me?.memberships[0];
   const participant = membership?.participant;
 
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [ghStatus, setGhStatus] = useState<GithubStatus | null>(null);
-  const [ghLoading, setGhLoading] = useState(true);
+  const conns = useConnections();
+  const [query, setQuery] = useState("");
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
 
-  const connected = ghStatus?.connected ?? !!membership?.github.connected;
-  const login = ghStatus?.login ?? membership?.github.login;
-
-  useEffect(() => {
-    let cancelled = false;
-    setGhLoading(true);
-    getGithubStatus()
-      .then((s) => {
-        if (!cancelled) setGhStatus(s);
-      })
-      .catch(() => {
-        if (!cancelled) setGhStatus(null);
-      })
-      .finally(() => {
-        if (!cancelled) setGhLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [membership?.github.connected, membership?.github.login]);
-
-  async function connectGithub() {
-    setError("");
-    setBusy(true);
-    try {
-      const { url } = await githubConnectUrl();
-      window.location.href = url;
-    } catch (e) {
-      setError(String((e as Error).message ?? e));
-      setBusy(false);
-    }
-  }
-
-  async function unlinkGithub() {
-    setError("");
-    setBusy(true);
-    try {
-      await disconnectGithub();
-      await refreshMe();
-      setGhStatus((s) =>
-        s ? { ...s, connected: false, login: undefined, installationCount: 0, repoCount: 0 } : s,
-      );
-    } catch (e) {
-      setError(String((e as Error).message ?? e));
-    } finally {
-      setBusy(false);
-    }
-  }
+  const visible = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return conns.connections;
+    return conns.connections.filter(
+      (c) => c.name.toLowerCase().includes(q) || c.description.toLowerCase().includes(q),
+    );
+  }, [conns.connections, query]);
 
   if (!participant) {
     return (
@@ -105,8 +284,6 @@ function SettingsContent() {
       </div>
     );
   }
-
-  const needsAppInstall = connected && ghStatus && ghStatus.repoCount === 0;
 
   return (
     <div className="mx-auto w-full max-w-lg px-4 py-6">
@@ -135,130 +312,53 @@ function SettingsContent() {
         </div>
       </section>
 
-      {/* GitHub OAuth */}
-      <section className="mt-8 space-y-3">
-        <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          GitHub
-        </h2>
-        <div className="rounded-xl border bg-card p-4">
-          <div className="flex items-center gap-3">
-            <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-foreground text-background">
-              <GithubMark className="size-5" />
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="text-sm font-medium">Connect account</div>
-              {connected ? (
-                <div className="flex items-center gap-1 text-xs text-emerald-600">
-                  <Check className="size-3 shrink-0" />
-                  <span className="truncate">Connected{login ? ` as @${login}` : ""}</span>
-                </div>
-              ) : (
-                <div className="text-xs text-muted-foreground">
-                  Link your GitHub identity so Jungle can see your installations.
-                </div>
-              )}
-            </div>
-            {connected ? (
-              <Button
-                data-testid="settings-disconnect-github"
-                onClick={unlinkGithub}
-                disabled={busy}
-                size="icon"
-                variant="ghost"
-                title="Disconnect GitHub"
-                aria-label="Disconnect GitHub"
-                className="size-8 shrink-0 text-muted-foreground hover:text-destructive"
-              >
-                <Unlink className="size-4" />
-              </Button>
-            ) : (
-              <Button
-                data-testid="settings-connect-github"
-                onClick={connectGithub}
-                disabled={busy}
-                size="sm"
-                className="shrink-0 gap-1.5 bg-foreground text-background hover:bg-foreground/90"
-              >
-                <GithubMark className="size-3.5" />
-                {busy ? "Redirecting…" : "Connect"}
-              </Button>
-            )}
-          </div>
-        </div>
-      </section>
+      <NotificationsSection />
 
-      {/* GitHub App installation — required for agent repo picker */}
+      {/* Connections: every account link agents can build on — one searchable list; each row
+          expands for details. Integrations attach these per-agent (agent profile → Integrations). */}
       <section className="mt-8 space-y-3">
-        <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-          GitHub App
-        </h2>
-        <div className="rounded-xl border bg-card p-4" data-testid="settings-github-app">
-          {!connected ? (
-            <p className="text-sm text-muted-foreground">
-              Connect GitHub above first, then install the Jungle GitHub App to grant access to
-              your repositories.
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Connections
+          </h2>
+          {conns.loading && <Loader2 className="size-3.5 animate-spin text-muted-foreground" />}
+        </div>
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search connections…"
+            data-testid="connections-search"
+            className="h-8 pl-8 text-sm"
+          />
+        </div>
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          Connect your accounts once here; then give any agent an integration built on them.
+        </p>
+        <div className="space-y-2">
+          {visible.map((c) => (
+            <ConnectionRow
+              key={c.key}
+              conn={c}
+              expanded={expandedKey === c.key}
+              onToggle={() => setExpandedKey((k) => (k === c.key ? null : c.key))}
+              connecting={conns.connecting === c.key}
+              onConnect={() => void conns.connect(c.key)}
+              onDisconnect={() => void conns.disconnect(c.key)}
+            />
+          ))}
+          {!visible.length && (
+            <p className="rounded-lg border border-dashed p-3 text-center text-xs text-muted-foreground">
+              No connections match “{query}”.
             </p>
-          ) : ghLoading ? (
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <Loader2 className="size-4 animate-spin" />
-              Checking installations…
-            </div>
-          ) : needsAppInstall ? (
-            <div className="space-y-3">
-              <p className="text-sm text-muted-foreground">
-                Your agents can only work on repositories where the{" "}
-                <span className="font-medium text-foreground">Jungle GitHub App</span> is installed.
-                {ghStatus!.installationCount > 0
-                  ? " You have an installation, but no repositories are granted yet."
-                  : " Install the app on your personal account or organization to add repos."}
-              </p>
-              {ghStatus?.installUrl && (
-                <Button asChild className="gap-2">
-                  <a
-                    href={ghStatus.installUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    data-testid="settings-install-github-app"
-                  >
-                    <GithubMark className="size-4" />
-                    Install GitHub App
-                    <ExternalLink className="size-3.5 opacity-60" />
-                  </a>
-                </Button>
-              )}
-            </div>
-          ) : (
-            <div className="space-y-2">
-              <div className="flex items-center gap-1 text-sm text-emerald-600">
-                <Check className="size-4 shrink-0" />
-                {ghStatus!.repoCount} repositor{ghStatus!.repoCount === 1 ? "y" : "ies"} available
-                for agents
-              </div>
-              <p className="text-xs text-muted-foreground">
-                {ghStatus!.installationCount} app installation
-                {ghStatus!.installationCount === 1 ? "" : "s"} on your account.
-              </p>
-              {ghStatus?.installUrl && (
-                <Button variant="outline" size="sm" asChild className="gap-2">
-                  <a
-                    href={ghStatus.installUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    data-testid="settings-manage-github-app"
-                  >
-                    Manage app access
-                    <ExternalLink className="size-3 opacity-60" />
-                  </a>
-                </Button>
-              )}
-            </div>
           )}
         </div>
       </section>
 
-      {error && (
+      {conns.error && (
         <p className="mt-4 text-sm text-destructive" data-testid="settings-error">
-          {error}
+          {conns.error}
         </p>
       )}
 

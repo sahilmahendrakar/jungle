@@ -103,7 +103,22 @@ export interface RawItem {
   key: string;
   value: unknown;
 }
-export type Item = ToolItem | TextItem | ThinkingItem | NoteItem | ResultItem | RawItem;
+// A message that fed this agent from outside its own turn loop: the trigger that woke it,
+// a `/compact` request, or another message delivered to its inbox mid-turn.
+export interface InboundItem {
+  kind: "inbound";
+  key: string;
+  source: "trigger" | "inbox" | "compact";
+  text: string;
+}
+export type Item =
+  | ToolItem
+  | TextItem
+  | ThinkingItem
+  | NoteItem
+  | ResultItem
+  | RawItem
+  | InboundItem;
 
 export interface Turn {
   turnId: string;
@@ -196,6 +211,13 @@ export function buildItems(events: AgentEvent[]): Item[] {
   for (const e of events) {
     const ev = e.event as SdkEvent | null | undefined;
     const type = ev?.type;
+
+    if (type === "jungle_inbound") {
+      const inbound = ev as { source?: string; text?: string };
+      const source = inbound.source === "compact" || inbound.source === "inbox" ? inbound.source : "trigger";
+      items.push({ kind: "inbound", key: `${e.id}`, source, text: String(inbound.text ?? "") });
+      continue;
+    }
 
     if (type === "system") {
       const sys = ev as SdkSystemEvent;
@@ -301,4 +323,23 @@ export function turnSummary(items: Item[]): string {
   if (tools > 0) return `${tools} action${tools === 1 ? "" : "s"}`;
   const note = items.find((i) => i.kind === "note") as NoteItem | undefined;
   return note?.text ?? "";
+}
+
+// "mcp__jungle__send_message" -> "send message"; PascalCase tool names stay as-is.
+function humanToolName(name: string): string {
+  const mcp = name.match(/^mcp__.+?__(.+)$/);
+  return (mcp ? mcp[1] : name).replace(/_/g, " ");
+}
+
+// What the agent is doing RIGHT NOW, for the ambient one-line working indicator: the still-
+// running tool call if there is one, else the freshest thinking/text tail.
+export function liveSummary(items: Item[]): string {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    if (it.kind === "tool" && !it.result) return `running ${humanToolName(it.name)}`;
+    if (it.kind === "tool") return `ran ${humanToolName(it.name)}`;
+    if (it.kind === "thinking") return "thinking…";
+    if (it.kind === "text") return clip(it.text.replace(/[#*`>]/g, "").trim());
+  }
+  return "getting started…";
 }

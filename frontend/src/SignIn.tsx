@@ -45,7 +45,10 @@ export function SignIn() {
         kind,
         handle: handle.trim(),
         displayName: displayName.trim(),
-        repo: kind === "agent" && repo.trim() ? repo.trim() : undefined,
+        integrations:
+          kind === "agent" && repo.trim()
+            ? [{ key: "github", config: { repo: repo.trim() } }]
+            : undefined,
       });
       if (kind === "human") {
         signInAs(p.id); // creating a human signs you straight in
@@ -70,7 +73,7 @@ export function SignIn() {
       {/* Ambient gradient backdrop */}
       <div className="pointer-events-none absolute inset-0 -z-10">
         <div className="absolute -top-40 left-1/2 size-[40rem] -translate-x-1/2 rounded-full bg-primary/20 blur-3xl" />
-        <div className="absolute -bottom-40 -right-20 size-[32rem] rounded-full bg-fuchsia-400/15 blur-3xl" />
+        <div className="absolute -bottom-40 -right-20 size-[32rem] rounded-full bg-teal-400/15 blur-3xl dark:bg-teal-500/10" />
       </div>
 
       <div className="w-full max-w-md rounded-2xl border bg-card/80 p-7 shadow-2xl backdrop-blur-xl">

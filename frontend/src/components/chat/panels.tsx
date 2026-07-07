@@ -3,11 +3,11 @@
 import { useState, useEffect, useRef, type ReactNode } from "react";
 import {
   Activity,
+  BookOpenText,
   Check,
   ChevronDown,
   FileText,
   FoldVertical,
-  GitBranch,
   Plus,
   ShieldQuestion,
   Sparkles,
@@ -15,8 +15,25 @@ import {
   X,
   UserRound,
 } from "lucide-react";
-import { updateAgent, deleteAgent, compactAgent, attachmentUrl } from "../../api";
+import {
+  updateAgent,
+  deleteAgent,
+  compactAgent,
+  attachmentUrl,
+  getAgentMemory,
+  listAgentIntegrations,
+  setAgentIntegration,
+  removeAgentIntegration,
+} from "../../api";
 import type { Attachment, Participant, AgentStatus } from "../../api";
+import {
+  IntegrationsEditor,
+  integrationFingerprint,
+  integrationsFingerprint,
+  validateIntegrations,
+  type IntegrationDraft,
+} from "./IntegrationsEditor";
+import { useConnections } from "@/lib/connections";
 import {
   fmtBytes,
   EFFORT_OPTIONS,
@@ -32,6 +49,8 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Markdown } from "../../Markdown";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -41,6 +60,28 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { avatarClass, initials } from "@/lib/people";
 import { cn } from "@/lib/utils";
+
+// The "✨ agent" pill shown next to agent names (message rows, thread panel, profile).
+export function AgentBadge() {
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+      <Sparkles className="size-2.5" /> agent
+    </span>
+  );
+}
+
+// Centered empty-state tile (icon in a rounded square + hint text) shared by the message list,
+// activity transcript, and thread panel.
+export function EmptyState({ icon, children }: { icon: ReactNode; children: ReactNode }) {
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-2.5 text-center">
+      <div className="flex size-12 items-center justify-center rounded-2xl bg-muted text-muted-foreground">
+        {icon}
+      </div>
+      <p className="max-w-xs text-sm text-muted-foreground">{children}</p>
+    </div>
+  );
+}
 
 export function AttachmentList({ attachments }: { attachments: Attachment[] }) {
   return (
@@ -148,6 +189,7 @@ export function ParticipantProfilePanel({
 }) {
   const isAgent = person.kind === "agent";
   const [name, setName] = useState(person.display_name);
+  const [persona, setPersona] = useState(person.persona ?? "");
   const [mode, setMode] = useState(person.mode ?? "default");
   const [model, setModel] = useState(person.model ?? MODEL_OPTIONS[0].id);
   const [effort, setEffort] = useState(person.effort ?? EFFORT_OPTIONS[1].id);
@@ -156,6 +198,24 @@ export function ParticipantProfilePanel({
   const [err, setErr] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [integrations, setIntegrations] = useState<IntegrationDraft[]>([]);
+  const [origIntegrations, setOrigIntegrations] = useState<IntegrationDraft[]>([]);
+  // The viewer's per-user connections gate the integration rows (inline connect / approval toggle).
+  const connections = useConnections(isAgent);
+
+  useEffect(() => {
+    if (!isAgent) return;
+    let cancelled = false;
+    listAgentIntegrations(person.id).then((rows) => {
+      if (cancelled) return;
+      const draft = rows.map((r) => ({ key: r.integration_key, config: r.config as Record<string, string> }));
+      setIntegrations(draft);
+      setOrigIntegrations(draft);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isAgent, person.id]);
 
   async function del() {
     if (deleting) return;
@@ -171,24 +231,58 @@ export function ParticipantProfilePanel({
     }
   }
 
+  // Integration changes compare canonical fingerprints (editable fields only) — raw JSON
+  // compares choked on server-resolved fields vs local string drafts and left the Save button
+  // stuck dirty after a successful save.
   const dirty =
     name.trim() !== person.display_name ||
+    persona.trim() !== (person.persona ?? "") ||
     mode !== (person.mode ?? "default") ||
     model !== (person.model ?? MODEL_OPTIONS[0].id) ||
-    effort !== (person.effort ?? EFFORT_OPTIONS[1].id);
+    effort !== (person.effort ?? EFFORT_OPTIONS[1].id) ||
+    integrationsFingerprint(integrations) !== integrationsFingerprint(origIntegrations);
 
   async function save() {
     if (!dirty || saving || !name.trim()) return;
+    // Surface incomplete integrations (missing connection / repo) before hitting the server,
+    // instead of failing halfway through the write sequence.
+    const problem = validateIntegrations(integrations, connections);
+    if (problem) {
+      setErr(problem);
+      return;
+    }
     setSaving(true);
     setErr("");
     try {
-      const patch: { displayName?: string; mode?: string; model?: string; effort?: string } = {
+      const patch: {
+        displayName?: string;
+        mode?: string;
+        model?: string;
+        effort?: string;
+        persona?: string;
+      } = {
         displayName: name.trim(),
         mode,
         model,
         effort,
+        persona: persona.trim(),
       };
+      const nextKeys = new Set(integrations.map((v) => v.key));
+      for (const orig of origIntegrations) {
+        if (!nextKeys.has(orig.key)) await removeAgentIntegration(person.id, orig.key);
+      }
+      for (const entry of integrations) {
+        const prev = origIntegrations.find((v) => v.key === entry.key);
+        if (!prev || integrationFingerprint(prev) !== integrationFingerprint(entry)) {
+          await setAgentIntegration(person.id, entry.key, entry.config);
+        }
+      }
       const updated = await updateAgent(person.id, patch);
+      // Reset the editor to server truth (resolved configs) so the dirty check starts clean.
+      const rows = await listAgentIntegrations(person.id);
+      const draft = rows.map((r) => ({ key: r.integration_key, config: r.config as Record<string, string> }));
+      setIntegrations(draft);
+      setOrigIntegrations(draft);
       onSaved(updated);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
@@ -235,14 +329,20 @@ export function ParticipantProfilePanel({
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <h2 className="truncate text-lg font-bold">{person.display_name}</h2>
-              {isAgent && (
-                <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
-                  <Sparkles className="size-2.5" /> agent
-                </span>
-              )}
+              {isAgent && <AgentBadge />}
               {isSelf && <span className="text-xs text-muted-foreground">(you)</span>}
             </div>
             <div className="truncate text-sm text-muted-foreground">@{person.handle}</div>
+            {isAgent && person.status && (
+              <div className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+                <span
+                  data-testid="status-dot"
+                  data-status={person.status}
+                  className={cn("size-1.5 shrink-0 rounded-full", STATUS_DOT[person.status])}
+                />
+                {STATUS_LABEL[person.status]}
+              </div>
+            )}
           </div>
         </div>
 
@@ -256,6 +356,25 @@ export function ParticipantProfilePanel({
                 value={name}
                 onChange={(e) => setName(e.target.value)}
               />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="profile-persona">Persona</Label>
+              <Textarea
+                id="profile-persona"
+                data-testid="profile-persona"
+                value={persona}
+                onChange={(e) => setPersona(e.target.value)}
+                maxLength={4000}
+                rows={4}
+                placeholder={
+                  "Who is this agent? e.g. \"You are our infra engineer: own the deploy pipeline, " +
+                  "prefer boring solutions, keep answers terse.\""
+                }
+                className="max-h-48 min-h-20 resize-y text-sm"
+              />
+              <p className="text-[11px] leading-tight text-muted-foreground">
+                Shapes the agent's role and voice in its system prompt. Applies at its next turn.
+              </p>
             </div>
             <div className="space-y-1.5">
               <Label>Tool permissions</Label>
@@ -290,20 +409,8 @@ export function ParticipantProfilePanel({
                 Lower effort spends fewer tokens. Applies at the agent's next turn.
               </p>
             </div>
-            {person.repo && (
-              <div className="min-w-0 space-y-0.5 rounded-lg border bg-muted/30 p-3">
-                <div className="text-xs font-medium text-muted-foreground">Repository</div>
-                <a
-                  href={`https://github.com/${person.repo}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="flex items-center gap-1 truncate text-sm text-primary hover:underline"
-                >
-                  <GitBranch className="size-3.5 shrink-0" />
-                  <span className="truncate">{person.repo}</span>
-                </a>
-              </div>
-            )}
+            <IntegrationsEditor value={integrations} onChange={setIntegrations} connections={connections} />
+            <MemoryCard person={person} />
             <ContextUsageCard person={person} />
             <Button
               variant="outline"
@@ -398,6 +505,7 @@ export function ParticipantProfilePanel({
 export function ContextUsageCard({ person }: { person: Participant }) {
   const [requesting, setRequesting] = useState(false);
   const [requested, setRequested] = useState(false);
+  const [waking, setWaking] = useState(false);
   const [err, setErr] = useState("");
 
   const tokens = person.context_tokens ?? null;
@@ -424,7 +532,10 @@ export function ContextUsageCard({ person }: { person: Participant }) {
   const updatedAt = person.context_updated_at ?? null;
   const requestedAtRef = useRef<string | null>(null);
   useEffect(() => {
-    if (requested && updatedAt !== requestedAtRef.current) setRequested(false);
+    if (requested && updatedAt !== requestedAtRef.current) {
+      setRequested(false);
+      setWaking(false);
+    }
   }, [updatedAt, requested]);
 
   async function compact() {
@@ -433,9 +544,10 @@ export function ContextUsageCard({ person }: { person: Participant }) {
     setErr("");
     try {
       const r = await compactAgent(person.id);
-      if (!r.ok) throw new Error(r.error === "runner not connected" ? "Agent is offline." : (r.error ?? "compact failed"));
+      if (!r.ok) throw new Error(r.error ?? "compact failed");
       requestedAtRef.current = updatedAt;
       setRequested(true);
+      setWaking(!!r.waking);
     } catch (e) {
       setErr(String((e as Error).message ?? e));
     } finally {
@@ -484,11 +596,84 @@ export function ContextUsageCard({ person }: { person: Participant }) {
       </Button>
       {requested && (
         <p className="text-[11px] leading-tight text-muted-foreground">
-          The agent will summarize its older conversation when it's next idle; the meter
-          updates when it finishes.
+          {waking
+            ? "The agent was asleep — waking its machine, then it'll summarize its older " +
+              "conversation; the meter updates when it finishes."
+            : "The agent will summarize its older conversation when it's next idle; the meter " +
+              "updates when it finishes."}
         </p>
       )}
       {err && <p className="text-[11px] text-destructive">{err}</p>}
+    </div>
+  );
+}
+
+// Read-only view of the agent's long-term memory (its /workspace/MEMORY.md, mirrored to the
+// backend after any turn that changes it). Collapsed by default; fetched on expand and
+// refetched when an agent_memory_changed broadcast stamps person.memory_changed_at.
+export function MemoryCard({ person }: { person: Participant }) {
+  const [open, setOpen] = useState(false);
+  const [memory, setMemory] = useState<string | null>(null);
+  const [updatedAt, setUpdatedAt] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [err, setErr] = useState("");
+
+  const changedAt = person.memory_changed_at ?? null;
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    getAgentMemory(person.id)
+      .then((r) => {
+        if (cancelled) return;
+        setMemory(r.memory);
+        setUpdatedAt(r.updatedAt);
+        setLoaded(true);
+        setErr("");
+      })
+      .catch((e) => !cancelled && setErr(String((e as Error).message ?? e)));
+    return () => {
+      cancelled = true;
+    };
+  }, [open, person.id, changedAt]);
+
+  return (
+    <div data-testid="agent-memory" className="rounded-lg border bg-muted/30">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        data-testid="agent-memory-toggle"
+        className="flex w-full items-center gap-2 p-3 text-left"
+      >
+        <BookOpenText className="size-4 shrink-0 text-muted-foreground" />
+        <span className="flex-1 text-xs font-medium text-muted-foreground">Memory</span>
+        <ChevronDown
+          className={cn("size-4 shrink-0 text-muted-foreground transition-transform", open && "rotate-180")}
+        />
+      </button>
+      {open && (
+        <div className="space-y-2 border-t px-3 pb-3 pt-2">
+          {err ? (
+            <p className="text-[11px] text-destructive">{err}</p>
+          ) : !loaded ? (
+            <p className="text-[11px] text-muted-foreground">Loading…</p>
+          ) : memory ? (
+            <>
+              <div className="max-h-72 overflow-y-auto rounded-md border bg-background/70 p-2.5">
+                <Markdown>{memory}</Markdown>
+              </div>
+              {updatedAt && (
+                <p className="text-[11px] text-muted-foreground">
+                  Updated {new Date(updatedAt).toLocaleString()}
+                </p>
+              )}
+            </>
+          ) : (
+            <p className="text-[11px] leading-tight text-muted-foreground">
+              No memories yet — the agent writes down durable facts (preferences, decisions,
+              gotchas) as it works with you.
+            </p>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -587,6 +772,7 @@ export function NavItem({
   label,
   trailing,
   status,
+  working,
   title,
   unread,
   badgeCount,
@@ -599,6 +785,7 @@ export function NavItem({
   label: string;
   trailing?: ReactNode;
   status?: AgentStatus; // agent presence dot (always shown for agents, incl. idle)
+  working?: boolean; // a turn is currently running here -> pulsing green dot (channels)
   title?: string;
   unread?: boolean; // has unread messages -> bold + brighter (Slack)
   badgeCount?: number; // when > 0, show a count pill (DMs + mention-containing unreads)
@@ -622,6 +809,13 @@ export function NavItem({
         {icon}
       </span>
       <span className="min-w-0 flex-1 truncate">{label}</span>
+      {working && (
+        <span
+          data-testid="channel-working-dot"
+          title="An agent is working here"
+          className="size-1.5 shrink-0 animate-pulse rounded-full bg-emerald-500"
+        />
+      )}
       {status && (
         <span
           data-testid="status-dot"

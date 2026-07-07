@@ -9,6 +9,10 @@ import attachmentsRouter from "./http/routes/attachments";
 import channelsRouter from "./http/routes/channels";
 import threadsRouter from "./http/routes/threads";
 import githubRouter from "./http/routes/github";
+import googleRouter from "./http/routes/google";
+import integrationsRouter from "./http/routes/integrations";
+import schedulesRouter from "./http/routes/schedules";
+import workfeedRouter from "./http/routes/workfeed";
 
 // Build the Express app: global middleware, the per-domain routers, and the terminal error
 // handler. The http server + WebSocket wiring live in index.ts (boot).
@@ -22,7 +26,9 @@ export function createApp(): express.Express {
   app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Headers", "content-type, authorization, x-workspace-id");
-    res.header("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
+    // PUT is load-bearing: attaching/reconfiguring an agent integration is a PUT — omitting it
+    // here made every cross-origin integration save die in preflight ("Failed to fetch").
+    res.header("Access-Control-Allow-Methods", "GET,PUT,POST,PATCH,DELETE,OPTIONS");
     if (req.method === "OPTIONS") {
       res.sendStatus(204);
       return;
@@ -42,6 +48,10 @@ export function createApp(): express.Express {
   app.use(channelsRouter);
   app.use(threadsRouter);
   app.use(githubRouter);
+  app.use(googleRouter);
+  app.use(integrationsRouter);
+  app.use(schedulesRouter);
+  app.use(workfeedRouter);
 
   app.use(errorHandler);
   return app;

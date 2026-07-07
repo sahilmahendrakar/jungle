@@ -32,12 +32,19 @@ export interface ParticipantBase {
   context_updated_at: string | null;
   runner_provider: string; // 'docker' | 'fly' — which Provisioner impl owns this agent's runner
   runner_meta: Record<string, unknown> | null; // provider handles (Fly: {machineId, volumeId})
+  // Creator-written role/personality injected into the agent's system prompt (agents; null = none).
+  // The agent's MEMORY.md mirror is NOT here — it can be large, so clients fetch it on demand
+  // via GET /api/agents/:id/memory.
+  persona: string | null;
 }
 
 // A participant as sent to clients: the public row plus a live `status` (agents only, computed
-// from the runner connection at serialization time — not persisted).
+// from the runner connection at serialization time — not persisted). `memory_changed_at` is
+// client-side only: stamped when an agent_memory_changed broadcast lands, so an open profile's
+// Memory section knows to refetch.
 export interface Participant extends ParticipantBase {
   status?: AgentStatus;
+  memory_changed_at?: string;
 }
 
 // --- Workspaces (Slack-style multi-tenancy) ---
@@ -105,6 +112,9 @@ export interface Message {
   body: string;
   created_at: string;
   cascade_budget: number | null;
+  // Agent messages: the runner turn that produced this message (null for human messages and
+  // for agent sends outside a tracked turn). Drives the "view the work" affordance.
+  turn_id: string | null;
   // Threads: null on top-level messages; the root message's id on replies. also_to_channel
   // marks a reply that was also echoed into the main timeline. reply_count/last_reply_at are
   // denormed on the ROOT (0/null elsewhere) and drive the "N replies" footer + Threads view.
@@ -151,5 +161,46 @@ export interface AgentEvent {
   id: number;
   turn_id: string;
   event: unknown;
+  created_at: string;
+}
+
+// The link kinds recognized as durable work artifacts (see backend services/deliverables.ts —
+// classification lives there; this union is the wire vocabulary).
+export type DeliverableKind =
+  | "github_pr"
+  | "github_issue"
+  | "github"
+  | "notion"
+  | "google_doc"
+  | "google_drive"
+  | "linear"
+  | "granola";
+
+// A durable work artifact an agent produced (a PR opened, a doc written, …), extracted from the
+// links in its messages. Powers the Deliverables feed + inline artifact cards.
+export interface Deliverable {
+  id: number;
+  agent_id: string;
+  agent_handle: string;
+  channel_id: string;
+  channel_name: string;
+  channel_kind: string;
+  message_id: string;
+  kind: DeliverableKind;
+  title: string | null;
+  url: string;
+  created_at: string;
+}
+
+// One message search hit (GET /api/search), scoped to channels the requester belongs to.
+export interface SearchResult {
+  message_id: string;
+  channel_id: string;
+  channel_name: string;
+  channel_kind: string;
+  dm_with: string | null; // for dm channels: the other member's handle
+  thread_root_id: string | null;
+  sender_handle: string;
+  body: string;
   created_at: string;
 }

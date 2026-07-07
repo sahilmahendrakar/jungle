@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { Check, Hash, MessagesSquare, SendHorizonal, Sparkles, X } from "lucide-react";
+import { Check, Hash, MessagesSquare, SendHorizonal, X } from "lucide-react";
 import type { Channel, Message, Participant, UnreadThread } from "../../api";
 import { fmtTime } from "../../lib/chat";
 import { Markdown } from "../../Markdown";
-import { AttachmentList, PersonAvatar } from "./panels";
+import { AgentBadge, AttachmentList, EmptyState, PersonAvatar } from "./panels";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
@@ -38,11 +39,7 @@ function ThreadMessageRow({
           <span className="text-sm font-semibold">
             {sender?.display_name ?? m.sender_handle}
           </span>
-          {isAgent && (
-            <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
-              <Sparkles className="size-2.5" /> agent
-            </span>
-          )}
+          {isAgent && <AgentBadge />}
           <span className="text-xs text-muted-foreground">{fmtTime(m.created_at)}</span>
         </div>
         <div className="break-words text-sm">
@@ -130,13 +127,10 @@ export function ThreadPanel({
       {!threadRootId && (
         <div className="min-h-0 flex-1 overflow-y-auto p-2">
           {unreadThreads.length === 0 ? (
-            <div className="flex flex-col items-center justify-center gap-2 px-6 pt-16 text-center">
-              <div className="flex size-12 items-center justify-center rounded-2xl bg-muted">
-                <MessagesSquare className="size-6 text-muted-foreground" />
-              </div>
-              <p className="text-sm text-muted-foreground">
+            <div className="px-6 pt-16">
+              <EmptyState icon={<MessagesSquare className="size-6" />}>
                 No unread threads. Replies to threads you follow show up here.
-              </p>
+              </EmptyState>
             </div>
           ) : (
             unreadThreads.map((t) => (
@@ -195,8 +189,21 @@ export function ThreadPanel({
                 ))}
               </div>
             ) : (
-              <div className="pt-10 text-center text-sm text-muted-foreground">
-                Loading thread…
+              <div className="space-y-4 pt-2">
+                <div className="flex gap-2.5">
+                  <Skeleton className="size-5 shrink-0 rounded" />
+                  <div className="min-w-0 flex-1 space-y-2">
+                    <Skeleton className="h-3.5 w-36" />
+                    <Skeleton className="h-3.5 w-3/4" />
+                  </div>
+                </div>
+                <div className="flex gap-2.5">
+                  <Skeleton className="size-5 shrink-0 rounded" />
+                  <div className="min-w-0 flex-1 space-y-2">
+                    <Skeleton className="h-3.5 w-28" />
+                    <Skeleton className="h-3.5 w-1/2" />
+                  </div>
+                </div>
               </div>
             )}
           </div>

@@ -1,6 +1,7 @@
 import type { UnreadThread } from "@jungle/shared";
 import { pool } from "./pool";
-import { formatContextLines, type ContextRow } from "./context";
+import { formatContextLines, oldestSeqOf, type ContextRow } from "./context";
+import type { ContextPage } from "./messages";
 
 // Participation predicate (DERIVED, no thread_participants table): a participant "follows" a
 // thread iff they authored the root, replied in it, or were @mentioned on any of its messages.
@@ -99,4 +100,25 @@ export async function getThreadContext(rootId: string, limit = 40): Promise<stri
     [rootId, limit],
   );
   return formatContextLines(rows);
+}
+
+// Agent-facing "read more history" tool backing: a page of thread transcript older than
+// `beforeSeq` (or the most recent page, when omitted) — the thread-side counterpart to
+// getChannelHistoryBefore.
+export async function getThreadHistoryBefore(
+  rootId: string,
+  limit: number,
+  beforeSeq?: string,
+): Promise<ContextPage> {
+  const { rows } = await pool.query<ContextRow>(
+    `select p.handle, m.body, m.seq,
+            (select array_agg(a.filename order by a.created_at)
+             from attachments a where a.message_id = m.id) as att
+     from messages m join participants p on p.id = m.sender_id
+     where (m.id = $1 or m.thread_root_id = $1) ${beforeSeq ? "and m.seq < $3" : ""}
+     order by m.seq desc limit $2`,
+    beforeSeq ? [rootId, limit, beforeSeq] : [rootId, limit],
+  );
+  const oldestSeq = oldestSeqOf(rows);
+  return { text: formatContextLines(rows), oldestSeq };
 }

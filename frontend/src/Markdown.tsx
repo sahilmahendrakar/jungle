@@ -3,9 +3,10 @@ import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { visitParents } from "unist-util-visit-parents";
 import type { Root, Text } from "mdast";
-import "highlight.js/styles/github.css"; // token colors for fenced code blocks
+// Fenced-code token colors come from the token-driven .hljs theme in index.css (light + dark).
 import { cn } from "@/lib/utils";
 import type { Participant } from "./api";
+import { AgentHoverCard } from "./components/chat/AgentHoverCard";
 
 // Same charset as the backend's resolveMentions regex (handles may contain hyphens), so a
 // mention badge renders for exactly the text that would have @mentioned/triggered someone.
@@ -49,6 +50,17 @@ function remarkMentions() {
   };
 }
 
+// Flattens a react-markdown children tree to its plain text, for matching link text against
+// MENTION_RE regardless of how deeply react-markdown nested the inline content.
+function plainText(node: React.ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(plainText).join("");
+  if (node && typeof node === "object" && "props" in node) {
+    return plainText((node as { props: { children?: React.ReactNode } }).props.children);
+  }
+  return "";
+}
+
 // Renders message bodies as GitHub-flavored markdown: links, code blocks (highlighted),
 // headers, lists, tables, blockquotes, etc. Raw HTML is intentionally NOT enabled, so this is
 // XSS-safe. Element styling is done with Tailwind arbitrary-variant selectors on the wrapper.
@@ -67,19 +79,28 @@ export function Markdown({
 }) {
   const components: Components = {
     a: ({ href, children, ...props }) => {
-      if (href?.startsWith("mention:")) {
-        const handle = href.slice("mention:".length);
+      // Bare "@handle" text gets rewritten to a "mention:" pseudo-link by remarkMentions above.
+      // But some senders (notably agents) write the mention as real markdown link syntax
+      // instead of bare text — remarkMentions skips text already inside a link, so that lands
+      // here with its original href. Treat a link whose *entire* visible text is "@handle" the
+      // same way: a known participant still gets a badge/popover, not a real navigating anchor.
+      const linkText = !href?.startsWith("mention:") ? plainText(children) : null;
+      const bareMention = linkText ? linkText.match(/^@([a-zA-Z0-9_-]+)$/) : null;
+      if (href?.startsWith("mention:") || bareMention) {
+        const handle = href?.startsWith("mention:") ? href.slice("mention:".length) : bareMention![1];
         const person = personByHandle?.(handle);
-        if (!person) return <>@{handle}</>;
+        if (!person) return href?.startsWith("mention:") ? <>@{handle}</> : <>{children}</>;
         return (
-          <button
-            type="button"
-            data-testid="mention-badge"
-            onClick={() => onOpenProfile?.(person.id)}
-            className="rounded px-1 py-0.5 align-baseline font-medium text-primary bg-primary/10 hover:bg-primary/20"
-          >
-            @{person.display_name}
-          </button>
+          <AgentHoverCard agentId={person.id}>
+            <button
+              type="button"
+              data-testid="mention-badge"
+              onClick={() => onOpenProfile?.(person.id)}
+              className="rounded px-1 py-0.5 align-baseline font-medium text-primary bg-primary/10 hover:bg-primary/20"
+            >
+              @{person.display_name}
+            </button>
+          </AgentHoverCard>
         );
       }
       return (

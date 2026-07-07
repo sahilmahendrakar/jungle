@@ -3,41 +3,82 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/*
+ * Jungle design tokens — "deep jungle" identity.
+ * Light: warm greenish neutrals + jade primary. Dark: green-tinted charcoal, brighter jade.
+ * The sidebar is deep forest green in BOTH themes (it matches the app icon, #04271a family);
+ * in dark mode it drops a step darker than the canvas so the layers still read.
+ */
 :root {
   --radius: 0.7rem;
 
-  /* Main app surface — clean, light, neutral */
-  --background: oklch(0.99 0.002 285);
-  --foreground: oklch(0.21 0.01 285);
+  /* Main app surface — light, neutral with a whisper of green */
+  --background: oklch(0.985 0.003 155);
+  --foreground: oklch(0.21 0.015 165);
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.21 0.01 285);
+  --card-foreground: oklch(0.21 0.015 165);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.21 0.01 285);
+  --popover-foreground: oklch(0.21 0.015 165);
 
-  /* Indigo accent */
-  --primary: oklch(0.52 0.23 277);
-  --primary-foreground: oklch(0.99 0.01 285);
-  --secondary: oklch(0.97 0.004 285);
-  --secondary-foreground: oklch(0.27 0.01 285);
-  --muted: oklch(0.97 0.004 285);
-  --muted-foreground: oklch(0.55 0.013 285);
-  --accent: oklch(0.96 0.012 280);
-  --accent-foreground: oklch(0.3 0.06 277);
+  /* Jade primary */
+  --primary: oklch(0.5 0.115 168);
+  --primary-foreground: oklch(0.99 0.005 160);
+  --secondary: oklch(0.965 0.005 155);
+  --secondary-foreground: oklch(0.28 0.015 165);
+  --muted: oklch(0.962 0.005 155);
+  --muted-foreground: oklch(0.5 0.018 162);
+  --accent: oklch(0.945 0.018 160);
+  --accent-foreground: oklch(0.3 0.06 166);
   --destructive: oklch(0.58 0.23 27);
   --destructive-foreground: oklch(0.99 0.01 285);
 
-  --border: oklch(0.92 0.004 285);
-  --input: oklch(0.92 0.004 285);
-  --ring: oklch(0.52 0.23 277);
+  --border: oklch(0.915 0.008 155);
+  --input: oklch(0.915 0.008 155);
+  --ring: oklch(0.5 0.115 168);
 
   /* Sidebar — always-dark forest green, matching the Jungle icon background (#04271a) */
   --sidebar: oklch(0.24 0.05 164);
   --sidebar-foreground: oklch(0.92 0.012 160);
-  --sidebar-primary: oklch(0.52 0.23 277);
-  --sidebar-primary-foreground: oklch(0.99 0.01 285);
-  --sidebar-accent: oklch(0.34 0.055 164);
+  --sidebar-primary: oklch(0.68 0.13 166);
+  --sidebar-primary-foreground: oklch(0.15 0.03 165);
+  --sidebar-accent: oklch(0.32 0.055 164);
   --sidebar-accent-foreground: oklch(0.98 0.012 160);
-  --sidebar-border: oklch(0.33 0.05 164);
+  --sidebar-border: oklch(0.31 0.05 164);
+  --sidebar-ring: oklch(0.6 0.14 165);
+}
+
+.dark {
+  /* Midnight jungle: green-tinted charcoal canvas, elevated cards, luminous jade */
+  --background: oklch(0.2 0.02 165);
+  --foreground: oklch(0.93 0.01 160);
+  --card: oklch(0.24 0.022 165);
+  --card-foreground: oklch(0.93 0.01 160);
+  --popover: oklch(0.235 0.022 165);
+  --popover-foreground: oklch(0.93 0.01 160);
+
+  --primary: oklch(0.73 0.135 165);
+  --primary-foreground: oklch(0.17 0.035 165);
+  --secondary: oklch(0.28 0.02 165);
+  --secondary-foreground: oklch(0.9 0.01 160);
+  --muted: oklch(0.27 0.018 165);
+  --muted-foreground: oklch(0.67 0.018 160);
+  --accent: oklch(0.31 0.03 165);
+  --accent-foreground: oklch(0.95 0.01 160);
+  --destructive: oklch(0.65 0.2 25);
+  --destructive-foreground: oklch(0.98 0.005 20);
+
+  --border: oklch(0.31 0.02 165);
+  --input: oklch(0.33 0.02 165);
+  --ring: oklch(0.73 0.135 165);
+
+  /* Sidebar sinks a step below the canvas for depth */
+  --sidebar: oklch(0.165 0.032 165);
+  --sidebar-foreground: oklch(0.9 0.012 160);
+  --sidebar-primary: oklch(0.73 0.135 165);
+  --sidebar-primary-foreground: oklch(0.17 0.035 165);
+  --sidebar-accent: oklch(0.25 0.04 164);
+  --sidebar-accent-foreground: oklch(0.98 0.012 160);
+  --sidebar-border: oklch(0.24 0.035 164);
   --sidebar-ring: oklch(0.6 0.14 165);
 }
 
@@ -46,6 +87,12 @@
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
+
+  --font-sans:
+    "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif;
+  --font-mono:
+    "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -75,6 +122,32 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+
+  /* New-message entrance: a subtle fade + rise (used by MessageList when pinned to bottom). */
+  --animate-msg-in: msg-in 0.22s cubic-bezier(0.21, 1.02, 0.73, 1) both;
+  @keyframes msg-in {
+    from {
+      opacity: 0;
+      transform: translateY(5px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  /* Jump-to-message highlight (search / deliverables): a primary-tinted wash that fades out. */
+  --animate-msg-flash: msg-flash 2s ease-out both;
+  @keyframes msg-flash {
+    0%,
+    30% {
+      background-color: color-mix(in oklab, var(--primary) 14%, transparent);
+      border-radius: 0.5rem;
+    }
+    100% {
+      background-color: transparent;
+    }
+  }
 }
 
 @layer base {
@@ -84,7 +157,8 @@
   body {
     background-color: var(--background);
     color: var(--foreground);
-    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-family: var(--font-sans);
+    font-feature-settings: "cv05", "cv11"; /* Inter: open 'l'/'a' alternates read better in chat */
     -webkit-font-smoothing: antialiased;
   }
   html, body, #root {
@@ -97,6 +171,36 @@
   body {
     overflow-x: hidden;
   }
+  /* Native widgets (scrollbars, form controls) follow the active theme. */
+  :root {
+    color-scheme: light;
+  }
+  .dark {
+    color-scheme: dark;
+  }
+
+  /* Thin, token-colored scrollbars everywhere (the OS default gutter reads clunky on both the
+     light feed and the dark sidebar). Firefox first, then WebKit. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in oklab, var(--foreground) 22%, transparent) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    border-radius: 8px;
+    background-color: color-mix(in oklab, var(--foreground) 20%, transparent);
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: color-mix(in oklab, var(--foreground) 34%, transparent);
+  }
 }
 
 /* Full viewport height that accounts for mobile browser chrome / on-screen keyboard.
@@ -104,4 +208,110 @@
 .h-screen-dvh {
   height: 100vh;
   height: 100dvh;
+}
+
+/*
+ * Code highlighting (highlight.js), token-driven so it tracks the theme.
+ * Replaces the stock github.css import; palettes tuned for the jade/forest identity.
+ */
+.hljs {
+  color: var(--foreground);
+  background: transparent;
+}
+.hljs-comment,
+.hljs-quote {
+  color: color-mix(in oklab, var(--muted-foreground) 90%, transparent);
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-meta .hljs-keyword,
+.hljs-doctag,
+.hljs-section,
+.hljs-template-tag,
+.hljs-deletion {
+  color: oklch(0.5 0.19 300);
+}
+.hljs-title,
+.hljs-title.class_,
+.hljs-title.function_,
+.hljs-name {
+  color: oklch(0.48 0.14 255);
+}
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-attribute,
+.hljs-meta .hljs-string {
+  color: oklch(0.48 0.11 165);
+}
+.hljs-number,
+.hljs-literal,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-link,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-selector-attr,
+.hljs-selector-pseudo,
+.hljs-selector-class,
+.hljs-selector-id {
+  color: oklch(0.52 0.14 45);
+}
+.hljs-built_in,
+.hljs-type,
+.hljs-attr,
+.hljs-params,
+.hljs-meta,
+.hljs-punctuation {
+  color: oklch(0.42 0.06 230);
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 600;
+}
+.dark .hljs-keyword,
+.dark .hljs-selector-tag,
+.dark .hljs-meta .hljs-keyword,
+.dark .hljs-doctag,
+.dark .hljs-section,
+.dark .hljs-template-tag,
+.dark .hljs-deletion {
+  color: oklch(0.75 0.14 310);
+}
+.dark .hljs-title,
+.dark .hljs-title.class_,
+.dark .hljs-title.function_,
+.dark .hljs-name {
+  color: oklch(0.78 0.11 250);
+}
+.dark .hljs-string,
+.dark .hljs-regexp,
+.dark .hljs-addition,
+.dark .hljs-attribute,
+.dark .hljs-meta .hljs-string {
+  color: oklch(0.78 0.12 160);
+}
+.dark .hljs-number,
+.dark .hljs-literal,
+.dark .hljs-symbol,
+.dark .hljs-bullet,
+.dark .hljs-link,
+.dark .hljs-variable,
+.dark .hljs-template-variable,
+.dark .hljs-selector-attr,
+.dark .hljs-selector-pseudo,
+.dark .hljs-selector-class,
+.dark .hljs-selector-id {
+  color: oklch(0.78 0.11 60);
+}
+.dark .hljs-built_in,
+.dark .hljs-type,
+.dark .hljs-attr,
+.dark .hljs-params,
+.dark .hljs-meta,
+.dark .hljs-punctuation {
+  color: oklch(0.75 0.06 220);
 }

@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { Bot, GitBranch } from "lucide-react";
+import { Bot } from "lucide-react";
 import { createParticipant } from "../../api";
 import { MODEL_OPTIONS, SDK_MODE_OPTIONS } from "../../lib/chat";
 import { SelectMenu } from "./panels";
-import { RepoCombobox } from "../../RepoCombobox";
+import { IntegrationsEditor, validateIntegrations, type IntegrationDraft } from "./IntegrationsEditor";
+import { useConnections } from "@/lib/connections";
 import {
   Dialog,
   DialogContent,
@@ -31,14 +32,24 @@ export function AddAgentDialog({
 }) {
   const [agHandle, setAgHandle] = useState("");
   const [agName, setAgName] = useState("");
-  const [agRepo, setAgRepo] = useState("");
+  const [integrations, setIntegrations] = useState<IntegrationDraft[]>([]);
   const [agModel, setAgModel] = useState(MODEL_OPTIONS[0].id);
   const [agMode, setAgMode] = useState(SDK_MODE_OPTIONS[0].id); // new agents are sdk runtime
   const [addingAgent, setAddingAgent] = useState(false);
+  // The creator's per-user connections gate the integration rows; missing ones can be linked
+  // inline (popup OAuth) without losing this dialog's draft.
+  const connections = useConnections(open);
 
   async function submitAddAgent() {
     if (!agHandle.trim() || !agName.trim()) {
       onNotice("Agent handle and name are required.");
+      return;
+    }
+    // Every attached integration must be complete (connection linked, repo picked) — surfaced
+    // here instead of silently dropping half-configured ones at create time.
+    const problem = validateIntegrations(integrations, connections);
+    if (problem) {
+      onNotice(problem);
       return;
     }
     setAddingAgent(true);
@@ -47,14 +58,14 @@ export function AddAgentDialog({
         kind: "agent",
         handle: agHandle.trim(),
         displayName: agName.trim(),
-        repo: agRepo.trim() || undefined,
+        integrations,
         model: agModel,
         mode: agMode,
       });
       onOpenChange(false);
       setAgHandle("");
       setAgName("");
-      setAgRepo("");
+      setIntegrations([]);
       setAgModel(MODEL_OPTIONS[0].id);
       setAgMode(SDK_MODE_OPTIONS[0].id);
       onCreated();
@@ -73,8 +84,8 @@ export function AddAgentDialog({
             <Bot className="size-5 text-primary" /> Add an agent
           </DialogTitle>
           <DialogDescription>
-            A persistent, cloud-living assistant. Give it a repo and it can open
-            real PRs.
+            A persistent, cloud-living assistant. Agents can just chat, or be given
+            integrations for extra tools &amp; context.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
@@ -98,18 +109,7 @@ export function AddAgentDialog({
               placeholder="e.g. Deploy Bot"
             />
           </div>
-          <div className="space-y-1.5">
-            <Label>
-              <GitBranch className="size-3.5" /> Repository{" "}
-              <span className="font-normal text-muted-foreground">(optional)</span>
-            </Label>
-            <RepoCombobox value={agRepo} onChange={setAgRepo} />
-            {agRepo.trim() && (
-              <p className="text-xs text-muted-foreground">
-                With a repo this takes ~30s (clones it).
-              </p>
-            )}
-          </div>
+          <IntegrationsEditor value={integrations} onChange={setIntegrations} connections={connections} />
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <Label>Model</Label>

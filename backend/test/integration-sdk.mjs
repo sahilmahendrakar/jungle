@@ -64,8 +64,11 @@ async function main() {
   });
   await new Promise((r) => ws.on("open", r));
   const post = (body) => ws.send(JSON.stringify({ type: "post", channelId: dm.id, body }));
+  // seq is a bigint serialized as a STRING — compare numerically ("10" > "7" is false as
+  // strings, which silently broke matches once a channel passed seq 9).
   const agentMsg = (after, substr) => (f) =>
-    f.type === "message" && f.message?.sender_id === agent.id && f.message?.seq > after &&
+    f.type === "message" && f.message?.sender_id === agent.id &&
+    Number(f.message?.seq) > Number(after) &&
     (!substr || f.message.body.toLowerCase().includes(substr));
 
   // give the container time to boot + hello/configure

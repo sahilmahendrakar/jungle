@@ -2,7 +2,7 @@
 // runner protocol (see runner-protocol.ts). The backend emits ServerEvent frames (some to one
 // socket, most fanned out to a channel or broadcast to all); the client sends ClientFrame frames.
 
-import type { AgentStatus, Participant, WireMessage } from "./domain.js";
+import type { AgentStatus, Deliverable, Participant, WireMessage } from "./domain.js";
 
 // ---- Server -> client ----
 
@@ -55,12 +55,32 @@ export interface ParticipantDeletedEvent {
   participantId: string;
 }
 
-// One raw SDK stream message from an agent's turn, for the live Activity transcript.
+// Where an agent's current turn came from: the channel (and thread/message) whose dispatch the
+// runner consumed. This is what lets the client show work WHERE IT WAS REQUESTED — the trigger
+// message's chip, the DM strip, the sidebar working-dot — instead of in every channel the agent
+// happens to be a member of. Absent for turns with no dispatch context (e.g. compaction).
+export interface TurnContext {
+  channelId?: string;
+  threadRootId?: string | null;
+  messageId?: string; // the message whose dispatch triggered this turn
+}
+
+// A turn began: which agent, which turn, and where it was triggered from.
+export interface AgentTurnEvent {
+  type: "agent_turn";
+  agentId: string;
+  turnId: string;
+  context: TurnContext | null;
+}
+
+// One raw SDK stream message from an agent's turn, for the live Activity transcript. Carries the
+// turn's context on every frame so a client that loads mid-turn still learns the turn's home.
 export interface AgentEventEvent {
   type: "agent_event";
   agentId: string;
   turnId: string;
   event: unknown;
+  context?: TurnContext | null;
 }
 
 // An agent's context-window occupancy after a turn (drives the profile usage meter).
@@ -69,6 +89,13 @@ export interface AgentContextEvent {
   agentId: string;
   tokens: number;
   maxTokens: number;
+}
+
+// An agent's long-term memory (MEMORY.md mirror) changed. Content is intentionally not carried
+// (it can be ~12KB): an open profile panel refetches GET /api/agents/:id/memory.
+export interface AgentMemoryChangedEvent {
+  type: "agent_memory_changed";
+  agentId: string;
 }
 
 // An always-ask agent is requesting confirmation for a sensitive tool call.
@@ -92,6 +119,21 @@ export interface ToolConfirmationResolvedEvent {
   by?: string;
 }
 
+// A schedule in the recipient's workspace changed (created/updated/deleted, including fires and
+// auto-pauses, which are updates). Coarse by design: clients refetch the schedule list.
+export interface ScheduleChangedEvent {
+  type: "schedule_changed";
+  scheduleId: string;
+  action: "created" | "updated" | "deleted";
+}
+
+// An agent shipped a work artifact (a PR opened, a doc written, …) — extracted from the links in
+// its message at send time. Carries the full row so the Deliverables feed appends without a refetch.
+export interface DeliverableCreatedEvent {
+  type: "deliverable_created";
+  deliverable: Deliverable;
+}
+
 export type ServerEvent =
   | ConnectedEvent
   | ErrorEvent
@@ -101,10 +143,14 @@ export type ServerEvent =
   | ChannelDeletedEvent
   | ParticipantUpdatedEvent
   | ParticipantDeletedEvent
+  | AgentTurnEvent
   | AgentEventEvent
   | AgentContextEvent
+  | AgentMemoryChangedEvent
   | ToolConfirmationRequestEvent
-  | ToolConfirmationResolvedEvent;
+  | ToolConfirmationResolvedEvent
+  | ScheduleChangedEvent
+  | DeliverableCreatedEvent;
 
 // ---- Client -> server ----
 

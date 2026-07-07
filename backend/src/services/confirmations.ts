@@ -12,6 +12,13 @@ export type ConfirmDecision = { result: "allow" | "deny"; denyMessage?: string; 
 interface PendingConfirm {
   channelId: string;
   agentId: string;
+  // The card payload, kept so a client that (re)connects can list what's still pending
+  // (the fan-out at request time only reaches sockets open at that moment).
+  agentHandle: string;
+  agentName: string;
+  tool: string;
+  input: unknown;
+  createdAt: string;
   resolve: (d: ConfirmDecision) => void;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -35,7 +42,17 @@ export function surfaceConfirmCard(
       void fanOut(channelId, { type: "tool_confirmation_resolved", confirmId, channelId, result: "deny" });
       resolve({ result: "deny", denyMessage: "No human responded in time; the action was skipped." });
     }, CONFIRM_TIMEOUT_MS);
-    pendingConfirms.set(confirmId, { channelId, agentId: agent.id, resolve, timer });
+    pendingConfirms.set(confirmId, {
+      channelId,
+      agentId: agent.id,
+      agentHandle: agent.handle,
+      agentName: agent.display_name,
+      tool,
+      input,
+      createdAt: new Date().toISOString(),
+      resolve,
+      timer,
+    });
     void fanOut(channelId, {
       type: "tool_confirmation_request",
       confirmId,
@@ -76,4 +93,36 @@ export async function resolveConfirmDecision(
     result: decision,
     by: me.handle,
   });
+}
+
+// Every confirmation still awaiting a decision that `me` is allowed to act on (member of the
+// confirm's channel). Backs GET /api/confirmations so a client that loads/reconnects can rebuild
+// its approvals state — the request-time fan-out only reaches sockets open at that moment.
+export async function listPendingConfirmsFor(
+  participantId: string,
+): Promise<Array<{
+  confirmId: string;
+  channelId: string;
+  agentId: string;
+  agentHandle: string;
+  agentName: string;
+  tool: string;
+  input: unknown;
+  createdAt: string;
+}>> {
+  const out = [];
+  for (const [confirmId, p] of pendingConfirms) {
+    if (!(await db.isMember(p.channelId, participantId))) continue;
+    out.push({
+      confirmId,
+      channelId: p.channelId,
+      agentId: p.agentId,
+      agentHandle: p.agentHandle,
+      agentName: p.agentName,
+      tool: p.tool,
+      input: p.input,
+      createdAt: p.createdAt,
+    });
+  }
+  return out;
 }

@@ -11,9 +11,9 @@ import type {
 } from "@jungle/shared";
 import { isSdkMode } from "@jungle/shared";
 import * as db from "./db";
-import * as gh from "./github";
 import { signedPath } from "./attachments";
 import { provisionerFor } from "./provisioner";
+import { adapterFor } from "./integrations";
 
 export type { AgentStatus };
 
@@ -47,28 +47,101 @@ export interface SendMessageResult {
   error?: string;
   messageId?: string;
 }
+export interface ReadHistoryInput {
+  to?: string;
+  // Read a specific thread's transcript instead of the channel's, by its root message id.
+  threadRootId?: string;
+  // Page older than this seq (from a previous result's oldestSeq); omitted = most recent page.
+  beforeSeq?: string;
+  limit?: number;
+}
+export interface ReadHistoryResult {
+  ok: boolean;
+  error?: string;
+  text?: string;
+  oldestSeq?: string | null;
+}
 export type ConfirmDecision = { result: "allow" | "deny"; denyMessage?: string; updatedInput?: unknown };
+export interface ScheduleCreateInput {
+  prompt?: string;
+  cron?: string;
+  timezone?: string;
+  runAt?: string;
+  channel?: string;
+}
+export interface ScheduleCreateResult {
+  ok: boolean;
+  error?: string;
+  scheduleId?: string;
+  nextRunAt?: string;
+}
+export interface ScheduleListResult {
+  ok: boolean;
+  error?: string;
+  text?: string;
+}
+export interface ScheduleCancelResult {
+  ok: boolean;
+  error?: string;
+}
 
 export interface RunnerHooks {
   // Post a message the agent asked to send (same routing/cascade as the MA path's onSend).
+  // `turnId` is the runner's current turn when the send arrived (null outside a tracked turn) —
+  // persisted on the message so the UI can link it back to the work that produced it.
   deliverAgentMessage: (
     agent: { id: string; handle: string; workspace_id: string },
     input: SendMessageInput,
+    turnId: string | null,
   ) => Promise<SendMessageResult>;
+  // Read a page of channel/thread history the agent asked for (read_history tool).
+  readHistory: (
+    agent: { id: string; handle: string; workspace_id: string },
+    input: ReadHistoryInput,
+  ) => Promise<ReadHistoryResult>;
+  // The agent manages its own scheduled turns (schedule_create/list/cancel tools). Validation
+  // and guardrails live in services/scheduler.ts.
+  scheduleCreate: (
+    agent: { id: string; handle: string; workspace_id: string },
+    input: ScheduleCreateInput,
+  ) => Promise<ScheduleCreateResult>;
+  scheduleList: (
+    agent: { id: string; handle: string; workspace_id: string },
+  ) => Promise<ScheduleListResult>;
+  scheduleCancel: (
+    agent: { id: string; handle: string; workspace_id: string },
+    input: { scheduleId?: string },
+  ) => Promise<ScheduleCancelResult>;
   // Surface a tool-confirmation to humans and resolve when one decides. `agentId`+`id`
   // let the decision endpoint route the result back to the right runner.
   requestConfirm: (
     agent: db.AgentRow,
     confirm: { id: string; toolName: string; input: unknown; suggestions?: unknown },
   ) => Promise<ConfirmDecision>;
-  // Persist an SDK stream event and broadcast it to app websockets.
-  onAgentEvent: (agentId: string, turnId: string | null, event: unknown) => void;
+  // A turn began: carries the dispatch context of the inbox batch that fed it (null when the
+  // batch had none, e.g. compaction). Broadcast so clients learn the turn's home channel.
+  onTurnStarted?: (agentId: string, turnId: string, context: db.DispatchContext | null) => void;
+  // Persist an SDK stream event and broadcast it to app websockets. `context` is the current
+  // turn's dispatch context (rides on every frame so mid-turn page loads still learn the home).
+  onAgentEvent: (
+    agentId: string,
+    turnId: string | null,
+    event: unknown,
+    context?: db.DispatchContext | null,
+  ) => void;
   // The runner reported how full the agent's context window is (once per turn).
   // Persist + broadcast so open profile dialogs live-update.
   onContextUsage: (agentId: string, usage: { tokens: number; maxTokens: number }) => void;
+  // The agent's /workspace/MEMORY.md changed (reported after the turn that changed it, and once
+  // after configure). Persist the mirror + broadcast so an open profile panel live-updates.
+  onMemoryUpdated: (agentId: string, content: string) => void;
   // A turn died (SDK crash, OOM kill, API error). Tell the humans who were waiting —
   // otherwise the agent just goes silent mid-task.
   onTurnFailed: (agent: { id: string; handle: string }, error: string) => void;
+  // A turn ended, ok or not — fires for EVERY turn_done (unlike onTurnFailed). Carries the
+  // turnId so consumers can attribute the result to the inbox items (and, via their persisted
+  // context, the schedules) that fed the turn.
+  onTurnFinished?: (agentId: string, turnId: string, ok: boolean, error?: string) => void;
   // The agent's live status changed (see AgentStatus). Backend broadcasts it to app sockets.
   onStatusChanged: (agentId: string, status: AgentStatus) => void;
 }
@@ -100,6 +173,15 @@ interface RunnerConn {
   // Pending confirmations from this runner, keyed by the runner-chosen confirm id, so a
   // late/duplicate decision is a no-op.
   pendingConfirms: Set<string>;
+  // The current turn's dispatch context (fetched at turn_started from the batch's inbox rows),
+  // attached to every event broadcast so clients know the turn's home channel.
+  currentTurnContext: db.DispatchContext | null;
+  // Per-connection serialization chain: frames run in order (see enqueueFrame).
+  frameTail: Promise<void>;
+  // The turn this socket most recently reported via `turn_started`. Mid-turn follow-up batches
+  // emit `consumed` with no accompanying `turn_started`, so the consumed handler attributes
+  // them to this turn.
+  currentTurnId: string | null;
   // Timestamp this conn most recently entered "idle" (null while running or never yet idle
   // on this socket). The idle-stop sweeper reads this to decide when to stop the machine.
   idleSince: number | null;
@@ -199,41 +281,106 @@ function send(conn: RunnerConn, frame: BackendToRunner): void {
 
 // --- Config framing ---
 
-// Compose the systemPromptAppend for an sdk agent: persona, behavior, and environment. Per-turn
-// routing/context (which channel, recent messages) is NOT here — that's built fresh per dispatch
-// in orchestrator.ts's buildAgentTurnInput and rides in each enqueue item instead.
-export function systemPromptAppend(agent: db.AgentRow): string {
+// Compose the systemPromptAppend for an sdk agent: identity, persona, operating rules, memory,
+// integration blocks, and environment. Per-turn routing/context (which channel, recent messages)
+// is NOT here — that's built fresh per dispatch in orchestrator.ts's buildAgentTurnInput and rides
+// in each enqueue item. The runner additionally appends the CURRENT contents of the agent's
+// /workspace/MEMORY.md when building each turn's query (see runner.ts) — this function only
+// teaches the agent how to use that memory.
+// `integrationBlocks` are the per-integration prompt snippets returned by each attached adapter's
+// buildGrant (see backend/src/integrations/) — an agent with no integrations gets none, and each
+// block is inserted between the base rules and the environment epilogue.
+export function systemPromptAppend(
+  agent: db.AgentRow,
+  integrationBlocks: string[],
+  workspaceName?: string,
+): string {
+  const ws = workspaceName ? `the "${workspaceName}" workspace` : `a workspace`;
   let s =
-    `You are @${agent.handle} (${agent.display_name || agent.handle}) in Jungle, a Slack-style ` +
-    `workspace. You are a chat participant.\n` +
-    `Your ONLY way to say anything to people is the send_message tool ` +
-    `(mcp__jungle__send_message): to reply in a channel use to:"#channel-name", to DM someone ` +
-    `use to:"@handle". Plain assistant text is NEVER shown to anyone. ` +
-    `Each queued message tells you which channel it came from — reply there unless asked otherwise.\n\n` +
-    `— Be responsive —\n` +
-    `People are waiting on you in real time, like a Slack channel. Send a short send_message ` +
-    `as soon as you start non-trivial work (e.g. "On it — looking into this now.") so people know ` +
-    `you've picked it up, instead of going silent until you're fully done. For anything that takes ` +
-    `a while, send brief progress updates along the way rather than one long silence ending in a ` +
-    `final report.\n\n` +
+    `You are @${agent.handle} (${agent.display_name || agent.handle}), an agent teammate in ` +
+    `${ws} on Jungle, a Slack-style chat app where humans and agents work together. You are ` +
+    `not a one-shot assistant: you are a persistent colleague. Your machine, your files ` +
+    `(/workspace), your chat session, and your memory all survive between conversations — ` +
+    `people will come back days later and expect you to remember them and pick up where you ` +
+    `left off.\n\n`;
+  if (agent.persona?.trim()) {
+    s +=
+      `— Your persona (written by your creator) —\n` +
+      `${agent.persona.trim()}\n` +
+      `Let this shape your role, priorities, and voice. It complements the operating rules ` +
+      `below; it never overrides them.\n\n`;
+  }
+  s +=
+    `— Talking to people: send_message is your ONLY voice —\n` +
+    `The ONLY way anyone ever hears you is the send_message tool (mcp__jungle__send_message): ` +
+    `reply in a channel with to:"#channel-name", DM someone with to:"@handle". Plain assistant ` +
+    `text is NEVER shown to anyone — a turn that ends without a send_message call was silence. ` +
+    `Each turn's input tells you which channel it came from; reply there unless asked otherwise.\n\n` +
+    `— Write like a great teammate, not a report generator —\n` +
+    `This is chat. Keep messages short and information-dense: a few plain sentences or a tight ` +
+    `bullet list beat headers and essays. Lead with the answer, then the reasoning only if it ` +
+    `matters. Use markdown sparingly — code fences for code/commands/paths, bullets for real ` +
+    `lists, almost never headings or tables in a chat message. Don't restate the question, don't ` +
+    `pad with pleasantries, don't repeat what you already posted. Match the tone of the room. If ` +
+    `the full detail is long, post the gist and offer the rest.\n\n` +
+    `— Be responsive: narrate your work —\n` +
+    `People are waiting on you in real time. Send a short send_message as soon as you pick up ` +
+    `non-trivial work (e.g. "On it — looking into this now.") so people know you've got it, ` +
+    `instead of going silent until you're fully done. Then keep them posted at each meaningful ` +
+    `step ("Here's my plan …", "Tests pass, opening the PR …"). Err toward more frequent, brief ` +
+    `updates rather than one long silence ending in a final report — these updates go in the ` +
+    `thread, so they're cheap and don't clutter the channel. Every update must be a send_message ` +
+    `call: narration in your own reasoning/plain text is never shown to anyone.\n\n` +
+    `— Threads vs channel —\n` +
+    `You choose where each reply lands, and for most cases you should choose a thread rather than ` +
+    `the main channel timeline — it keeps the channel tidy. When you're addressed in a thread, ` +
+    `omitting threadRootId keeps your reply in that thread. When you're addressed by a top-level ` +
+    `channel message, that message's id is given to you in the turn input; pass it as threadRootId ` +
+    `to reply in a thread under it (do this for progress updates and most replies). Posting a plain ` +
+    `message to the whole channel is always available and fully your call: omit threadRootId to ` +
+    `post at the top level, or set alsoToChannel:true to post to both a thread and the channel. ` +
+    `Reserve channel-level posts for things everyone should see, not routine progress.\n\n` +
+    `— Working with other agents —\n` +
+    `@mentioning or DMing another agent wakes them up, just like a person being paged. Only do ` +
+    `it when you specifically want that agent to wake up and take some action — never as an ` +
+    `incidental reference or FYI. Stay focused on what you were specifically assigned: if you see ` +
+    `a message addressed to a different agent, don't assume it's your job too — only act on it if ` +
+    `the user specifically mentioned or asked you.\n\n` +
+    `— Your memory (load-bearing) —\n` +
+    `You have a persistent memory directory (the memory system described in your base ` +
+    `instructions, at your CLAUDE_CONFIG_DIR's projects/<slug>/memory/): one markdown file per ` +
+    `durable fact, indexed by MEMORY.md. Your MEMORY.md index is injected into your context ` +
+    `every turn — it is what you "know" at the start of any conversation, and the only knowledge ` +
+    `guaranteed to survive session compaction. Writes inside your memory directory never need ` +
+    `approval. Use it like a colleague who never forgets:\n` +
+    `• The moment you learn something durable, save it: people's preferences and standing ` +
+    `feedback ("keep PRs small", "always deploy to preprod first"), project facts and decisions, ` +
+    `gotchas you hit once and never want to hit again, key repos/paths/URLs/channel names, who's ` +
+    `who. An unwritten fact is a fact you'll forget.\n` +
+    `• When an index line looks relevant to the task at hand, Read that memory file before acting.\n` +
+    `• Don't store task minutiae or anything you can re-derive from the repo or chat history ` +
+    `(read_history exists). Curate: update or delete stale memories instead of piling up ` +
+    `duplicates, and keep the index tight — it rides in every prompt.\n` +
+    `• Never store secrets, tokens, or credentials. Workspace members can read your memory from ` +
+    `your profile.\n\n` +
     `— Files & images —\n` +
     `Files people attach to messages are saved into your workspace under ` +
     `/workspace/attachments/ (each queued message lists the exact paths). To send files or ` +
     `images to people, pass workspace file paths in send_message's \`files\` parameter, e.g. ` +
     `files:["/workspace/repo/screenshot.png"] — images render inline in the chat, other file ` +
-    `types become downloads. Max 10 files, 25MB each.`;
-  if (agent.repo) {
-    const gitName = agent.display_name || agent.handle;
-    const gitEmail = `${agent.handle}@agents.jungle.dev`;
-    s +=
-      `\n\n— Working on ${agent.repo} —\n` +
-      `The repo is already cloned at /workspace/repo with git credentials configured ` +
-      `(if it's ever missing, clone it yourself with gh). Make and COMMIT changes with git so ` +
-      `commits are authored as you. Before committing, run once:\n` +
-      `  git config user.name ${JSON.stringify(gitName)}\n` +
-      `  git config user.email ${JSON.stringify(gitEmail)}\n` +
-      `Then push your branch and open the pull request.`;
-  }
+    `types become downloads. Max 10 files, 25MB each.\n\n` +
+    `— Schedules —\n` +
+    `You can schedule future work for yourself with schedule_create: recurring (a 5-field cron ` +
+    `expression + IANA timezone) or one-time (runAt, ISO-8601). IMPORTANT: a scheduled turn runs ` +
+    `with NO memory of the conversation where it was created — write the prompt as a complete, ` +
+    `self-contained instruction for a future you (what to do, where to post results, any repos, ` +
+    `links, or channel names it needs). When it fires you'll receive that instruction verbatim; ` +
+    `do the work, post results with send_message if there's something worth saying, and finish ` +
+    `silently when there isn't. Review with schedule_list, remove with schedule_cancel. Limits: ` +
+    `10 schedules per agent, recurring at most every 15 minutes. When someone asks you to ` +
+    `"remind me", "check every morning", or "do X weekly", use these tools — never just promise ` +
+    `to remember. (Schedules are for future ACTIONS; MEMORY.md is for durable FACTS.)`;
+  for (const block of integrationBlocks) s += block;
   s +=
     `\n\n— Your environment —\n` +
     `You run in a Linux container: no sudo/apt, ~3GB memory (don't run several heavy ` +
@@ -243,45 +390,48 @@ export function systemPromptAppend(agent: db.AgentRow): string {
   return s;
 }
 
-// Build the `configure` reply to a runner's `hello`: model, permission mode, persona, and
-// (for GitHub-capable agents) a fresh installation token so the runner can authenticate git.
+// Build the `configure` reply to a runner's `hello`: model, permission mode, persona, and each
+// attached integration's grant (git installation token, Gmail access token, …). Every per-service
+// concern lives in that integration's adapter (backend/src/integrations/); here we just loop over
+// the agent's attached integrations and let each adapter mint tokens, set the frame fields the
+// runner reads, and return its system-prompt block.
 async function buildConfigure(agent: db.AgentRow): Promise<ConfigureFrame> {
   const frame: ConfigureFrame = {
     type: "configure",
     model: agent.model ?? null,
     permissionMode: toPermissionMode(agent.mode),
     effort: agent.effort,
-    systemPromptAppend: systemPromptAppend(agent),
+    systemPromptAppend: "",
   };
-  if (agent.repo && gh.appAuthConfigured()) {
-    try {
-      const token = await gh.installationTokenForRepo(agent.repo);
-      const login = agent.handle; // git identity/login the runner presents
-      // repoUrl makes the runner clone into /workspace/repo before its first turn.
-      frame.git = { token, login, repoUrl: `https://github.com/${agent.repo}.git` };
-    } catch (e) {
-      console.error(`runner[${agent.id}] configure: could not mint git token:`, e);
-    }
+  const blocks: string[] = [];
+  for (const row of await db.listAgentIntegrations(agent.id)) {
+    const adapter = adapterFor(row.integration_key);
+    if (!adapter) continue;
+    const block = await adapter.buildGrant(frame, agent, row.config);
+    if (block) blocks.push(block);
   }
+  const workspace = await db.getWorkspace(agent.workspace_id);
+  frame.systemPromptAppend = systemPromptAppend(agent, blocks, workspace?.name);
   return frame;
 }
 
-// --- Git credential refresh ---
+// --- Credential refresh ---
 
-// Re-mint the repo's installation token and push it to the runner as a `git_credentials`
-// frame. GitHub App installation tokens hard-expire at 1h; a runner that stays connected
-// longer than that would otherwise keep using the stale token it was handed once in
-// `configure` (its `git push`/`gh` share that token and 401 together). installationTokenForRepo
-// caches until ~5 min before expiry, so this is ~free until a refresh is actually needed. We
-// call it before each drain so every turn starts with a valid token — no timers, no background
-// state. No-op for agents without a repo or when App auth isn't configured.
-async function refreshGitCredentials(conn: RunnerConn, agent: db.AgentRow): Promise<void> {
-  if (!agent.repo || !gh.appAuthConfigured()) return;
-  try {
-    const token = await gh.installationTokenForRepo(agent.repo);
-    send(conn, { type: "git_credentials", token, login: agent.handle });
-  } catch (e) {
-    console.error(`runner[${agent.id}] could not refresh git token:`, e);
+// Re-mint every attached integration's short-lived token and push a credentials frame to the
+// runner. OAuth/installation tokens hard-expire (GitHub App tokens at ~1h, Google access tokens
+// at ~1h); a runner that stays connected longer would otherwise keep using the stale token it was
+// handed once in `configure`. Adapters cache until near expiry, so this is ~free until a refresh
+// is actually needed. Called before each drain so every turn starts with valid credentials — no
+// timers, no background state. No-op for agents whose integrations don't expire mid-session.
+async function refreshCredentials(conn: RunnerConn, agent: db.AgentRow): Promise<void> {
+  for (const row of await db.listAgentIntegrations(agent.id)) {
+    const adapter = adapterFor(row.integration_key);
+    if (!adapter?.refreshCredentials) continue;
+    try {
+      await adapter.refreshCredentials(agent, row.config, (frame) => send(conn, frame));
+    } catch (e) {
+      console.error(`runner[${agent.id}] refreshCredentials(${row.integration_key}):`, e);
+    }
   }
 }
 
@@ -314,11 +464,11 @@ export async function drain(agentId: string): Promise<void> {
         : {}),
     }));
   if (!items.length) return;
-  // Push a fresh git token before the work so a long-lived runner never begins a turn with an
-  // expired installation token. Ordered before `enqueue` so the runner applies it before the
-  // turn (and any git ops in it) starts.
+  // Push fresh integration credentials before the work so a long-lived runner never begins a turn
+  // with an expired token. Ordered before `enqueue` so the runner applies them before the turn
+  // (and any git/gmail/… ops in it) starts.
   const agent = await db.getAgentRow(agentId);
-  if (agent) await refreshGitCredentials(conn, agent);
+  if (agent) await refreshCredentials(conn, agent);
   for (const it of items) conn.sentInbox.add(it.inboxId);
   send(conn, { type: "enqueue", items });
 }
@@ -398,6 +548,18 @@ export function setEffort(agentId: string, effort: string): void {
   if (conn) send(conn, { type: "set_effort", effort });
 }
 
+// Rebuild + push a fresh `configure` to a connected runner. Persona/display-name edits live in
+// the systemPromptAppend, which the runner otherwise only receives at `hello` — this makes such
+// an edit apply at the agent's next turn instead of waiting for a reconnect. No-op when offline
+// (the next hello builds configure from the fresh row anyway).
+export async function reconfigure(agentId: string): Promise<void> {
+  const conn = conns.get(agentId);
+  if (!conn) return;
+  const agent = await db.getAgentRow(agentId);
+  if (!agent) return;
+  send(conn, await buildConfigure(agent));
+}
+
 // Interrupt the agent's running turn (queued inbox items are untouched — they'll be
 // consumed at the next turn boundary). Returns false if no runner is connected.
 export function interrupt(agentId: string): boolean {
@@ -415,6 +577,29 @@ export function compact(agentId: string): boolean {
   if (!conn) return false;
   send(conn, { type: "compact" });
   return true;
+}
+
+// agentId -> a compact request made while the machine was asleep/waking, to be delivered the
+// moment its runner says `hello` (see the "hello" case below).
+const pendingCompact = new Set<string>();
+
+// Compact-button entry point: sends immediately if a runner is connected; otherwise wakes the
+// agent's machine (same wake-on-message path as a triggering chat message) and remembers the
+// request so it's delivered on the runner's next `hello` instead of failing with "offline".
+export async function compactOrWake(
+  agent: db.Participant,
+): Promise<"sent" | "waking" | "wake_failed"> {
+  if (compact(agent.id)) return "sent";
+  pendingCompact.add(agent.id);
+  try {
+    await provisionerFor(agent).start(agent.id);
+    noteProvisionerStart(agent.id);
+    return "waking";
+  } catch (e) {
+    pendingCompact.delete(agent.id);
+    console.error(`compactOrWake: wake failed for ${agent.id}:`, e);
+    return "wake_failed";
+  }
 }
 
 // Runner liveness/state for the UI (Activity header, profile status dot).
@@ -473,7 +658,7 @@ async function accept(ws: WebSocket, token: string): Promise<void> {
   let conn: RunnerConn | null = null;
   const early: string[] = [];
   ws.on("message", (raw) => {
-    if (conn) void handleFrame(conn, raw.toString());
+    if (conn) enqueueFrame(conn, raw.toString());
     else early.push(raw.toString());
   });
   ws.on("error", (e) => console.error("runner socket error (pre-auth):", e));
@@ -500,6 +685,9 @@ async function accept(ws: WebSocket, token: string): Promise<void> {
     sentInbox: new Set(),
     pendingConfirms: new Set(),
     idleSince: null,
+    currentTurnId: null,
+    currentTurnContext: null,
+    frameTail: Promise.resolve(),
   };
   conns.set(agent.id, conn);
   console.log(`runner[${agent.id}] (@${agent.handle}) connected`);
@@ -515,8 +703,18 @@ async function accept(ws: WebSocket, token: string): Promise<void> {
     console.log(`runner[${agent.id}] disconnected`);
   });
 
-  // Replay any frames (notably `hello`) that arrived during the token lookup.
-  for (const raw of early) void handleFrame(conn, raw);
+  // Replay any frames (notably `hello`) that arrived during the token lookup, in order.
+  for (const raw of early) enqueueFrame(conn, raw);
+}
+
+// Serialize frame handling per connection: each frame runs only after the previous one settles,
+// so ordering-sensitive state (a turn's currentTurnContext, set by an async turn_started, is read
+// by the events that follow) is never overtaken by a later frame. A thrown handler doesn't stall
+// the queue.
+function enqueueFrame(conn: RunnerConn, raw: string): void {
+  conn.frameTail = conn.frameTail.then(() => handleFrame(conn, raw)).catch((e) =>
+    console.error(`runner[${conn.agentId}] frame handler:`, e),
+  );
 }
 
 async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
@@ -541,11 +739,15 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         conn.sessionId = frame.sessionId ?? null;
         setConnState(conn, "idle");
         conn.sentInbox.clear(); // reconnect: allow re-sending unacked inbox rows
+        conn.currentTurnId = null;
+        conn.currentTurnContext = null;
         clearMachine(agentId); // a live hello always wins over stale starting/stopped state
         emitStatus(agentId);
         send(conn, await buildConfigure(agent));
-        // Runner is idle after configure — push any queued work.
+        // Runner is idle after configure — push any queued work, plus a compact requested
+        // while this agent was asleep/waking (see compactOrWake).
         await drain(agentId);
+        if (pendingCompact.delete(agentId)) send(conn, { type: "compact" });
         break;
       }
       case "state": {
@@ -555,19 +757,29 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         break;
       }
       case "turn_started": {
-        // The runner is consuming these inbox items in turn `frame.turnId`. Informational;
-        // durable delivery is confirmed by `consumed`.
+        // The runner is consuming these inbox items in turn `frame.turnId`. Record the turn on
+        // the rows (turn-result attribution) and on the conn (mid-turn follow-up batches emit
+        // `consumed` with no turn_started). Durable delivery is still confirmed by `consumed`.
+        conn.currentTurnId = frame.turnId;
+        const inboxIds = Array.isArray(frame.inboxIds) ? frame.inboxIds : [];
+        await db.markInboxTurnStarted(agentId, inboxIds, frame.turnId);
+        // Resolve the batch's dispatch context: it names the turn's HOME (trigger channel/
+        // thread/message), which clients use to show work where it was requested.
+        conn.currentTurnContext = await db.contextForInboxIds(agentId, inboxIds);
+        hooks?.onTurnStarted?.(agentId, frame.turnId, conn.currentTurnContext);
         break;
       }
       case "consumed": {
         const ids: string[] = Array.isArray(frame.inboxIds) ? frame.inboxIds : [];
-        // `consumed` carries no turnId (turn_started already recorded it); markInboxConsumed
-        // coalesces, so a null here preserves any turn_id already set.
-        await db.markInboxConsumed(agentId, ids, null);
+        // `consumed` carries no turnId of its own; attribute to the socket's current turn
+        // (markInboxConsumed coalesces, so rows already stamped by turn_started keep theirs).
+        await db.markInboxConsumed(agentId, ids, conn.currentTurnId);
         break;
       }
       case "event": {
-        hooks?.onAgentEvent(agentId, frame.turnId ?? null, frame.event);
+        // Attach the current turn's context only when the frame belongs to that turn.
+        const ctx = frame.turnId && frame.turnId === conn.currentTurnId ? conn.currentTurnContext : null;
+        hooks?.onAgentEvent(agentId, frame.turnId ?? null, frame.event, ctx);
         break;
       }
       case "context_usage": {
@@ -576,6 +788,13 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         if (Number.isFinite(tokens) && Number.isFinite(maxTokens) && tokens > 0 && maxTokens > 0) {
           hooks?.onContextUsage(agentId, { tokens: Math.round(tokens), maxTokens: Math.round(maxTokens) });
         }
+        break;
+      }
+      case "memory": {
+        // The MEMORY.md mirror. Bound it defensively (the runner already caps what it injects
+        // into the prompt; this guards the DB against a runaway file).
+        const content = String(frame.content ?? "").slice(0, 65_536);
+        hooks?.onMemoryUpdated(agentId, content);
         break;
       }
       case "send_message": {
@@ -588,12 +807,86 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
             result = await hooks.deliverAgentMessage(
               { id: agent.id, handle: agent.handle, workspace_id: agent.workspace_id },
               (frame.input ?? {}) as SendMessageInput,
+              conn.currentTurnId,
             );
           } catch (e) {
             result = { ok: false, error: String((e as Error).message ?? e) };
           }
         }
         send(conn, { type: "send_message_result", id: frame.id, result });
+        break;
+      }
+      case "read_history": {
+        const agent = await db.getAgentRow(agentId);
+        let result: ReadHistoryResult;
+        if (!hooks || !agent) {
+          result = { ok: false, error: "backend not ready" };
+        } else {
+          try {
+            result = await hooks.readHistory(
+              { id: agent.id, handle: agent.handle, workspace_id: agent.workspace_id },
+              (frame.input ?? {}) as ReadHistoryInput,
+            );
+          } catch (e) {
+            result = { ok: false, error: String((e as Error).message ?? e) };
+          }
+        }
+        send(conn, { type: "read_history_result", id: frame.id, result });
+        break;
+      }
+      case "schedule_create": {
+        const agent = await db.getAgentRow(agentId);
+        let result: ScheduleCreateResult;
+        if (!hooks || !agent) {
+          result = { ok: false, error: "backend not ready" };
+        } else {
+          try {
+            result = await hooks.scheduleCreate(
+              { id: agent.id, handle: agent.handle, workspace_id: agent.workspace_id },
+              (frame.input ?? {}) as ScheduleCreateInput,
+            );
+          } catch (e) {
+            result = { ok: false, error: String((e as Error).message ?? e) };
+          }
+        }
+        send(conn, { type: "schedule_create_result", id: frame.id, result });
+        break;
+      }
+      case "schedule_list": {
+        const agent = await db.getAgentRow(agentId);
+        let result: ScheduleListResult;
+        if (!hooks || !agent) {
+          result = { ok: false, error: "backend not ready" };
+        } else {
+          try {
+            result = await hooks.scheduleList({
+              id: agent.id,
+              handle: agent.handle,
+              workspace_id: agent.workspace_id,
+            });
+          } catch (e) {
+            result = { ok: false, error: String((e as Error).message ?? e) };
+          }
+        }
+        send(conn, { type: "schedule_list_result", id: frame.id, result });
+        break;
+      }
+      case "schedule_cancel": {
+        const agent = await db.getAgentRow(agentId);
+        let result: ScheduleCancelResult;
+        if (!hooks || !agent) {
+          result = { ok: false, error: "backend not ready" };
+        } else {
+          try {
+            result = await hooks.scheduleCancel(
+              { id: agent.id, handle: agent.handle, workspace_id: agent.workspace_id },
+              (frame.input ?? {}) as { scheduleId?: string },
+            );
+          } catch (e) {
+            result = { ok: false, error: String((e as Error).message ?? e) };
+          }
+        }
+        send(conn, { type: "schedule_cancel_result", id: frame.id, result });
         break;
       }
       case "confirm_request": {
@@ -645,6 +938,8 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
             );
           }
         }
+        hooks?.onTurnFinished?.(agentId, frame.turnId, !!frame.ok,
+          frame.ok ? undefined : String(frame.error ?? "unknown error"));
         // A turn finished; more work may have queued while it ran.
         await drain(agentId);
         break;

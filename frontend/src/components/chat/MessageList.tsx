@@ -1,9 +1,13 @@
-import { useEffect, useRef } from "react";
-import { MessageSquare, MessagesSquare, Sparkles } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Activity, Check, Copy, MessageSquare, MessagesSquare } from "lucide-react";
 import type { Message, Participant } from "../../api";
 import { fmtTime } from "../../lib/chat";
 import { Markdown } from "../../Markdown";
-import { AttachmentList, PersonAvatar } from "./panels";
+import { AgentBadge, AttachmentList, EmptyState, PersonAvatar } from "./panels";
+import { DeliverableChips } from "./deliverableCards";
+import { MessageTurnChips } from "./TurnChips";
+import { AgentHoverCard } from "./AgentHoverCard";
+import type { LiveTurn } from "../../ws/useLiveTurns";
 import {
   Tooltip,
   TooltipContent,
@@ -11,9 +15,10 @@ import {
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
-// The per-message thread affordance: a persistent "N replies" chip on a root that has replies
-// (bold + "N new" when I follow it and have unread), a "View thread" link on an also-to-channel
-// reply shown in the timeline, or an on-hover "Reply in thread" on everything else.
+// The per-message thread affordance that RESERVES layout space: a persistent "N replies" chip on
+// a root that has replies (bold + "N new" when I follow it and have unread), or a "View thread"
+// link on an also-to-channel reply shown in the timeline. The on-hover "reply in thread" action
+// lives in the HoverActions bar instead.
 function ThreadFooter({
   m,
   replyCounts,
@@ -60,30 +65,159 @@ function ThreadFooter({
       </button>
     );
   }
-  // Corner popover (Slack-style): absolutely positioned so it never reserves layout space, and
-  // anchored to this message's own line (not the sender header) so it works the same on every
-  // line of a consecutive/grouped run from one sender.
+  return null;
+}
+
+// Slack-style hover action bar, absolutely positioned at the message row's top-right corner so
+// it never reserves layout space. Carries the message's timestamp (grouped follow-up rows have
+// no visible time otherwise), copy-text, and reply-in-thread (roots without replies only — once
+// a thread exists the persistent chip below the message is the affordance).
+function HoverActions({
+  m,
+  showReply,
+  showWork,
+  onOpenThread,
+  onOpenTurn,
+}: {
+  m: Message;
+  showReply: boolean;
+  // The sender is an agent and this message is linked to the runner turn that produced it.
+  showWork: boolean;
+  onOpenThread: (rootId: string) => void;
+  onOpenTurn: (m: Message) => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const copy = useCallback(() => {
+    navigator.clipboard?.writeText(m.body ?? "").then(
+      () => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1200);
+      },
+      () => {},
+    );
+  }, [m.body]);
   return (
-    <div className="pointer-events-none absolute -top-3.5 right-1.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/msg:opacity-100">
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            data-testid="reply-in-thread"
-            onClick={() => onOpenThread(rootId)}
-            className="pointer-events-auto flex size-7 items-center justify-center rounded-md border border-border bg-card text-muted-foreground shadow-sm hover:bg-accent hover:text-accent-foreground"
-          >
-            <MessageSquare className="size-3.5" />
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="top">Reply in thread</TooltipContent>
-      </Tooltip>
+    <div className="pointer-events-none absolute -top-4 right-1.5 z-10 opacity-0 transition-opacity focus-within:opacity-100 group-hover/msg:opacity-100">
+      <div className="pointer-events-auto flex items-center gap-0.5 rounded-lg border bg-card p-0.5 shadow-md">
+        <span className="px-1.5 text-[11px] tabular-nums text-muted-foreground">
+          {fmtTime(m.created_at)}
+        </span>
+        {m.body && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                data-testid="message-copy"
+                onClick={copy}
+                className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+              >
+                {copied ? <Check className="size-3.5 text-primary" /> : <Copy className="size-3.5" />}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="top">{copied ? "Copied" : "Copy text"}</TooltipContent>
+          </Tooltip>
+        )}
+        {showReply && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                data-testid="reply-in-thread"
+                onClick={() => onOpenThread(m.thread_root_id ?? m.id)}
+                className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+              >
+                <MessageSquare className="size-3.5" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="top">Reply in thread</TooltipContent>
+          </Tooltip>
+        )}
+        {showWork && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                data-testid="view-work"
+                onClick={() => onOpenTurn(m)}
+                className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+              >
+                <Activity className="size-3.5" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="top">View the work behind this</TooltipContent>
+          </Tooltip>
+        )}
+      </div>
     </div>
   );
 }
 
-// The main channel timeline: sender-grouped message rows with per-message thread footers, plus the
-// empty-channel hint. Owns its own scroll viewport, kept pinned to the newest message whenever the
-// grouped content or the open channel changes.
+// One message row body: markdown + attachments + deliverable chips + hover actions + thread footer.
+function MessageBody({
+  m,
+  className,
+  animate,
+  personByHandle,
+  onOpenProfile,
+  replyCounts,
+  unreadByRoot,
+  onOpenThread,
+  onOpenTurn,
+  anchoredTurns,
+  personById,
+  onOpenLiveTurn,
+}: {
+  m: Message;
+  className?: string;
+  animate: boolean;
+  personByHandle: (h?: string | null) => Participant | undefined;
+  onOpenProfile: (id: string) => void;
+  replyCounts: Map<string, number>;
+  unreadByRoot: Map<string, number>;
+  onOpenThread: (rootId: string) => void;
+  onOpenTurn: (m: Message) => void;
+  anchoredTurns: LiveTurn[];
+  personById: (id: string) => Participant | undefined;
+  onOpenLiveTurn: (turn: LiveTurn) => void;
+}) {
+  const isRoot = !m.thread_root_id;
+  const hasReplies = isRoot && (replyCounts.get(m.id) ?? 0) > 0;
+  const isAgent = personByHandle(m.sender_handle)?.kind === "agent";
+  return (
+    <div
+      data-testid="message"
+      data-message-id={m.id}
+      className={cn("group/msg relative break-words", animate && "animate-msg-in", className)}
+    >
+      {m.body && (
+        <Markdown personByHandle={personByHandle} onOpenProfile={onOpenProfile}>
+          {m.body}
+        </Markdown>
+      )}
+      {(m.attachments?.length ?? 0) > 0 && <AttachmentList attachments={m.attachments!} />}
+      {/* Artifact cards for the work links agents post (PRs, docs, …) — agent messages only,
+          so a human pasting a PR link doesn't read as a "deliverable". */}
+      {isAgent && m.body && <DeliverableChips body={m.body} />}
+      {/* Live work anchored under the message that triggered it (one chip per agent). */}
+      <MessageTurnChips turns={anchoredTurns} personById={personById} onOpenTurn={onOpenLiveTurn} />
+      <ThreadFooter
+        m={m}
+        replyCounts={replyCounts}
+        unreadByRoot={unreadByRoot}
+        onOpenThread={onOpenThread}
+      />
+      <HoverActions
+        m={m}
+        showReply={isRoot && !hasReplies}
+        showWork={isAgent && !!m.turn_id}
+        onOpenThread={onOpenThread}
+        onOpenTurn={onOpenTurn}
+      />
+    </div>
+  );
+}
+
+// The main channel timeline: sender-grouped message rows with hover actions and per-message
+// thread footers, plus the empty-channel hint. Owns its own scroll viewport: pinned to the
+// newest message while the user is at the bottom, but never yanks them down while they're
+// scrolled up reading history (jump-to-bottom only on channel switch).
 export function MessageList({
   grouped,
   hasChannel,
@@ -94,6 +228,12 @@ export function MessageList({
   replyCounts,
   unreadByRoot,
   onOpenThread,
+  onOpenTurn,
+  turnsByMessage,
+  personById,
+  onOpenLiveTurn,
+  jumpToId,
+  onJumpDone,
 }: {
   grouped: { lead: Message; rest: Message[] }[];
   hasChannel: boolean;
@@ -104,28 +244,82 @@ export function MessageList({
   replyCounts: Map<string, number>;
   unreadByRoot: Map<string, number>;
   onOpenThread: (rootId: string) => void;
+  // Open the agent Activity view focused on the turn that produced this message.
+  onOpenTurn: (m: Message) => void;
+  // Live turns anchored to messages in this channel (the trigger-message chips), keyed by the
+  // triggering message's id, plus the lookups/actions the chips need.
+  turnsByMessage: Map<string, LiveTurn[]>;
+  personById: (id: string) => Participant | undefined;
+  onOpenLiveTurn: (turn: LiveTurn) => void;
+  // Jump target (from search / the deliverables feed): once this message renders, scroll it into
+  // view with a flash highlight, then report done so the parent clears the target.
+  jumpToId: string | null;
+  onJumpDone: () => void;
 }) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
+  const pinnedRef = useRef(true);
 
-  // Keep the message list pinned to the newest message.
+  // Jump-to-message: runs after grouped renders; retries harmlessly until the target exists.
   useEffect(() => {
+    if (!jumpToId) return;
+    const el = viewportRef.current?.querySelector(`[data-message-id="${jumpToId}"]`);
+    if (!el) return;
+    pinnedRef.current = false; // don't yank back to the bottom on the next content change
+    el.scrollIntoView({ block: "center" });
+    el.classList.add("animate-msg-flash");
+    setTimeout(() => el.classList.remove("animate-msg-flash"), 2000);
+    onJumpDone();
+  }, [jumpToId, grouped, onJumpDone]);
+
+  // Track whether the user is at (near) the bottom, so new content only auto-scrolls when
+  // they were already reading the newest messages.
+  const onScroll = useCallback(() => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    pinnedRef.current = vp.scrollHeight - vp.scrollTop - vp.clientHeight < 60;
+  }, []);
+
+  // Channel switch: always jump to the newest message and reset the pin.
+  useEffect(() => {
+    pinnedRef.current = true;
     const vp = viewportRef.current;
     if (vp) vp.scrollTop = vp.scrollHeight;
-  }, [grouped, channelId]);
+  }, [channelId]);
+
+  // New content: keep pinned to the bottom only while the user is there.
+  useEffect(() => {
+    const vp = viewportRef.current;
+    if (vp && pinnedRef.current) vp.scrollTop = vp.scrollHeight;
+  }, [grouped]);
+
+  // Only animate messages that arrive AFTER the initial render of a channel — a full history
+  // load shouldn't play 200 entrance animations. Seen-set is rebuilt on channel switch.
+  const seenRef = useRef<{ channel: string | null; ids: Set<string> }>({
+    channel: null,
+    ids: new Set(),
+  });
+  if (seenRef.current.channel !== channelId) {
+    seenRef.current = { channel: channelId, ids: new Set() };
+  }
+  const firstRender = seenRef.current.ids.size === 0;
+  const isNew = (id: string) => !firstRender && !seenRef.current.ids.has(id);
+  useEffect(() => {
+    for (const { lead, rest } of grouped) {
+      seenRef.current.ids.add(lead.id);
+      for (const m of rest) seenRef.current.ids.add(m.id);
+    }
+  }, [grouped]);
 
   return (
-    <div ref={viewportRef} className="min-h-0 flex-1 overflow-y-auto">
+    <div ref={viewportRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto">
       <div data-testid="message-list" className="flex flex-col gap-5 px-3 py-6 md:px-5">
         {hasChannel && grouped.length === 0 && (
-          <div className="flex flex-1 flex-col items-center justify-center gap-2 pt-16 text-center">
-            <div className="flex size-12 items-center justify-center rounded-2xl bg-muted">
-              <MessagesSquare className="size-6 text-muted-foreground" />
-            </div>
-            <p className="text-sm text-muted-foreground">
+          <div className="pt-16">
+            <EmptyState icon={<MessagesSquare className="size-6" />}>
               This is the start of {headerTitle}. Say something — or{" "}
-              <span className="font-medium text-foreground">@mention</span>{" "}
-              an agent to put it to work.
-            </p>
+              <span className="font-medium text-foreground">@mention</span> an agent to put it to
+              work.
+            </EmptyState>
           </div>
         )}
 
@@ -134,69 +328,65 @@ export function MessageList({
           const isAgent = sender?.kind === "agent";
           return (
             <div key={lead.id} className="flex gap-3">
-              <button
-                onClick={() => sender && onOpenProfile(sender.id)}
-                disabled={!sender}
-                className="h-fit shrink-0 rounded-md transition-opacity hover:opacity-80 disabled:cursor-default"
-                title={sender ? `View @${sender.handle}` : undefined}
-              >
-                <PersonAvatar
-                  name={sender?.display_name ?? lead.sender_handle}
-                  handle={lead.sender_handle}
-                />
-              </button>
+              <AgentHoverCard agentId={sender?.id ?? ""}>
+                <button
+                  onClick={() => sender && onOpenProfile(sender.id)}
+                  disabled={!sender}
+                  className="h-fit shrink-0 rounded-md transition-opacity hover:opacity-80 disabled:cursor-default"
+                  title={sender ? `View @${sender.handle}` : undefined}
+                >
+                  <PersonAvatar
+                    name={sender?.display_name ?? lead.sender_handle}
+                    handle={lead.sender_handle}
+                  />
+                </button>
+              </AgentHoverCard>
               <div className="min-w-0 flex-1">
                 <div className="flex items-baseline gap-2">
-                  <button
-                    data-testid="message-sender"
-                    onClick={() => sender && onOpenProfile(sender.id)}
-                    disabled={!sender}
-                    className="font-semibold hover:underline disabled:no-underline"
-                  >
-                    {sender?.display_name ?? lead.sender_handle}
-                  </button>
-                  {isAgent && (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
-                      <Sparkles className="size-2.5" /> agent
-                    </span>
-                  )}
+                  <AgentHoverCard agentId={sender?.id ?? ""}>
+                    <button
+                      data-testid="message-sender"
+                      onClick={() => sender && onOpenProfile(sender.id)}
+                      disabled={!sender}
+                      className="font-semibold hover:underline disabled:no-underline"
+                    >
+                      {sender?.display_name ?? lead.sender_handle}
+                    </button>
+                  </AgentHoverCard>
+                  {isAgent && <AgentBadge />}
                   <span className="text-xs text-muted-foreground">
                     {fmtTime(lead.created_at)}
                   </span>
                 </div>
-                <div data-testid="message" className="group/msg relative break-words">
-                  {lead.body && (
-                    <Markdown personByHandle={personByHandle} onOpenProfile={onOpenProfile}>
-                      {lead.body}
-                    </Markdown>
-                  )}
-                  {(lead.attachments?.length ?? 0) > 0 && (
-                    <AttachmentList attachments={lead.attachments!} />
-                  )}
-                  <ThreadFooter
-                    m={lead}
+                <MessageBody
+                  m={lead}
+                  animate={isNew(lead.id)}
+                  personByHandle={personByHandle}
+                  onOpenProfile={onOpenProfile}
+                  replyCounts={replyCounts}
+                  unreadByRoot={unreadByRoot}
+                  onOpenThread={onOpenThread}
+                  onOpenTurn={onOpenTurn}
+                  anchoredTurns={turnsByMessage.get(lead.id) ?? []}
+                  personById={personById}
+                  onOpenLiveTurn={onOpenLiveTurn}
+                />
+                {rest.map((m) => (
+                  <MessageBody
+                    key={m.id}
+                    m={m}
+                    className="mt-1"
+                    animate={isNew(m.id)}
+                    personByHandle={personByHandle}
+                    onOpenProfile={onOpenProfile}
                     replyCounts={replyCounts}
                     unreadByRoot={unreadByRoot}
                     onOpenThread={onOpenThread}
+                    onOpenTurn={onOpenTurn}
+                    anchoredTurns={turnsByMessage.get(m.id) ?? []}
+                    personById={personById}
+                    onOpenLiveTurn={onOpenLiveTurn}
                   />
-                </div>
-                {rest.map((m) => (
-                  <div key={m.id} data-testid="message" className="group/msg relative mt-1 break-words">
-                    {m.body && (
-                      <Markdown personByHandle={personByHandle} onOpenProfile={onOpenProfile}>
-                        {m.body}
-                      </Markdown>
-                    )}
-                    {(m.attachments?.length ?? 0) > 0 && (
-                      <AttachmentList attachments={m.attachments!} />
-                    )}
-                    <ThreadFooter
-                      m={m}
-                      replyCounts={replyCounts}
-                      unreadByRoot={unreadByRoot}
-                      onOpenThread={onOpenThread}
-                    />
-                  </div>
                 ))}
               </div>
             </div>

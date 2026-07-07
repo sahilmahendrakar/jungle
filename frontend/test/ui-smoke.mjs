@@ -121,7 +121,7 @@ try {
         await activityBtn.click();
         await page.waitForTimeout(900);
         check("activity transcript opens", (await page.locator('[data-testid="activity-transcript"]').count()) > 0);
-        check("activity steering input present", (await page.locator('[data-testid="activity-steer-input"]').count()) > 0);
+        check("activity steering input present", (await page.locator('[data-testid="activity-panel-steer"]').count()) > 0);
         // If the agent has history, the typed sdkEvents parser should render turns (+ tool rows).
         await page.locator('[data-testid="activity-turn"]').first().waitFor({ timeout: 3000 }).catch(() => {});
         const turns = await page.locator('[data-testid="activity-turn"]').count();

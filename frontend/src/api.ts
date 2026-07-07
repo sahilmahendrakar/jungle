@@ -12,9 +12,24 @@ import type {
   Workspace,
   Membership,
   InviteInfo,
+  AgentIntegration,
+  Schedule,
+  Deliverable,
+  DeliverableKind,
+  SearchResult,
 } from "@jungle/shared";
+export {
+  INTEGRATION_TYPES,
+  getIntegrationType,
+  CONNECTION_TYPES,
+  getConnectionType,
+  connectionForIntegration,
+  extractDeliverableLinks,
+} from "@jungle/shared";
+export type { IntegrationType, ConnectionType } from "@jungle/shared";
 
-export type { Participant, Attachment, UnreadThread, AgentEvent, AgentStatus };
+export type { Participant, Attachment, UnreadThread, AgentEvent, AgentStatus, AgentIntegration };
+export type { Schedule, Deliverable, DeliverableKind, SearchResult };
 export type { Me, GoogleProfile, Workspace, Membership, InviteInfo };
 // A message as delivered to the client (attachments carry signed download urls).
 export type Message = WireMessage;
@@ -36,10 +51,34 @@ export const WS_BASE =
   env.VITE_WS_URL?.replace(/\/+$/, "") ??
   (apiUrl ? apiUrl.replace(/^http/, "ws") : `${secure ? "wss" : "ws"}://${host}:3001`);
 
-// Current Firebase ID token, set by the auth provider; attached to authed requests.
+// Last-known Firebase ID token, pushed in by the auth provider on onIdTokenChanged. This is a
+// snapshot that can go stale (tokens expire ~hourly; the callback can lag a backgrounded tab), so
+// it's only a fallback — authed requests prefer the token-getter below, which mints a fresh one.
 let authToken: string | null = null;
 export function setAuthToken(t: string | null) {
   authToken = t;
+}
+// Fresh-token getter registered by the auth provider (wraps Firebase's getIdToken, which returns
+// the cached token when valid and transparently refreshes it when expired). Authed requests await
+// this so the bearer is never stale — mirroring how the WS handshake already gets its token. Left
+// null in the dev/test path (no Firebase); then requests fall back to the cached snapshot / the
+// ?participantId= dev bypass.
+let tokenGetter: (() => Promise<string | null>) | null = null;
+export function setTokenGetter(fn: (() => Promise<string | null>) | null) {
+  tokenGetter = fn;
+}
+// Resolve the bearer to attach to an authed request: a freshly minted token when a getter is
+// registered, else the cached snapshot.
+async function bearerToken(): Promise<string | null> {
+  if (tokenGetter) {
+    try {
+      const t = await tokenGetter();
+      if (t) return t;
+    } catch {
+      /* fall back to the cached snapshot below */
+    }
+  }
+  return authToken;
 }
 // Dev/test identity (?as=<id>): when Firebase isn't configured there's no token, so
 // requester-gated endpoints authenticate via a participantId the backend trusts under
@@ -77,7 +116,10 @@ function buildUrl(path: string, devAuth: boolean): string {
 
 async function request<T>(path: string, opts: RequestOpts = {}): Promise<T> {
   const headers: Record<string, string> = { ...opts.headers };
-  if (opts.auth && authToken) headers.authorization = `Bearer ${authToken}`;
+  if (opts.auth) {
+    const token = await bearerToken();
+    if (token) headers.authorization = `Bearer ${token}`;
+  }
   if (activeWorkspaceId) headers["x-workspace-id"] = activeWorkspaceId;
   let body = opts.body;
   if (opts.json !== undefined) {
@@ -134,12 +176,13 @@ export function listParticipants(): Promise<Participant[]> {
   });
 }
 
-// Create a human participant, or (kind "agent", optional repo/model/mode) a cloud agent.
+// Create a human participant, or (kind "agent") an agent. An agent starts as a blank chat
+// agent unless `integrations` attaches one or more (e.g. [{key: "github", config: {repo}}]).
 export function createParticipant(p: {
   kind: "human" | "agent";
   handle: string;
   displayName: string;
-  repo?: string;
+  integrations?: Array<{ key: string; config: Record<string, unknown> }>;
   model?: string;
   mode?: string;
 }): Promise<Participant> {
@@ -149,7 +192,7 @@ export function createParticipant(p: {
       ? {
           handle: p.handle,
           displayName: p.displayName,
-          ...(p.repo ? { repo: p.repo } : {}),
+          ...(p.integrations?.length ? { integrations: p.integrations } : {}),
           ...(p.model ? { model: p.model } : {}),
           ...(p.mode ? { mode: p.mode } : {}),
         }
@@ -157,11 +200,99 @@ export function createParticipant(p: {
   return request<Participant>(path, { json, auth: true, devAuth: true, errorMessage: "create failed" });
 }
 
+// This agent's attached integrations (the settings panel's Integrations section).
+export function listAgentIntegrations(agentId: string): Promise<AgentIntegration[]> {
+  return request<AgentIntegration[]>(`/api/agents/${agentId}/integrations`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load integrations",
+  });
+}
+
+// Attach or reconfigure one integration on an agent (e.g. key "github", config {repo}).
+export function setAgentIntegration(
+  agentId: string,
+  key: string,
+  config: Record<string, unknown>,
+): Promise<AgentIntegration> {
+  return request<AgentIntegration>(`/api/agents/${agentId}/integrations/${key}`, {
+    method: "PUT",
+    json: { config },
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to add integration",
+  });
+}
+
+export function removeAgentIntegration(agentId: string, key: string): Promise<{ ok: boolean }> {
+  return request(`/api/agents/${agentId}/integrations/${key}`, {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to remove integration",
+  });
+}
+
+// --- Per-USER OAuth connections for connection-based integrations (Linear/Notion/Granola/Drive).
+// You connect your accounts once in Settings → Connections (like GitHub/Gmail); agents then attach
+// the integration and act with your connection. Separate from attaching the integration to an agent. ---
+
+export interface IntegrationConnectionStatus {
+  connected: boolean;
+  externalAccount?: string | null;
+}
+
+// Per-integration connection status for the current user, keyed by integration key.
+export type IntegrationStatuses = Record<string, IntegrationConnectionStatus>;
+
+// Begin connecting: returns the provider authorize URL for the SPA to navigate to. With
+// `popup: true` the callback returns a self-closing page instead of redirecting to /settings,
+// so the flow can run in window.open without losing SPA state (see lib/connections.tsx).
+export function integrationConnectUrl(key: string, opts?: { popup?: boolean }): Promise<{ url: string }> {
+  return request(`/api/integrations/${key}/connect-url`, {
+    method: "POST",
+    json: { popup: opts?.popup === true },
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to start connect",
+  });
+}
+
+export function getIntegrationStatuses(): Promise<IntegrationStatuses> {
+  return request<IntegrationStatuses>(`/api/integrations/status`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load integration connections",
+  });
+}
+
+export function disconnectIntegration(key: string): Promise<{ ok: boolean }> {
+  return request(`/api/integrations/${key}/connection`, {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to disconnect",
+  });
+}
+
+// The agent's long-term memory (its MEMORY.md mirror, reported by the runner after turns that
+// change it). Fetched on demand — it doesn't ride in participant payloads.
+export function getAgentMemory(
+  id: string,
+): Promise<{ memory: string | null; updatedAt: string | null }> {
+  return request(`/api/agents/${id}/memory`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load memory",
+  });
+}
+
 // Update an agent's editable config from its profile page. `mode` is applied live; for sdk
-// agents `model` is applied at the agent's next turn boundary.
+// agents `model` is applied at the agent's next turn boundary. `persona` (creator-written
+// role/personality) lands in the agent's system prompt at its next turn; empty string clears it.
 export function updateAgent(
   id: string,
-  patch: { displayName?: string; mode?: string; model?: string; effort?: string },
+  patch: { displayName?: string; mode?: string; model?: string; effort?: string; persona?: string },
 ): Promise<Participant> {
   return request<Participant>(`/api/agents/${id}`, {
     method: "PATCH",
@@ -216,8 +347,10 @@ export function interruptAgent(id: string): Promise<{ ok: boolean; error?: strin
 }
 
 // Ask an sdk agent to compact/summarize its session context. Runs when the agent is next
-// idle; the profile meter updates when the runner reports the post-compaction usage.
-export function compactAgent(id: string): Promise<{ ok: boolean; error?: string }> {
+// idle; the profile meter updates when the runner reports the post-compaction usage. If the
+// agent's machine was asleep, `waking: true` comes back — the request is queued and runs once
+// its runner reconnects.
+export function compactAgent(id: string): Promise<{ ok: boolean; waking?: boolean; error?: string }> {
   return request(`/api/agents/${id}/compact`, {
     method: "POST",
     auth: true,
@@ -329,6 +462,52 @@ export function confirmToolCall(confirmId: string, decision: "allow" | "deny"): 
   });
 }
 
+// A pending confirmation as listed by GET /api/confirmations (same payload as the WS card).
+export interface PendingConfirmation {
+  confirmId: string;
+  channelId: string;
+  agentId: string;
+  agentHandle: string;
+  agentName: string;
+  tool: string;
+  input: unknown;
+  createdAt: string;
+}
+
+// Every confirmation still awaiting my decision. Called on load/reconnect to rebuild the
+// approvals badge/inbox (the WS fan-out only reaches sockets open at request time).
+export function listPendingConfirms(): Promise<PendingConfirmation[]> {
+  return request<{ confirmations: PendingConfirmation[] }>(`/api/confirmations`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load approvals",
+  }).then((r) => r.confirmations);
+}
+
+// My deliverables feed (work artifacts agents shipped), newest first. Page backwards with
+// `before` = the smallest id already held.
+export function listDeliverables(opts: { before?: number; limit?: number } = {}): Promise<Deliverable[]> {
+  const qs = new URLSearchParams();
+  if (opts.before != null) qs.set("before", String(opts.before));
+  if (opts.limit != null) qs.set("limit", String(opts.limit));
+  const q = qs.toString();
+  return request<{ deliverables: Deliverable[] }>(`/api/deliverables${q ? `?${q}` : ""}`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load deliverables",
+  }).then((r) => r.deliverables);
+}
+
+// Full-text message search across my channels (the ⌘K palette).
+export function searchMessages(q: string, limit = 20): Promise<SearchResult[]> {
+  const qs = new URLSearchParams({ q, limit: String(limit) });
+  return request<{ results: SearchResult[] }>(`/api/search?${qs.toString()}`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "search failed",
+  }).then((r) => r.results);
+}
+
 // --- Channel members + delete ---
 
 export function listChannelMembers(channelId: string): Promise<Participant[]> {
@@ -364,6 +543,63 @@ export function deleteChannel(channelId: string): Promise<{ ok: boolean }> {
     auth: true,
     devAuth: true,
     errorMessage: "failed to delete channel",
+  });
+}
+
+// --- Schedules (scheduled agent turns) ---
+
+export interface ScheduleInput {
+  agentId: string;
+  channelId: string;
+  prompt: string;
+  cron?: string;
+  timezone?: string;
+  runAt?: string;
+}
+
+export function listSchedules(): Promise<Schedule[]> {
+  return request<{ schedules: Schedule[] }>(`/api/schedules`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load schedules",
+  }).then((r) => r.schedules);
+}
+
+export function createSchedule(body: ScheduleInput): Promise<Schedule> {
+  return request<Schedule>(`/api/schedules`, {
+    json: body,
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to create schedule",
+  });
+}
+
+export function updateSchedule(
+  id: string,
+  patch: {
+    prompt?: string;
+    cron?: string | null;
+    timezone?: string | null;
+    runAt?: string | null;
+    channelId?: string;
+    paused?: boolean;
+  },
+): Promise<Schedule> {
+  return request<Schedule>(`/api/schedules/${id}`, {
+    method: "PATCH",
+    json: patch,
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to update schedule",
+  });
+}
+
+export function deleteSchedule(id: string): Promise<{ ok: boolean }> {
+  return request(`/api/schedules/${id}`, {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to delete schedule",
   });
 }
 
@@ -445,9 +681,10 @@ export function revokeInvite(token: string): Promise<{ ok: boolean }> {
   });
 }
 
-export function githubConnectUrl(): Promise<{ url: string }> {
+export function githubConnectUrl(opts?: { popup?: boolean }): Promise<{ url: string }> {
   return request(`/api/github/connect-url`, {
     method: "POST",
+    json: { popup: opts?.popup === true },
     auth: true,
     errorMessage: "failed to start GitHub connect",
   });
@@ -477,6 +714,38 @@ export function getGithubStatus(): Promise<GithubStatus> {
   });
 }
 
+// --- Google (Gmail) connection: per-user OAuth, mirrors the GitHub connect flow above. Backs
+// the Gmail agent integration; surfaced in Settings → Connections. ---
+
+export function googleConnectUrl(opts?: { popup?: boolean }): Promise<{ url: string }> {
+  return request(`/api/google/connect-url`, {
+    method: "POST",
+    json: { popup: opts?.popup === true },
+    auth: true,
+    errorMessage: "failed to start Google connect",
+  });
+}
+
+export function disconnectGoogle(): Promise<{ ok: boolean }> {
+  return request(`/api/google/connection`, {
+    method: "DELETE",
+    auth: true,
+    errorMessage: "failed to disconnect Google",
+  });
+}
+
+export interface GoogleStatus {
+  connected: boolean;
+  email?: string;
+}
+
+export function getGoogleStatus(): Promise<GoogleStatus> {
+  return request<GoogleStatus>(`/api/google/status`, {
+    auth: true,
+    errorMessage: "failed to load Google status",
+  });
+}
+
 export interface Repo {
   full_name: string;
   private: boolean;
@@ -485,9 +754,10 @@ export interface Repo {
 
 // List the user's GitHub repos for the picker. A 409 (GitHub not connected) is returned as
 // { connected: false } rather than thrown, so the UI can fall back to manual entry.
-export function listGithubRepos(): Promise<{ connected: boolean; repos?: Repo[]; error?: string }> {
+export async function listGithubRepos(): Promise<{ connected: boolean; repos?: Repo[]; error?: string }> {
+  const token = await bearerToken();
   return fetch(`${BASE}/api/github/repos`, {
-    headers: authToken ? { authorization: `Bearer ${authToken}` } : {},
+    headers: token ? { authorization: `Bearer ${token}` } : {},
   }).then(async (r) => {
     const j = await r.json().catch(() => ({}));
     if (r.status === 409) return { connected: false, error: (j as { error?: string }).error };

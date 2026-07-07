@@ -57,6 +57,13 @@ alter table participants add column if not exists context_tokens     integer;
 alter table participants add column if not exists context_max_tokens integer;
 alter table participants add column if not exists context_updated_at timestamptz;
 
+-- Durable agent memory (mirror of the runner's /workspace/MEMORY.md, reported via the `memory`
+-- frame) + creator-written persona injected into the system prompt.
+-- See migrations/016_agent_memory_persona.sql.
+alter table participants add column if not exists memory             text;
+alter table participants add column if not exists memory_updated_at  timestamptz;
+alter table participants add column if not exists persona            text;
+
 -- Per-agent runner provider (gradual Docker -> Fly rollout). 'docker' keeps today's behavior;
 -- 'fly' routes provisioner calls to FlyProvisioner. runner_meta holds provider handles
 -- (Fly: {machineId, volumeId}); null for docker. See migrations/007_fly_provisioner.sql.
@@ -152,6 +159,8 @@ alter table messages add column if not exists thread_root_id uuid references mes
 alter table messages add column if not exists also_to_channel boolean not null default false;
 alter table messages add column if not exists reply_count int not null default 0;
 alter table messages add column if not exists last_reply_at timestamptz;
+-- Agent messages: the runner turn that produced this message (see migrations/017_message_turn.sql).
+alter table messages add column if not exists turn_id text;
 create index if not exists messages_channel_seq_idx on messages (channel_id, seq);
 create index if not exists messages_thread_idx on messages (thread_root_id, seq)
   where thread_root_id is not null;
@@ -226,3 +235,121 @@ create index if not exists attachments_orphan_idx on attachments (created_at)
 
 -- Inbox items carry the triggering message's attachment refs (jsonb); URLs signed at drain.
 alter table agent_inbox add column if not exists attachments jsonb;
+
+-- An agent is not necessarily a coding agent: it starts as a blank chat agent (no rows here)
+-- and can have zero or more integrations attached, each with its own config (github's config
+-- holds `repo`). Replaces participants.repo as the source of truth for what an agent can do.
+-- See migrations/010_agent_integrations.sql and backend/src/db/integrations.ts.
+create table if not exists agent_integrations (
+  agent_id        uuid not null references participants(id) on delete cascade,
+  integration_key text not null,
+  config          jsonb not null default '{}',
+  created_at      timestamptz not null default now(),
+  primary key (agent_id, integration_key)
+);
+
+-- A participant's connected Google account (Gmail OAuth, offline access). One per participant,
+-- mirroring github_identities. An agent's `gmail` integration references the connecting user by
+-- id and mints access tokens from this row at runtime (see migrations/013_google_identities.sql
+-- and backend/src/google.ts). MVP: plaintext on the box; encrypt at rest before real multi-tenant.
+create table if not exists google_identities (
+  participant_id    uuid primary key references participants(id) on delete cascade,
+  email             text not null,
+  access_token      text not null,
+  refresh_token     text,
+  access_expires_at timestamptz,
+  scopes            text,
+  created_at        timestamptz not null default now(),
+  updated_at        timestamptz not null default now()
+);
+
+-- Per-USER OAuth connections for the connection-based integrations (Linear/Notion/Granola via
+-- their remote MCP servers, Google Drive). You connect your accounts once in Settings (like
+-- github_identities / google_identities); an agent's integration references the connecting user by
+-- id (config.backingParticipantId), like the gmail integration. `extra` holds per-provider refresh
+-- material. mcp_oauth_clients stores the OAuth client registered (once, via DCR) per remote MCP
+-- provider. See migrations/014 + 015_integration_connections_per_user.sql and
+-- backend/src/db/connections.ts. MVP: plaintext; encrypt at rest before real multi-tenant.
+create table if not exists integration_connections (
+  participant_id    uuid not null references participants(id) on delete cascade,
+  integration_key   text not null,
+  external_account  text,
+  access_token      text not null,
+  refresh_token     text,
+  access_expires_at timestamptz,
+  scopes            text,
+  extra             jsonb not null default '{}'::jsonb,
+  created_at        timestamptz not null default now(),
+  updated_at        timestamptz not null default now(),
+  primary key (participant_id, integration_key)
+);
+
+create table if not exists mcp_oauth_clients (
+  provider_key      text primary key,
+  issuer            text not null,
+  client_id         text not null,
+  client_secret     text,
+  metadata          jsonb not null default '{}'::jsonb,
+  registered_at     timestamptz not null default now()
+);
+
+-- Per-dispatch context (cascade budget, trigger channel/thread, firing schedule id) rides on
+-- each inbox item; the agent's active context = its most recently consumed item's context.
+-- Replaces orchestrator.ts's in-memory sdkContext map (raced across queued dispatches, lost on
+-- restart). See migrations/011_inbox_context.sql.
+alter table agent_inbox add column if not exists context jsonb;
+create index if not exists agent_inbox_ctx_idx on agent_inbox (agent_id, delivered_at desc)
+  where context is not null;
+
+-- Schedules: standing instructions that fire agent turns on a cadence — recurring (cron +
+-- IANA timezone) or one-shot (run_at). The ticker advances next_run_at BEFORE dispatching
+-- (crash mid-fire = skipped fire, never a double-fire). channel_id is only dispatch context
+-- (confirm cards, default thread routing, notices) — output is not forced there.
+-- See migrations/012_schedules.sql and backend/src/services/scheduler.ts.
+create table if not exists schedules (
+  id            uuid primary key default gen_random_uuid(),
+  workspace_id  uuid not null references workspaces(id) on delete cascade,
+  agent_id      uuid not null references participants(id) on delete cascade,
+  channel_id    uuid not null references channels(id) on delete cascade,
+  created_by    uuid references participants(id) on delete set null,
+  prompt        text not null,
+  cron          text,           -- recurring: 5-field cron expression
+  timezone      text,           -- IANA tz the cron is evaluated in
+  run_at        timestamptz,    -- one-shot fire time
+  next_run_at   timestamptz,    -- null = will never fire again (completed one-shot)
+  paused_at     timestamptz,    -- non-null = paused (manually, or auto after repeated failures)
+  last_run_at   timestamptz,
+  last_status   text check (last_status in ('pending','success','failure')),
+  last_error    text,
+  failure_count int not null default 0,  -- consecutive failed turns; reset on success
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now(),
+  check ((cron is not null and timezone is not null and run_at is null)
+      or (cron is null and timezone is null and run_at is not null))
+);
+create index if not exists schedules_due_idx on schedules (next_run_at)
+  where next_run_at is not null and paused_at is null;
+create index if not exists schedules_ws_idx    on schedules (workspace_id);
+create index if not exists schedules_agent_idx on schedules (agent_id);
+
+-- Deliverables: durable work artifacts agents produce (PRs, docs, issues, …), extracted from the
+-- links in their messages at send time. The workspace's lasting "what got shipped" record.
+-- See migrations/018_deliverables.sql and backend/src/services/deliverables.ts.
+create table if not exists deliverables (
+  id           bigserial primary key,
+  workspace_id uuid not null references workspaces(id) on delete cascade,
+  agent_id     uuid not null references participants(id) on delete cascade,
+  channel_id   uuid not null references channels(id) on delete cascade,
+  message_id   uuid not null references messages(id) on delete cascade,
+  kind         text not null,   -- github_pr | github_issue | github | notion | google_doc | google_drive | linear | granola
+  title        text,
+  url          text not null,
+  created_at   timestamptz not null default now(),
+  unique (workspace_id, url)
+);
+create index if not exists deliverables_ws_idx on deliverables (workspace_id, id desc);
+create index if not exists deliverables_agent_idx on deliverables (agent_id, id desc);
+
+-- Full-text search over message bodies (see migrations/019_message_search.sql).
+create index if not exists messages_body_fts_idx
+  on messages using gin (to_tsvector('english', body));

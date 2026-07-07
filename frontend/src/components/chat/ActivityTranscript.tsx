@@ -1,0 +1,165 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { fetchAgentEvents, type AgentEvent, type Participant } from "../../api";
+import { Button } from "@/components/ui/button";
+import { Activity as ActivityIcon } from "lucide-react";
+import { groupTurns, mergeEvents } from "./activity/sdkEvents";
+import { TurnSection } from "./activity/Transcript";
+import { EmptyState } from "./panels";
+import { Skeleton } from "@/components/ui/skeleton";
+
+// The scrollable, paginated turn-by-turn transcript shared by the full-screen Activity dialog
+// (AgentActivity) and the inline "View activity" mode in an agent DM (DmActivityView) — same
+// data loading/scroll-pin/load-earlier behavior, just without a header or steer footer around it.
+export function ActivityTranscript({
+  agent,
+  events,
+  running,
+  focusTurnId,
+}: {
+  agent: Participant;
+  // Live-merged events for this agent, oldest-first, owned by the parent (buffered while open).
+  events: AgentEvent[];
+  running: boolean;
+  // Open scrolled to (and expanded on) this turn instead of pinned to the newest — the
+  // "view the work behind this message" entry point.
+  focusTurnId?: string | null;
+}) {
+  const isSdk = agent.runtime === "sdk";
+  const [history, setHistory] = useState<AgentEvent[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
+  const [err, setErr] = useState("");
+
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const pinnedRef = useRef(true); // is the user scrolled to the bottom?
+
+  // All events = history page(s) + live buffer, deduped and ordered.
+  const all = useMemo(() => mergeEvents(history, events), [history, events]);
+  const turns = useMemo(() => groupTurns(all), [all]);
+
+  // Initial load.
+  useEffect(() => {
+    if (!isSdk) {
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    fetchAgentEvents(agent.id, { limit: 200 })
+      .then((page) => {
+        if (cancelled) return;
+        setHistory(page.events);
+        setHasMore(page.events.length >= 200);
+      })
+      .catch((e) => !cancelled && setErr(String((e as Error).message ?? e)))
+      .finally(() => !cancelled && setLoading(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [agent.id, isSdk]);
+
+  const loadEarlier = useCallback(async () => {
+    if (loadingMore || !hasMore || all.length === 0) return;
+    setLoadingMore(true);
+    const vp = viewportRef.current;
+    const prevHeight = vp?.scrollHeight ?? 0;
+    try {
+      const smallest = all[0].id;
+      const page = await fetchAgentEvents(agent.id, { before: smallest, limit: 200 });
+      setHistory((h) => mergeEvents(page.events, h));
+      setHasMore(page.events.length >= 200);
+      // Preserve scroll position after prepending.
+      requestAnimationFrame(() => {
+        if (vp) vp.scrollTop = vp.scrollHeight - prevHeight;
+      });
+    } catch (e) {
+      setErr(String((e as Error).message ?? e));
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [agent.id, all, hasMore, loadingMore]);
+
+  // Track whether the user is pinned to the bottom.
+  const onScroll = useCallback(() => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    pinnedRef.current = vp.scrollHeight - vp.scrollTop - vp.clientHeight < 40;
+  }, []);
+
+  // Auto-scroll to bottom on new content, but only while pinned.
+  useEffect(() => {
+    const vp = viewportRef.current;
+    if (vp && pinnedRef.current) vp.scrollTop = vp.scrollHeight;
+  }, [all.length, loading]);
+
+  // Focused open: once loaded, scroll the focus turn into view (instead of the bottom pin).
+  const focusedRef = useRef(false);
+  useEffect(() => {
+    if (!focusTurnId || loading || focusedRef.current) return;
+    const el = viewportRef.current?.querySelector(`[data-turn-id="${focusTurnId}"]`);
+    if (!el) return; // may be beyond the first page — the user can "Load earlier"
+    focusedRef.current = true;
+    pinnedRef.current = false;
+    el.scrollIntoView({ block: "start" });
+  }, [focusTurnId, loading, turns.length]);
+
+  const empty = !loading && turns.length === 0;
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div
+        ref={viewportRef}
+        onScroll={onScroll}
+        data-testid="activity-transcript"
+        className="min-h-0 flex-1 overflow-y-auto px-4 py-3"
+      >
+        {!isSdk || empty ? (
+          <div className="flex h-full flex-col justify-center">
+            <EmptyState icon={<ActivityIcon className="size-6" />}>
+              Activity appears here when this agent starts working.
+            </EmptyState>
+          </div>
+        ) : (
+          <div className="space-y-2.5">
+            {hasMore && !loading && (
+              <div className="flex justify-center pb-1">
+                <Button
+                  data-testid="activity-load-earlier"
+                  variant="ghost"
+                  size="sm"
+                  onClick={loadEarlier}
+                  disabled={loadingMore}
+                  className="h-7 text-xs text-muted-foreground"
+                >
+                  {loadingMore ? "Loading…" : "Load earlier"}
+                </Button>
+              </div>
+            )}
+            {loading && (
+              <div className="space-y-2.5 py-1">
+                <Skeleton className="h-9 w-full" />
+                <Skeleton className="h-9 w-full" />
+                <Skeleton className="h-24 w-full" />
+              </div>
+            )}
+            {turns.map((t, i) => (
+              <TurnSection
+                key={t.turnId}
+                turn={t}
+                defaultOpen={i === turns.length - 1 || t.turnId === focusTurnId}
+                running={running && i === turns.length - 1}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {err && (
+        <div className="mx-4 mb-1 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive">
+          {err}
+        </div>
+      )}
+    </div>
+  );
+}

@@ -1,11 +1,12 @@
 import { useEffect, useRef, type Dispatch, type RefObject, type SetStateAction } from "react";
-import type { ServerEvent } from "@jungle/shared";
+import type { ServerEvent, TurnContext } from "@jungle/shared";
 import {
   WS_BASE,
   getMessages,
   listChannelMembers,
   type AgentEvent,
   type Channel,
+  type Deliverable,
   type Message,
   type Participant,
 } from "../api";
@@ -35,12 +36,29 @@ export function useChatSocket(opts: {
   setSelected: Dispatch<SetStateAction<string | null>>;
   setConfirms: Dispatch<SetStateAction<ToolConfirm[]>>;
   setActivityEvents: Dispatch<SetStateAction<AgentEvent[]>>;
+  setDeliverables: Dispatch<SetStateAction<Deliverable[]>>;
   setProfileId: Dispatch<SetStateAction<string | null>>;
   setNotice: Dispatch<SetStateAction<string>>;
   // App-level helpers the dispatch calls.
   markRead: (channelId: string) => void;
   refreshThreads: () => void;
   reloadChannels: (selectId?: string) => void;
+  // Every agent_turn/agent_event frame (all agents, not just the open Activity view) — feeds
+  // the ambient live-turn buffer behind the activity surfaces. `event` is null for
+  // context-only frames (agent_turn).
+  ingestLiveEvent: (
+    agentId: string,
+    turnId: string | null,
+    event: unknown,
+    context?: TurnContext | null,
+  ) => void;
+  // Desktop-notification decisions live in App (it knows channels, mentions, prefs); the
+  // dispatch just reports what happened.
+  onNotifiableMessage: (m: Message, isOpen: boolean) => void;
+  onConfirmRequested: (c: ToolConfirm) => void;
+  // Fired on every (re)connect, after the message backfill kicks off — used to re-sync state
+  // that only fans out live (pending confirmations).
+  onConnected?: () => void;
 }): RefObject<WebSocket | null> {
   const {
     participantId,
@@ -56,11 +74,16 @@ export function useChatSocket(opts: {
     setSelected,
     setConfirms,
     setActivityEvents,
+    setDeliverables,
     setProfileId,
     setNotice,
     markRead,
     refreshThreads,
     reloadChannels,
+    ingestLiveEvent,
+    onNotifiableMessage,
+    onConfirmRequested,
+    onConnected,
   } = opts;
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -88,6 +111,7 @@ export function useChatSocket(opts: {
           getMessages(ch).then((hist) =>
             setMessages((prev) => mergeById(prev, hist)),
           );
+        onConnected?.();
       };
       ws.onmessage = (e) => {
         // Typed against the shared ServerEvent union (same contract the backend emits), so each
@@ -132,6 +156,16 @@ export function useChatSocket(opts: {
           );
           return;
         }
+        if (evt.type === "agent_memory_changed") {
+          // Stamp the person so an open profile's Memory section refetches (content itself is
+          // pulled from GET /api/agents/:id/memory — it doesn't ride in the broadcast).
+          setPeople((ps) =>
+            ps.map((p) =>
+              p.id === evt.agentId ? { ...p, memory_changed_at: new Date().toISOString() } : p,
+            ),
+          );
+          return;
+        }
         if (evt.type === "participant_deleted") {
           // Resolve the deleted agent's handle so we can drop its DM channel (DMs are keyed
           // by the other member's handle via dm_with), then remove the participant itself.
@@ -150,8 +184,15 @@ export function useChatSocket(opts: {
           setProfileId((cur) => (cur === evt.participantId ? null : cur));
           return;
         }
+        if (evt.type === "agent_turn") {
+          // A turn began: record its home (channel/thread/message) in the live-turn buffer.
+          ingestLiveEvent(evt.agentId, evt.turnId, null, evt.context);
+          return;
+        }
         if (evt.type === "agent_event") {
-          // Only buffer live SDK stream messages while that agent's Activity view is open —
+          // Always feed the bounded live-turn buffer (ambient activity surfaces)…
+          ingestLiveEvent(evt.agentId, evt.turnId ?? null, evt.event, evt.context);
+          // …but only buffer the full stream while that agent's Activity view is open —
           // otherwise we'd grow memory for every agent forever. When closed, drop the frame;
           // the transcript backfills from the events API when reopened.
           if (evt.agentId !== activityIdRef.current) return;
@@ -167,31 +208,37 @@ export function useChatSocket(opts: {
           return;
         }
         if (evt.type === "tool_confirmation_request") {
+          const confirm: ToolConfirm = {
+            confirmId: evt.confirmId,
+            channelId: evt.channelId,
+            agentId: evt.agentId,
+            agentName: evt.agentName,
+            agentHandle: evt.agentHandle,
+            tool: evt.tool,
+            input: evt.input,
+            createdAt: new Date().toISOString(),
+          };
           setConfirms((cs) =>
-            cs.some((c) => c.confirmId === evt.confirmId)
-              ? cs
-              : [
-                  ...cs,
-                  {
-                    confirmId: evt.confirmId,
-                    channelId: evt.channelId,
-                    agentName: evt.agentName,
-                    agentHandle: evt.agentHandle,
-                    tool: evt.tool,
-                    input: evt.input,
-                  },
-                ],
+            cs.some((c) => c.confirmId === evt.confirmId) ? cs : [...cs, confirm],
           );
+          onConfirmRequested(confirm);
           return;
         }
         if (evt.type === "tool_confirmation_resolved") {
           setConfirms((cs) => cs.filter((c) => c.confirmId !== evt.confirmId));
           return;
         }
+        if (evt.type === "deliverable_created") {
+          const d = evt.deliverable;
+          setDeliverables((ds) => (ds.some((x) => x.id === d.id) ? ds : [d, ...ds]));
+          return;
+        }
         if (evt.type !== "message") return;
         const m: Message = evt.message;
         const isOpen = m.channel_id === selectedRef.current;
         const isMine = m.sender_id === participantId;
+        // Desktop-notification decision (DMs / mentions of me, tab not looking) lives in App.
+        if (!isMine) onNotifiableMessage(m, isOpen);
         // An incoming thread reply (not mine) may change my followed-threads-with-unread —
         // refresh the Threads badge/list regardless of which channel is open. (When the thread
         // is open, the reply also flows into `messages` below and the pane re-derives from it.)

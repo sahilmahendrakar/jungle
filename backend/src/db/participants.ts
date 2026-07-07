@@ -49,13 +49,17 @@ export async function createParticipant(p: {
 // updated row (null if the id isn't an agent). No-op patches just return the current row.
 export async function updateAgentConfig(
   id: string,
-  patch: { displayName?: string; mode?: string; model?: string; effort?: string },
+  patch: { displayName?: string; mode?: string; model?: string; effort?: string; persona?: string | null },
 ): Promise<Participant | null> {
   const sets: string[] = [];
   const vals: unknown[] = [];
   if (patch.displayName !== undefined) {
     vals.push(patch.displayName);
     sets.push(`display_name = $${vals.length}`);
+  }
+  if (patch.persona !== undefined) {
+    vals.push(patch.persona); // null clears the persona
+    sets.push(`persona = $${vals.length}`);
   }
   if (patch.mode !== undefined) {
     vals.push(patch.mode);
@@ -93,6 +97,28 @@ export async function updateAgentContextUsage(
       where id = $3 and kind = 'agent'`,
     [tokens, maxTokens, id],
   );
+}
+
+// Persist the MEMORY.md mirror an agent's runner reported (`memory` frame). Empty content means
+// the file is absent/empty — store null so "no memory yet" and "cleared" look the same.
+export async function updateAgentMemory(id: string, content: string): Promise<void> {
+  await pool.query(
+    `update participants set memory = $1, memory_updated_at = now()
+      where id = $2 and kind = 'agent'`,
+    [content || null, id],
+  );
+}
+
+// The agent's stored MEMORY.md mirror, for GET /api/agents/:id/memory (stripped from participant
+// list payloads by publicParticipant).
+export async function getAgentMemory(
+  id: string,
+): Promise<{ memory: string | null; memory_updated_at: string | null } | null> {
+  const { rows } = await pool.query<{ memory: string | null; memory_updated_at: string | null }>(
+    `select memory, memory_updated_at from participants where id = $1 and kind = 'agent'`,
+    [id],
+  );
+  return rows[0] ?? null;
 }
 
 // Every workspace membership for a Firebase Auth uid (one participant row per workspace joined),

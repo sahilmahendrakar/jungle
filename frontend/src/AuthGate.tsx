@@ -52,16 +52,22 @@ export function AuthGate() {
     setGhDismissed(true);
   };
 
-  // Handle the GitHub OAuth round-trip return (?github=connected|error), then clean the URL.
+  // Handle the OAuth round-trip returns (?github=… / ?google=… / ?integration=…), then clean the URL.
   useEffect(() => {
     const params = new URLSearchParams(location.search);
-    const g = params.get("github");
-    if (!g) return;
-    if (g === "connected") {
+    const gh = params.get("github");
+    const google = params.get("google");
+    const integration = params.get("integration");
+    if (!gh && !google && !integration) return;
+    if (gh === "connected") {
       if (user) localStorage.setItem(`jungle.gh.${user.uid}`, "1");
       refreshMe();
     }
-    for (const k of ["github", "login", "reason"]) params.delete(k);
+    // Google and per-user integration connections are read live by the settings status fetches;
+    // nothing to refresh here, just clean the return params off the URL.
+    for (const k of ["github", "login", "reason", "google", "email", "integration", "status"]) {
+      params.delete(k);
+    }
     const qs = params.toString();
     history.replaceState({}, "", location.pathname + (qs ? `?${qs}` : ""));
   }, [refreshMe, user]);
@@ -98,7 +104,11 @@ export function AuthGate() {
     memberships.find((m) => m.workspace.id === activeWsId) ?? memberships[0];
 
   if (path === "/settings") return <Settings />;
-  if (!membership.github.connected && !ghDismissed) return <GithubStep onSkip={dismissGithub} />;
+  if (!membership.github.connected && !ghDismissed && path !== "/scheduled")
+    return <GithubStep onSkip={dismissGithub} />;
+  // /scheduled renders inside <App> as a main-column view (sidebars intact), not a standalone
+  // page — App reads the path and swaps its main region. It still needs the API layer scoped to
+  // the active workspace, which the setActiveWorkspaceId below (before App renders) handles.
 
   // Set the active workspace on the API layer before App renders so its data loads (and WS
   // handshake) are scoped correctly. Keying App to the participant remounts it on a workspace

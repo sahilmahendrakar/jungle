@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   listChannels,
   markChannelRead,
@@ -10,14 +10,18 @@ import {
   removeChannelMember,
   deleteChannel,
   confirmToolCall,
+  listPendingConfirms,
+  listDeliverables,
   setDevParticipantId,
   getThread,
   markThreadRead,
   listUnreadThreads,
   type AgentEvent,
   type Channel,
+  type Deliverable,
   type Message,
   type Participant,
+  type SearchResult,
   type UnreadThread,
   type Membership,
 } from "./api";
@@ -26,13 +30,23 @@ import {
   newId,
   type ToolConfirm,
 } from "./lib/chat";
+import { notify, setAppBadge } from "./lib/notifications";
 import { SignIn } from "./SignIn";
 import { SettingsPanel } from "./Settings";
+import { Scheduled } from "./Scheduled";
+import { Approvals } from "./Approvals";
+import { DeliverablesView } from "./Deliverables";
+import { AgentsHome } from "./AgentsHome";
+import { SearchDialog } from "./SearchDialog";
+import { navigate, usePath } from "./route";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { AgentActivity } from "./AgentActivity";
+import { DmActivityView } from "./components/chat/DmActivityView";
+import { AgentActivityPanel } from "./components/chat/AgentActivityPanel";
+import { ChannelActivity } from "./components/chat/ChannelActivity";
+import { ChannelRoster } from "./components/chat/ChannelRoster";
+import { AgentCardProvider } from "./components/chat/AgentHoverCard";
 import {
-  WorkingDots,
   ResizeHandle,
   useMediaQuery,
   usePersistedWidth,
@@ -51,6 +65,7 @@ import { MembersDialog } from "./components/chat/MembersDialog";
 import { DeleteChannelDialog } from "./components/chat/DeleteChannelDialog";
 import { InviteDialog } from "./components/chat/InviteDialog";
 import { useChatSocket } from "./ws/useChatSocket";
+import { useLiveTurns, type LiveTurn } from "./ws/useLiveTurns";
 
 
 
@@ -89,6 +104,18 @@ export function App({
   const [showInvite, setShowInvite] = useState(false);
   // Pending tool-confirmation cards (always_ask agents), keyed by confirmId.
   const [confirms, setConfirms] = useState<ToolConfirm[]>([]);
+  // The deliverables feed (newest first): first page fetched on load, live rows appended via WS.
+  const [deliverables, setDeliverables] = useState<Deliverable[]>([]);
+  const [delivLoading, setDelivLoading] = useState(true);
+  const [delivHasMore, setDelivHasMore] = useState(false);
+  // ⌘K search palette.
+  const [searchOpen, setSearchOpen] = useState(false);
+  // Jump target from search / the deliverables feed: MessageList scrolls it into view with a
+  // flash once the message renders, then clears it via onJumpDone.
+  const [jumpToId, setJumpToId] = useState<string | null>(null);
+  // Bounded always-on buffer of each agent's current turn (ambient activity surfaces).
+  // liveVersion is a throttled re-render tick; the live-turn-derived useMemos below depend on it.
+  const { liveTurnsRef, liveVersion, ingestLiveEvent } = useLiveTurns();
 
   // Threads. The right-side panel is open when a thread is open (threadRootId) or the Threads
   // list is showing (threadsListOpen). Replies + the root are DERIVED from `messages` (the
@@ -108,6 +135,8 @@ export function App({
   const [members, setMembers] = useState<Participant[]>([]);
   const [showMembers, setShowMembers] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  // Channel agent roster (right-panel view; the header 🤖 button toggles it).
+  const [rosterOpen, setRosterOpen] = useState(false);
   // Collapsible sidebar (persisted, desktop) + profile dialog (participant id being viewed)
   const [sidebarOpen, setSidebarOpen] = useState(
     () => localStorage.getItem("jungle.sidebar") !== "closed",
@@ -124,15 +153,48 @@ export function App({
   const left = usePersistedWidth(LEFT_WIDTH);
   const right = usePersistedWidth(RIGHT_WIDTH);
   const [resizing, setResizing] = useState(false);
+  // The Scheduled view is URL-routed (/scheduled) so it stays deep-linkable, but renders inside
+  // this layout (sidebars intact) as a main-column view rather than a standalone page. Only in
+  // Firebase mode (workspaceId set): the page is workspace-scoped and uses the auth context.
+  const path = usePath();
+  const scheduledOpen = path === "/scheduled" && !!workspaceId;
+  // The other main-column views (deep-linkable like Scheduled, but not workspace-gated — they
+  // work in dev mode too).
+  const approvalsOpen = path === "/approvals";
+  const deliverablesOpen = path === "/deliverables";
+  const agentsOpen = path === "/agents";
+  const overlayViewOpen = scheduledOpen || approvalsOpen || deliverablesOpen || agentsOpen;
+  // Reading "am I on an overlay view" from long-lived callbacks without re-binding them.
+  const overlayViewRef = useRef(false);
+  overlayViewRef.current = overlayViewOpen;
+  // Leave any overlay view and land back in the chat column.
+  const goToChat = useCallback(() => {
+    if (overlayViewRef.current) navigate("/");
+  }, []);
   // Activity view: the sdk agent whose transcript is open, plus a live event buffer for it.
   // We only buffer while a view is open (activityIdRef gates the WS handler), so idle agents
-  // don't accumulate unbounded memory.
+  // don't accumulate unbounded memory. `activityMode` picks how it's rendered: "modal" for the
+  // full-screen dialog (opened from the profile panel), "inline" for the DM header's
+  // "View activity" toggle, which swaps the DM's message list for the same transcript in place.
   const [activityId, setActivityId] = useState<string | null>(null);
+  // "panel": the right-panel activity+steer view (the primary surface). "inline": the DM header's
+  // "View activity" toggle (swaps the DM message list). No modal — activity lives in the sidebar.
+  const [activityMode, setActivityMode] = useState<"panel" | "inline">("panel");
   const [activityEvents, setActivityEvents] = useState<AgentEvent[]>([]);
+  // When set, the activity view opens scrolled to this turn ("view the work behind this").
+  const [activityFocusTurn, setActivityFocusTurn] = useState<string | null>(null);
+  // Whether the activity panel was opened from the channel roster — drives the ← back arrow.
+  const [activityFromRoster, setActivityFromRoster] = useState(false);
   const activityIdRef = useRef<string | null>(null);
   activityIdRef.current = activityId;
+  const activityModeRef = useRef<"panel" | "inline">("panel");
+  activityModeRef.current = activityMode;
   const selectedRef = useRef<string | null>(null);
   selectedRef.current = selected;
+  // Live channel list for the WS notification decision (is this a DM? what's it called?)
+  // without re-binding the socket handlers.
+  const channelsRef = useRef<Channel[]>([]);
+  channelsRef.current = channels;
   // Whether this tab is focused/visible — a message for the open channel only auto-marks-read
   // when the user is actually looking at it (Slack behaviour). Tracked via a ref so the WS
   // handler reads a live value without re-subscribing.
@@ -167,6 +229,36 @@ export function App({
   // Reload my followed-threads-with-unread list (drives the Threads nav badge + list view).
   function refreshThreads() {
     listUnreadThreads().then(setUnreadThreads).catch(() => {});
+  }
+
+  // Rebuild pending approvals from the backend (load + every WS reconnect — a confirm that
+  // arrived while disconnected never fanned out to this socket).
+  const refreshConfirms = useCallback(() => {
+    listPendingConfirms()
+      .then((rows) => setConfirms(rows.map((r) => ({ ...r }))))
+      .catch(() => {});
+  }, []);
+
+  // First page of the deliverables feed; older pages via loadMoreDeliverables.
+  function reloadDeliverables() {
+    setDelivLoading(true);
+    listDeliverables({ limit: 50 })
+      .then((ds) => {
+        setDeliverables(ds);
+        setDelivHasMore(ds.length >= 50);
+      })
+      .catch(() => {})
+      .finally(() => setDelivLoading(false));
+  }
+  async function loadMoreDeliverables() {
+    if (!deliverables.length) return;
+    const before = deliverables[deliverables.length - 1].id;
+    const page = await listDeliverables({ before, limit: 50 }).catch(() => [] as Deliverable[]);
+    setDeliverables((ds) => {
+      const seen = new Set(ds.map((d) => d.id));
+      return [...ds, ...page.filter((d) => !seen.has(d.id))];
+    });
+    setDelivHasMore(page.length >= 50);
   }
 
   function refreshMembers() {
@@ -215,12 +307,15 @@ export function App({
     }
   }
 
-  // Channels this participant belongs to + everyone (for the member picker).
+  // Channels this participant belongs to + everyone (for the member picker), plus the pending
+  // approvals and the deliverables feed's first page.
   useEffect(() => {
     if (!participantId) return;
     reloadChannels();
     listParticipants().then(setPeople).catch(() => {});
     refreshThreads();
+    refreshConfirms();
+    reloadDeliverables();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [participantId]);
 
@@ -235,6 +330,9 @@ export function App({
       setThreadRootId(null);
       setThreadsListOpen(false);
     }
+    // Leaving the DM whose activity was open inline closes that view too — it's specific to
+    // that conversation, not a standing app mode.
+    if (activityModeRef.current === "inline") setActivityId(null);
     if (!selected) return;
     getMessages(selected).then(setMessages);
     markRead(selected);
@@ -284,6 +382,63 @@ export function App({
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // ⌘K / Ctrl+K: the search palette.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setSearchOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // Tab badge: everything that's directly for me — DM unreads, mention-flagged channel unreads,
+  // unread thread replies, and approvals waiting on a decision.
+  useEffect(() => {
+    const direct = channels.reduce(
+      (n, c) =>
+        n + (c.kind === "dm" || c.has_mention ? c.unread_count ?? 0 : 0),
+      0,
+    );
+    const threadUnread = unreadThreads.reduce((n, t) => n + t.unread_count, 0);
+    setAppBadge(direct + threadUnread + confirms.length);
+  }, [channels, unreadThreads, confirms.length]);
+
+  // Desktop ping for an incoming message: DMs and mentions of me, when I'm not looking at that
+  // conversation. Clicking focuses the tab and opens it. (lib/notifications gates on permission,
+  // the user's preference, and tab focus.)
+  const onNotifiableMessage = useCallback(
+    (m: Message, isOpen: boolean) => {
+      if (isOpen && focusedRef.current) return;
+      const ch = channelsRef.current.find((c) => c.id === m.channel_id);
+      const isDm = ch?.kind === "dm";
+      const mentionsMe = (m.mentions ?? []).some((x) => x.id === participantId);
+      if (!isDm && !mentionsMe) return;
+      notify({
+        title: isDm ? `@${m.sender_handle}` : `@${m.sender_handle} in #${ch?.name ?? "channel"}`,
+        body: m.body || "Sent an attachment",
+        tag: m.channel_id, // one notification per conversation, newest wins
+        onClick: () => {
+          goToChat();
+          setSelected(m.channel_id);
+        },
+      });
+    },
+    [participantId, goToChat],
+  );
+
+  // Desktop ping for a tool confirmation: an agent is blocked until someone decides.
+  const onConfirmRequested = useCallback((c: ToolConfirm) => {
+    notify({
+      title: "Approval needed",
+      body: `${c.agentName} wants to run ${c.tool}`,
+      tag: c.confirmId,
+      onClick: () => navigate("/approvals"),
+    });
+  }, []);
+
   // One auto-reconnecting WebSocket owning the ServerEvent dispatch (see useChatSocket). Returns
   // the socket ref for posting frames (messages, thread replies, steering).
   const wsRef = useChatSocket({
@@ -300,11 +455,16 @@ export function App({
     setSelected,
     setConfirms,
     setActivityEvents,
+    setDeliverables,
     setProfileId,
     setNotice,
     markRead,
     refreshThreads,
     reloadChannels,
+    ingestLiveEvent,
+    onNotifiableMessage,
+    onConfirmRequested,
+    onConnected: refreshConfirms,
   });
 
   // Post the composer's message over WS. No optimistic echo — the message appears when it
@@ -344,6 +504,8 @@ export function App({
     setProfileId(null);
     setSettingsPanelOpen(false);
     setThreadsListOpen(false);
+    setRosterOpen(false);
+    setActivityId(null);
     setThreadRootId(rootId);
     markThreadRead(rootId)
       .then(() => refreshThreads())
@@ -372,6 +534,8 @@ export function App({
     setSettingsPanelOpen(false);
     setThreadRootId(null);
     setThreadsListOpen(false);
+    setRosterOpen(false);
+    setActivityId(null);
     setDrawerOpen(false);
   }
   function openSettingsPanel() {
@@ -379,6 +543,22 @@ export function App({
     setProfileId(null);
     setThreadRootId(null);
     setThreadsListOpen(false);
+    setRosterOpen(false);
+    setActivityId(null);
+    setDrawerOpen(false);
+  }
+  // Toggle the channel agent roster in the right panel (header 🤖 button).
+  function toggleRoster() {
+    if (rosterOpen) {
+      setRosterOpen(false);
+      return;
+    }
+    setRosterOpen(true);
+    setProfileId(null);
+    setSettingsPanelOpen(false);
+    setThreadRootId(null);
+    setThreadsListOpen(false);
+    setActivityId(null);
     setDrawerOpen(false);
   }
   // Open the Threads list in the right panel (takes over from a profile/settings/open-thread view).
@@ -387,6 +567,8 @@ export function App({
     setSettingsPanelOpen(false);
     setThreadRootId(null);
     setThreadsListOpen(true);
+    setRosterOpen(false);
+    setActivityId(null);
     refreshThreads();
     setDrawerOpen(false);
   }
@@ -438,20 +620,98 @@ export function App({
     }
   }
 
-  // Open an sdk agent's Activity view. Reset the live buffer so it only holds frames that
-  // arrive while this view is open (history is fetched inside AgentActivity).
-  function openActivity(agentId: string) {
+  // Open an sdk agent's Activity+steer view in the RIGHT PANEL (from a hover card, the roster,
+  // the profile panel, the agents overview, or a message's "view work"). Takes over the panel
+  // from any other view. Reset the live buffer so it only holds frames that arrive while open
+  // (history is fetched inside the transcript). `fromRoster` shows a ← back-to-roster arrow.
+  function openActivity(
+    agentId: string,
+    focusTurnId: string | null = null,
+    fromRoster = false,
+  ) {
     setActivityEvents([]);
+    setActivityMode("panel");
+    setActivityFocusTurn(focusTurnId);
+    setActivityFromRoster(fromRoster);
+    setActivityId(agentId);
+    // Take over the right panel.
+    setProfileId(null);
+    setSettingsPanelOpen(false);
+    setThreadRootId(null);
+    setThreadsListOpen(false);
+    setRosterOpen(false);
+    setDrawerOpen(false);
+  }
+  // Close the activity panel entirely (the X).
+  function closeActivityPanel() {
+    setActivityId(null);
+    setActivityEvents([]);
+    setActivityFocusTurn(null);
+    setActivityFromRoster(false);
+  }
+  // The ← back arrow (shown only when opened from the roster): return to the roster list.
+  function backToRoster() {
+    closeActivityPanel();
+    setRosterOpen(true);
+  }
+
+  // "View the work behind this message": open the sender agent's Activity focused on the turn
+  // that produced it.
+  function openTurnForMessage(m: Message) {
+    const sender = people.find((p) => p.handle === m.sender_handle);
+    if (!sender || !m.turn_id) return;
+    openActivity(sender.id, m.turn_id);
+  }
+
+  // Open a live turn (a trigger-message chip / roster row) in the Activity view, focused on it.
+  function openLiveTurn(turn: LiveTurn) {
+    openActivity(turn.agentId, turn.turnId);
+  }
+
+  // Jump to a message (search hit / deliverable): land in its channel, open its thread if it
+  // was a pure thread reply, and let MessageList scroll + flash it once rendered.
+  function jumpToMessage(channelId: string, messageId: string, threadRootId?: string | null) {
+    goToChat();
+    if (channelId !== selectedRef.current) setSelected(channelId);
+    if (threadRootId) {
+      // A pure thread reply doesn't render in the timeline — open its thread instead. Seed the
+      // messages so the pane isn't blank while the channel history loads.
+      getThread(channelId, threadRootId)
+        .then((msgs) => setMessages((prev) => mergeById(prev, msgs)))
+        .catch(() => {});
+      openThread(threadRootId, channelId);
+    } else {
+      setJumpToId(messageId);
+    }
+    setDrawerOpen(false);
+  }
+
+  function jumpToSearchResult(r: SearchResult) {
+    jumpToMessage(r.channel_id, r.message_id, r.thread_root_id);
+  }
+
+  // The DM header's "View activity"/"View chat" toggle: swaps the message list for the same
+  // live transcript, in place, instead of a dialog. Toggling off just clears activityId, same
+  // as closing the modal.
+  function toggleInlineActivity(agentId: string) {
+    if (activityId === agentId && activityMode === "inline") {
+      setActivityId(null);
+      return;
+    }
+    setActivityEvents([]);
+    setActivityMode("inline");
     setActivityId(agentId);
   }
 
-  // "Steer" an agent from the Activity footer: open/find the DM and post a normal message,
-  // which flows through the inbox to the agent's next turn (same path as the composer).
+  // "Steer" an agent from the Activity panel footer: open/find the DM and post a normal message,
+  // which flows through the inbox to the agent's next turn (same path as the composer). Quiet by
+  // design — the DM shows up in the sidebar but selection stays put, so you keep watching the
+  // transcript in the panel instead of being yanked into the DM (the whole point of steering
+  // from the sidebar).
   async function steerAgent(agent: Participant, body: string) {
     if (!participantId) return;
     const { id } = await createDm(participantId, agent.id);
-    // Ensure the DM shows in the sidebar; select it so the reply lands in view.
-    reloadChannels(id);
+    reloadChannels(); // surface the DM in the sidebar WITHOUT stealing the current selection
     const trySend = (attempt = 0) => {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(
@@ -542,10 +802,42 @@ export function App({
     .filter((m) => m.kind === "agent")
     .map((m) => peopleById.get(m.id) ?? m)
     .filter((m) => m.status === "working" || m.status === "waking");
+  // This channel's agent members (roster panel + header 🤖 count), status-refreshed from `people`.
+  const channelAgents = members
+    .filter((m) => m.kind === "agent")
+    .map((m) => peopleById.get(m.id) ?? m);
+
+  // Live-turn-derived views (recompute on liveVersion, which throttles the event stream):
+  //   - turnsByMessage: running/just-finished turns anchored to a message in the OPEN channel
+  //     (the trigger-message chips), keyed by the triggering message id.
+  //   - workingChannelIds: channels with a turn currently running (sidebar dot + header pulse).
+  const { turnsByMessage, workingChannelIds } = useMemo(() => {
+    const byMessage = new Map<string, LiveTurn[]>();
+    const working = new Set<string>();
+    for (const turn of liveTurnsRef.current.values()) {
+      const ctx = turn.context;
+      if (!turn.done && ctx?.channelId) working.add(ctx.channelId);
+      // Anchor a chip only in the channel the turn belongs to, and only on a message we hold.
+      if (ctx?.channelId === selected && ctx.messageId) {
+        const arr = byMessage.get(ctx.messageId) ?? [];
+        arr.push(turn);
+        byMessage.set(ctx.messageId, arr);
+      }
+    }
+    return { turnsByMessage: byMessage, workingChannelIds: working };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveVersion, selected]);
+  const channelAgentsActive = channelAgents.some((a) => a.status === "working");
   const profilePerson = profileId
     ? people.find((p) => p.id === profileId) ?? (me?.id === profileId ? me : undefined)
     : undefined;
   const activityAgent = activityId ? people.find((p) => p.id === activityId) : undefined;
+  // The other side of the open DM, when it's an sdk agent — drives the header's activity toggle.
+  const dmAgent =
+    sel?.kind === "dm" ? personByHandle(sel.dm_with) : undefined;
+  const dmAgentIsSdk = dmAgent?.kind === "agent" && dmAgent?.runtime === "sdk" ? dmAgent : undefined;
+  const inlineActivityOpen =
+    activityMode === "inline" && !!dmAgentIsSdk && activityId === dmAgentIsSdk.id;
 
   const headerTitle = sel
     ? sel.kind === "dm"
@@ -562,24 +854,54 @@ export function App({
     setThreadsListOpen(false);
   };
 
-  // The right panel hosts one of three views at a time. Profile/settings win over the threads
-  // pane (opening either already cleared the others via the openers above).
-  const rightMode: "profile" | "settings" | "threads" | null = profilePerson
-    ? "profile"
-    : settingsPanelOpen
-      ? "settings"
-      : threadPanelOpen
-        ? "threads"
-        : null;
+  // Activity+steer as a right-panel view (the primary Activity surface — no modal). Gated on an
+  // sdk agent target and panel mode (the DM inline toggle uses "inline", handled separately).
+  const activityPanelAgent =
+    activityMode === "panel" && activityAgent?.runtime === "sdk" ? activityAgent : undefined;
+
+  // The right panel hosts one view at a time. Precedence: activity/profile/settings (explicit
+  // opens) win over threads/roster; each opener already cleared the others.
+  const rightMode: "activity" | "profile" | "settings" | "threads" | "roster" | null =
+    activityPanelAgent
+      ? "activity"
+      : profilePerson
+        ? "profile"
+        : settingsPanelOpen
+          ? "settings"
+          : threadPanelOpen
+            ? "threads"
+            : rosterOpen && sel?.kind !== "dm"
+              ? "roster"
+              : null;
   const rightOpen = rightMode !== null;
   const closeRightPanel = () => {
     setProfileId(null);
     setSettingsPanelOpen(false);
     setThreadRootId(null);
     setThreadsListOpen(false);
+    setRosterOpen(false);
+    closeActivityPanel();
+  };
+
+  // The agent hover-card context: any @mention / sender / roster entry renders a card knowing
+  // only an agent id. `version` (liveVersion) makes open cards recompute their live "now" line.
+  const agentCardValue = {
+    getAgent: (id: string) => peopleById.get(id),
+    getLiveTurn: (id: string) => liveTurnsRef.current.get(id),
+    onMessage: (id: string) => {
+      goToChat();
+      openDm(id);
+    },
+    onOpenActivity: (id: string) => openActivity(id),
+    onOpenProfile: (id: string) => {
+      goToChat();
+      openProfilePanel(id);
+    },
+    version: liveVersion,
   };
 
   return (
+    <AgentCardProvider value={agentCardValue}>
     <div className="relative flex h-screen-dvh w-full overflow-hidden bg-background text-foreground">
       {/* Mobile backdrop: tapping it closes the off-canvas drawer. Desktop (md+) never shows it. */}
       {drawerOpen && (
@@ -606,17 +928,46 @@ export function App({
         leftWidth={left.width}
         personByHandle={personByHandle}
         dmChannelWith={dmChannelWith}
-        onSelectChannel={selectAndClose}
-        onOpenDm={openDm}
-        onOpenThreads={openThreadsList}
+        onSelectChannel={(id) => {
+          goToChat();
+          selectAndClose(id);
+        }}
+        onOpenDm={(id) => {
+          goToChat();
+          openDm(id);
+        }}
+        onOpenThreads={() => {
+          goToChat();
+          openThreadsList();
+        }}
+        onOpenScheduled={() => navigate("/scheduled")}
+        scheduledActive={scheduledOpen}
+        onOpenAgents={() => navigate("/agents")}
+        agentsActive={agentsOpen}
+        onOpenApprovals={() => navigate("/approvals")}
+        approvalsActive={approvalsOpen}
+        approvalsCount={confirms.length}
+        onOpenDeliverables={() => navigate("/deliverables")}
+        deliverablesActive={deliverablesOpen}
+        onOpenSearch={() => {
+          setSearchOpen(true);
+          setDrawerOpen(false);
+        }}
+        workingChannelIds={workingChannelIds}
         onNewChannel={() => setShowNew(true)}
         onAddAgent={() => setShowAddAgent(true)}
         onCollapse={() => {
           setSidebarOpen(false); // desktop: collapse
           setDrawerOpen(false); // mobile: close the off-canvas drawer
         }}
-        onOpenProfile={openProfilePanel}
-        onOpenSettings={openSettingsPanel}
+        onOpenProfile={(id) => {
+          goToChat();
+          openProfilePanel(id);
+        }}
+        onOpenSettings={() => {
+          goToChat();
+          openSettingsPanel();
+        }}
         onSignOut={signOut}
         workspaceId={workspaceId}
         memberships={memberships}
@@ -642,6 +993,60 @@ export function App({
       )}
 
       {/* ---------- Main ---------- */}
+      {scheduledOpen ? (
+        <Scheduled
+          workspaceId={workspaceId!}
+          sidebarOpen={sidebarOpen}
+          onOpenDrawer={() => setDrawerOpen(true)}
+          onExpandSidebar={() => setSidebarOpen(true)}
+        />
+      ) : approvalsOpen ? (
+        <Approvals
+          confirms={confirms}
+          channels={channels}
+          sidebarOpen={sidebarOpen}
+          onOpenDrawer={() => setDrawerOpen(true)}
+          onExpandSidebar={() => setSidebarOpen(true)}
+          onDecide={decideConfirm}
+          onJumpToChannel={(channelId) => {
+            goToChat();
+            selectAndClose(channelId);
+          }}
+        />
+      ) : deliverablesOpen ? (
+        <DeliverablesView
+          deliverables={deliverables}
+          loading={delivLoading}
+          hasMore={delivHasMore}
+          onLoadMore={loadMoreDeliverables}
+          sidebarOpen={sidebarOpen}
+          onOpenDrawer={() => setDrawerOpen(true)}
+          onExpandSidebar={() => setSidebarOpen(true)}
+          onJumpToMessage={(channelId, messageId) => jumpToMessage(channelId, messageId)}
+        />
+      ) : agentsOpen || !sel ? (
+        // Mission control — also the landing view when no conversation is open.
+        <AgentsHome
+          agents={others.filter((p) => p.kind === "agent")}
+          liveTurns={liveTurnsRef.current}
+          confirms={confirms}
+          deliverables={deliverables}
+          sidebarOpen={sidebarOpen}
+          onOpenDrawer={() => setDrawerOpen(true)}
+          onExpandSidebar={() => setSidebarOpen(true)}
+          onOpenDm={(id) => {
+            goToChat();
+            openDm(id);
+          }}
+          onOpenActivity={openActivity}
+          onOpenProfile={(id) => {
+            goToChat();
+            openProfilePanel(id);
+          }}
+          onOpenApprovals={() => navigate("/approvals")}
+          onAddAgent={() => setShowAddAgent(true)}
+        />
+      ) : (
       <main className="flex min-w-0 flex-1 flex-col bg-background">
         {/* Channel header */}
         <ChannelHeader
@@ -649,42 +1054,56 @@ export function App({
           headerTitle={headerTitle}
           sidebarOpen={sidebarOpen}
           memberCount={members.length}
+          agentCount={channelAgents.length}
+          agentsActive={channelAgentsActive}
+          rosterOpen={rosterOpen && sel?.kind !== "dm"}
           personByHandle={personByHandle}
+          dmAgent={dmAgentIsSdk}
+          activityOpen={inlineActivityOpen}
           onOpenDrawer={() => setDrawerOpen(true)}
           onExpandSidebar={() => setSidebarOpen(true)}
           onOpenProfile={openProfilePanel}
           onOpenMembers={() => setShowMembers(true)}
+          onOpenRoster={toggleRoster}
           onDeleteChannel={() => setShowDeleteConfirm(true)}
+          onToggleActivity={() => dmAgentIsSdk && toggleInlineActivity(dmAgentIsSdk.id)}
         />
 
-        {/* Messages */}
-        <MessageList
-          grouped={grouped}
-          hasChannel={!!sel}
-          channelId={selected}
-          headerTitle={headerTitle}
-          personByHandle={personByHandle}
-          onOpenProfile={openProfilePanel}
-          replyCounts={replyCounts}
-          unreadByRoot={unreadByRoot}
-          onOpenThread={openThread}
-        />
+        {/* Messages, or — in an agent DM with "View activity" toggled on — that agent's live
+            transcript in place of the message list. */}
+        {inlineActivityOpen && dmAgentIsSdk ? (
+          <DmActivityView agent={dmAgentIsSdk} events={activityEvents} />
+        ) : (
+          <MessageList
+            grouped={grouped}
+            hasChannel={!!sel}
+            channelId={selected}
+            headerTitle={headerTitle}
+            personByHandle={personByHandle}
+            onOpenProfile={openProfilePanel}
+            replyCounts={replyCounts}
+            unreadByRoot={unreadByRoot}
+            onOpenThread={openThread}
+            onOpenTurn={openTurnForMessage}
+            turnsByMessage={turnsByMessage}
+            personById={(id) => peopleById.get(id)}
+            onOpenLiveTurn={openLiveTurn}
+            jumpToId={jumpToId}
+            onJumpDone={() => setJumpToId(null)}
+          />
+        )}
 
-        {/* Working / waking indicator (conditionally rendered: absent when everyone's idle) */}
-        {busyMembers.length > 0 && (
-          <div
-            data-testid="working-indicator"
-            className="flex items-center gap-2 px-3 py-1.5 text-sm text-muted-foreground md:px-5"
-          >
-            <WorkingDots />
-            <span>
-              <span className="font-medium text-foreground">
-                {busyMembers.map((m) => `@${m.handle}`).join(", ")}
-              </span>{" "}
-              {busyMembers.length > 1 ? "are" : "is"}{" "}
-              {busyMembers.every((m) => m.status === "waking") ? "waking up…" : "working…"}
-            </span>
-          </div>
+        {/* Ambient agent activity — DMs only (a DM is single-threaded, so the strip above the
+            composer is its natural home). Channels anchor live work under the triggering message
+            via the trigger-message chips instead, so an agent working on something you asked in a
+            DIFFERENT channel never shows up here. Hidden while the inline activity view is open. */}
+        {sel?.kind === "dm" && selected && !inlineActivityOpen && (
+          <ChannelActivity
+            channelId={selected}
+            busyAgents={busyMembers}
+            liveTurns={liveTurnsRef.current}
+            onOpenActivity={openActivity}
+          />
         )}
 
         {/* Pending tool confirmations for this channel (always_ask agents) */}
@@ -719,13 +1138,14 @@ export function App({
           onNotice={setNotice}
         />
       </main>
+      )}
 
       {/* ---------- Right panel (contextual sidebar) ----------
           Desktop (md+): in-flow, drag-resizable third column. Mobile: fixed right overlay.
           Hosts one of three views at a time — a participant profile, self settings, or the
           Threads pane (its own list / open-thread sub-modes). */}
       {/* Right panel resize divider (desktop only; sits between main and the panel). */}
-      {rightOpen && isDesktop && (
+      {rightOpen && !scheduledOpen && isDesktop && (
         <ResizeHandle
           edge="right"
           testId="right-panel-resize"
@@ -740,16 +1160,34 @@ export function App({
         />
       )}
 
-      {rightOpen && (
+      {rightOpen && !scheduledOpen && (
         <aside
           data-testid="right-panel"
           style={isDesktop ? { width: right.width } : undefined}
           className={cn(
             "fixed inset-y-0 right-0 z-40 flex w-full max-w-[440px] flex-col border-l bg-background shadow-xl",
-            "md:relative md:z-auto md:shadow-none",
+            // The 440px cap is for the mobile fixed overlay only — on desktop the panel's width is
+            // fully driven by the resize handle (RIGHT_WIDTH.max is 620), so cancel the cap there
+            // or dragging past 440px silently does nothing.
+            "md:relative md:z-auto md:max-w-none md:shadow-none",
             !resizing && "md:transition-[width] md:duration-200 md:ease-in-out",
           )}
         >
+          {/* Activity + steer view (the primary Activity surface — opened from hover cards, the
+              roster, the profile, the agents overview, or a message's "view work"). */}
+          {rightMode === "activity" && activityPanelAgent && (
+            <AgentActivityPanel
+              key={activityPanelAgent.id}
+              agent={activityPanelAgent}
+              events={activityEvents}
+              focusTurnId={activityFocusTurn}
+              onBack={activityFromRoster ? backToRoster : undefined}
+              onClose={closeActivityPanel}
+              onOpenProfile={openProfilePanel}
+              onSteer={steerAgent}
+            />
+          )}
+
           {/* Profile view (agent / human / self) */}
           {rightMode === "profile" && profilePerson && (
             <ParticipantProfilePanel
@@ -784,6 +1222,24 @@ export function App({
               onClose={closeThreadPanel}
               onOpenThreadFromList={openThreadFromList}
               onSendReply={sendThreadReply}
+            />
+          )}
+
+          {/* Channel agent roster: this channel's agents, active-first, with live activity.
+              Card body → profile; Activity button → the activity panel (with a ← back to here). */}
+          {rightMode === "roster" && sel && (
+            <ChannelRoster
+              channelName={sel.name}
+              agents={channelAgents}
+              liveTurns={liveTurnsRef.current}
+              confirms={confirms}
+              onClose={() => setRosterOpen(false)}
+              onOpenProfile={openProfilePanel}
+              onMessage={(id) => {
+                goToChat();
+                openDm(id);
+              }}
+              onOpenActivity={(id) => openActivity(id, null, true)}
             />
           )}
         </aside>
@@ -831,20 +1287,25 @@ export function App({
         <InviteDialog open={showInvite} onOpenChange={setShowInvite} workspaceId={workspaceId} />
       )}
 
-      {/* Live Claude-Code-style transcript for an sdk agent */}
-      {activityAgent && (
-        <AgentActivity
-          key={activityAgent.id}
-          agent={activityAgent}
-          events={activityEvents}
-          onClose={() => {
-            setActivityId(null);
-            setActivityEvents([]);
-          }}
-          onSteer={steerAgent}
-        />
-      )}
+      {/* ⌘K search: messages (server FTS), channels, and people. */}
+      <SearchDialog
+        open={searchOpen}
+        onOpenChange={setSearchOpen}
+        channels={channels}
+        people={people}
+        participantId={participantId}
+        onSelectChannel={(id) => {
+          goToChat();
+          selectAndClose(id);
+        }}
+        onOpenDm={(id) => {
+          goToChat();
+          openDm(id);
+        }}
+        onJumpToMessage={jumpToSearchResult}
+      />
     </div>
+    </AgentCardProvider>
   );
 }
 

@@ -6,6 +6,7 @@ export interface ContextRow {
   handle: string;
   body: string;
   att: string[] | null;
+  seq?: string; // present when the caller needs a beforeSeq cursor to page further back
 }
 
 export function formatContextLines(rows: ContextRow[]): string {
@@ -13,4 +14,10 @@ export function formatContextLines(rows: ContextRow[]): string {
     .reverse()
     .map((r) => `@${r.handle}: ${r.body}${r.att?.length ? ` [attached: ${r.att.join(", ")}]` : ""}`)
     .join("\n");
+}
+
+// The oldest row's seq in a NEWEST-FIRST rows array (i.e. before formatContextLines reverses it
+// in place) — pass as `beforeSeq` to fetch the page further back. Null once nothing is older.
+export function oldestSeqOf(rows: ContextRow[]): string | null {
+  return rows.length ? (rows[rows.length - 1].seq ?? null) : null;
 }
