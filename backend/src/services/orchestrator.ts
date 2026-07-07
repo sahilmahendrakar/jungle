@@ -196,6 +196,12 @@ async function runAgentReply(
     // threadRootId defaults back into that thread) rides ON the inbox item and takes effect when
     // the runner consumes it. Enqueue the composed input and push it to the runner if one is
     // connected. If not, it waits in the inbox until the next `hello`.
+    // Chip anchor: a reply INSIDE a thread anchors to the thread ROOT, not itself — otherwise
+    // every follow-up reply that re-triggers the agent would pop its own new chip somewhere deep
+    // in the thread (pure thread-only replies don't even render in the main timeline, so it'd be
+    // invisible there). Anchoring to the root means all of a thread's agent activity shows/
+    // updates in the one place the root's chip already renders (main channel timeline).
+    const chipMessageId = existingThreadRootId ?? triggerMessage.id;
     // If the agent is already busy, this dispatch will sit in the inbox until the current turn
     // ends (or splices it in mid-turn) — tell the workspace now so the triggering message shows
     // a "queued" chip immediately instead of nothing until a turn actually picks it up.
@@ -204,7 +210,7 @@ async function runAgentReply(
       budget: replyBudget,
       channelId: triggerChannelId,
       threadRootId: existingThreadRootId,
-      messageId: triggerMessage.id,
+      messageId: chipMessageId,
     });
     if (willQueue) {
       broadcastAgentWorkspace(agent.id, {
@@ -213,7 +219,7 @@ async function runAgentReply(
         context: {
           channelId: triggerChannelId,
           threadRootId: existingThreadRootId,
-          messageId: triggerMessage.id,
+          messageId: chipMessageId,
         },
       });
     }
