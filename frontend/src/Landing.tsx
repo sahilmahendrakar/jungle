@@ -23,7 +23,7 @@ export function Landing() {
   const goSignIn = () => navigate("/login");
 
   return (
-    <main className="jungle-landing relative flex min-h-screen flex-col overflow-hidden">
+    <main className="jungle-landing relative overflow-hidden">
       <style>{`
         .jungle-landing {
           --jl-bg: #04271a;
@@ -57,14 +57,25 @@ export function Landing() {
         .jl-cta-arrow {
           transition: transform 0.25s cubic-bezier(0.22, 1, 0.36, 1);
         }
+        .jl-cue {
+          animation: jl-float 1.8s ease-in-out infinite alternate;
+        }
+        @keyframes jl-float {
+          from { transform: translateY(0); }
+          to { transform: translateY(6px); }
+        }
         @media (prefers-reduced-motion: reduce) {
           .jl-reveal { animation: none; opacity: 1; }
+          .jl-cue { animation: none; }
           .jl-cta, .jl-cta-arrow { transition: none; }
         }
       `}</style>
 
       <Fireflies />
 
+      {/* First viewport: header + hero, exactly one screen tall so the next
+          section stays hidden until the visitor scrolls. */}
+      <div className="h-screen-dvh relative flex flex-col">
       {/* Header */}
       <header className="relative z-10 flex items-center justify-between px-6 py-5 sm:px-10">
         <img src="/icon-192.png" alt="Jungle" className="jl-reveal size-9 rounded-xl" />
@@ -119,28 +130,55 @@ export function Landing() {
         </div>
       </section>
 
+      {/* Scroll cue */}
+      <button
+        onClick={() =>
+          document.getElementById("how-it-works")?.scrollIntoView({ behavior: "smooth" })
+        }
+        aria-label="Scroll down to see how it works"
+        className="jl-reveal absolute bottom-6 left-1/2 z-10 -translate-x-1/2 p-2 text-[var(--jl-ink-dim)] transition-colors hover:text-[var(--jl-ink)]"
+        style={{ animationDelay: "0.9s" }}
+      >
+        <svg viewBox="0 0 24 24" className="jl-cue size-6" fill="none" aria-hidden>
+          <path
+            d="M6 9l6 6 6-6"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </button>
+      </div>
+
       {/* How it works */}
-      <section className="relative z-10 mx-auto grid w-full max-w-6xl items-center gap-12 px-6 pb-28 sm:px-10 lg:grid-cols-[2fr_3fr] lg:gap-16">
+      <section
+        id="how-it-works"
+        className="relative z-10 mx-auto grid w-full max-w-7xl items-center gap-12 px-6 pb-28 pt-8 sm:px-10 lg:grid-cols-[1fr_1.7fr] lg:gap-10"
+      >
         <div>
-          <h2 className="jl-serif text-3xl font-semibold tracking-tight sm:text-4xl">
+          <h2 className="jl-serif text-2xl font-semibold tracking-tight sm:text-3xl">
             How it works
           </h2>
-          <ol className="mt-10 space-y-9">
+          <ol className="mt-8 space-y-7">
             {STEPS.map((s) => (
-              <li key={s.n} className="flex items-start gap-5">
-                <span className="jl-serif mt-0.5 text-xl italic text-[var(--jl-lime)]">{s.n}</span>
+              <li key={s.n} className="flex items-start gap-4">
+                <span className="jl-serif mt-0.5 text-base italic text-[var(--jl-lime)]">
+                  {s.n}
+                </span>
                 <div>
-                  <h3 className="text-lg font-semibold">{s.title}</h3>
-                  <p className="mt-1 text-[var(--jl-ink-dim)]">{s.desc}</p>
+                  <h3 className="text-base font-semibold">{s.title}</h3>
+                  <p className="mt-1 text-sm text-[var(--jl-ink-dim)]">{s.desc}</p>
                 </div>
               </li>
             ))}
           </ol>
         </div>
+        {/* Oversized on lg so it drifts off toward the right edge (main clips the overflow). */}
         <img
           src="/app-screenshot.png"
           alt="The Jungle app — channels where teammates and agents work together"
-          className="w-full rounded-xl border border-[rgba(240,245,238,0.16)]"
+          className="w-full rounded-xl border border-[rgba(240,245,238,0.16)] lg:w-[112%]"
         />
       </section>
     </main>
