@@ -353,3 +353,29 @@ create index if not exists deliverables_agent_idx on deliverables (agent_id, id 
 -- Full-text search over message bodies (see migrations/019_message_search.sql).
 create index if not exists messages_body_fts_idx
   on messages using gin (to_tsvector('english', body));
+
+-- Durable turn chips — the trigger-message activity chip needs to survive a page reload, and one
+-- turn can be anchored to more than one message (a follow-up spliced into a turn already in
+-- progress joins the SAME turn, not a new one). See migrations/020_turn_chips.sql and
+-- backend/src/db/turns.ts.
+create table if not exists agent_turns (
+  agent_id       uuid not null references participants(id) on delete cascade,
+  turn_id        text not null,
+  channel_id     uuid references channels(id) on delete cascade,
+  thread_root_id uuid,
+  started_at     timestamptz not null default now(),
+  done_at        timestamptz,
+  ok             boolean,
+  primary key (agent_id, turn_id)
+);
+create index if not exists agent_turns_channel_idx on agent_turns (channel_id);
+
+create table if not exists agent_turn_messages (
+  agent_id    uuid not null,
+  turn_id     text not null,
+  message_id  uuid not null references messages(id) on delete cascade,
+  joined_at   timestamptz not null default now(),
+  primary key (agent_id, turn_id, message_id),
+  foreign key (agent_id, turn_id) references agent_turns (agent_id, turn_id) on delete cascade
+);
+create index if not exists agent_turn_messages_message_idx on agent_turn_messages (message_id);

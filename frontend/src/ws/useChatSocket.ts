@@ -52,6 +52,9 @@ export function useChatSocket(opts: {
     event: unknown,
     context?: TurnContext | null,
   ) => void;
+  // A dispatch landed in the agent's inbox behind a turn already in progress (agent_queued) —
+  // feeds the "queued" chip until the real turn starts (or splices in) and takes over.
+  ingestQueued: (agentId: string, context: TurnContext) => void;
   // Desktop-notification decisions live in App (it knows channels, mentions, prefs); the
   // dispatch just reports what happened.
   onNotifiableMessage: (m: Message, isOpen: boolean) => void;
@@ -81,6 +84,7 @@ export function useChatSocket(opts: {
     refreshThreads,
     reloadChannels,
     ingestLiveEvent,
+    ingestQueued,
     onNotifiableMessage,
     onConfirmRequested,
     onConnected,
@@ -185,8 +189,13 @@ export function useChatSocket(opts: {
           return;
         }
         if (evt.type === "agent_turn") {
-          // A turn began: record its home (channel/thread/message) in the live-turn buffer.
+          // A turn began (or a splice added another message to one already running): record its
+          // home (channel/thread/message) in the live-turn buffer.
           ingestLiveEvent(evt.agentId, evt.turnId, null, evt.context);
+          return;
+        }
+        if (evt.type === "agent_queued") {
+          ingestQueued(evt.agentId, evt.context);
           return;
         }
         if (evt.type === "agent_event") {
