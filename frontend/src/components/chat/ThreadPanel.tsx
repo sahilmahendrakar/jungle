@@ -4,23 +4,37 @@ import type { Channel, Message, Participant, UnreadThread } from "../../api";
 import { fmtTime } from "../../lib/chat";
 import { Markdown } from "../../Markdown";
 import { AgentBadge, AttachmentList, EmptyState, PersonAvatar } from "./panels";
+import { MessageTurnChips } from "./TurnChips";
+import type { QueuedTurn, TurnChipData } from "../../ws/useLiveTurns";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
-// Compact message row for the thread panel (root + replies), not sender-grouped.
+// Compact message row for the thread panel (root + replies), not sender-grouped. Every reply
+// that re-triggers the agent anchors its chip to the ROOT (see orchestrator.ts), so only the
+// root ever renders one — shown here too, not just in the main channel timeline, so it's visible
+// without leaving the thread.
 function ThreadMessageRow({
   m,
   personByHandle,
   onOpenProfile,
+  turns,
+  queued,
+  personById,
+  onOpenTurn,
 }: {
   m: Message;
   personByHandle: (h?: string | null) => Participant | undefined;
   onOpenProfile: (id: string) => void;
+  turns?: TurnChipData[];
+  queued?: QueuedTurn[];
+  personById?: (id: string) => Participant | undefined;
+  onOpenTurn?: (turn: TurnChipData) => void;
 }) {
   const sender = personByHandle(m.sender_handle);
   const isAgent = sender?.kind === "agent";
+  const hasChips = (turns?.length ?? 0) > 0 || (queued?.length ?? 0) > 0;
   return (
     <div className="flex gap-2.5">
       <button
@@ -50,6 +64,11 @@ function ThreadMessageRow({
           )}
           {(m.attachments?.length ?? 0) > 0 && <AttachmentList attachments={m.attachments!} />}
         </div>
+        {hasChips && personById && onOpenTurn && (
+          <div className="mt-1 flex flex-wrap items-center gap-2">
+            <MessageTurnChips turns={turns ?? []} queued={queued ?? []} personById={personById} onOpenTurn={onOpenTurn} />
+          </div>
+        )}
       </div>
     </div>
   );
@@ -70,6 +89,10 @@ export function ThreadPanel({
   onClose,
   onOpenThreadFromList,
   onSendReply,
+  rootTurns,
+  rootQueued,
+  personById,
+  onOpenTurn,
 }: {
   threadRootId: string | null;
   threadRoot: Message | null;
@@ -81,6 +104,13 @@ export function ThreadPanel({
   onClose: () => void;
   onOpenThreadFromList: (t: UnreadThread) => void;
   onSendReply: (body: string, alsoToChannel: boolean) => boolean;
+  // Turn/queued chips anchored to the thread root (every reply that re-triggers the agent
+  // anchors here too — see orchestrator.ts), so the same chip shown in the main timeline is
+  // visible here without leaving the thread.
+  rootTurns: TurnChipData[];
+  rootQueued: QueuedTurn[];
+  personById: (id: string) => Participant | undefined;
+  onOpenTurn: (turn: TurnChipData) => void;
 }) {
   const [threadDraft, setThreadDraft] = useState("");
   const [alsoToChannel, setAlsoToChannel] = useState(false);
@@ -170,6 +200,10 @@ export function ThreadPanel({
                   m={threadRoot}
                   personByHandle={personByHandle}
                   onOpenProfile={onOpenProfile}
+                  turns={rootTurns}
+                  queued={rootQueued}
+                  personById={personById}
+                  onOpenTurn={onOpenTurn}
                 />
                 {threadReplies.length > 0 && (
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">
