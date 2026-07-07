@@ -20,7 +20,11 @@ import {
 const DEBOUNCE_MS = 250;
 
 function snippet(body: string): string {
-  const line = body.replace(/\s+/g, " ").trim();
+  const line = body
+    .replace(/\[([^\]]+)\]\((?:[^)]+)\)/g, "$1") // markdown links -> their text
+    .replace(/[#*`>_]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
   return line.length > 90 ? `${line.slice(0, 89)}…` : line;
 }
 

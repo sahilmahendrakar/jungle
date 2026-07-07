@@ -6,7 +6,8 @@ export function currentPath(): string {
 }
 
 export function navigate(path: string) {
-  history.pushState({}, "", path);
+  // Preserve the query string across in-app navigation — the dev identity (?as=) lives there.
+  history.pushState({}, "", path + location.search);
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
