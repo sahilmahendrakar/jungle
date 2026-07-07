@@ -18,7 +18,8 @@ import { cn } from "@/lib/utils";
 // The per-message thread affordance that RESERVES layout space: a persistent "N replies" chip on
 // a root that has replies (bold + "N new" when I follow it and have unread), or a "View thread"
 // link on an also-to-channel reply shown in the timeline. The on-hover "reply in thread" action
-// lives in the HoverActions bar instead.
+// lives in the HoverActions bar instead. Rendered as one item in the shared footer row (see
+// MessageBody) alongside any turn chips, so it carries no margin of its own.
 function ThreadFooter({
   m,
   replyCounts,
@@ -40,7 +41,7 @@ function ThreadFooter({
         data-testid="thread-replies"
         onClick={() => onOpenThread(rootId)}
         className={cn(
-          "mt-1 inline-flex items-center gap-1.5 rounded-md border border-transparent px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:border-border hover:bg-accent",
+          "inline-flex items-center gap-1.5 rounded-md border border-transparent px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:border-border hover:bg-accent",
           unread > 0 && "font-semibold text-primary",
         )}
       >
@@ -59,7 +60,7 @@ function ThreadFooter({
       <button
         data-testid="view-thread"
         onClick={() => onOpenThread(rootId)}
-        className="mt-0.5 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent"
+        className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent"
       >
         <MessageSquare className="size-3.5" /> In thread
       </button>
@@ -180,6 +181,9 @@ function MessageBody({
   const isRoot = !m.thread_root_id;
   const hasReplies = isRoot && (replyCounts.get(m.id) ?? 0) > 0;
   const isAgent = personByHandle(m.sender_handle)?.kind === "agent";
+  // The thread affordance always shows for a reply row (isRoot false) or a root with replies;
+  // the row only reserves space when it or a turn chip actually has something to show.
+  const showFooterRow = !isRoot || hasReplies || anchoredTurns.length > 0;
   return (
     <div
       data-testid="message"
@@ -195,14 +199,19 @@ function MessageBody({
       {/* Artifact cards for the work links agents post (PRs, docs, …) — agent messages only,
           so a human pasting a PR link doesn't read as a "deliverable". */}
       {isAgent && m.body && <DeliverableChips body={m.body} />}
-      {/* Live work anchored under the message that triggered it (one chip per agent). */}
-      <MessageTurnChips turns={anchoredTurns} personById={personById} onOpenTurn={onOpenLiveTurn} />
-      <ThreadFooter
-        m={m}
-        replyCounts={replyCounts}
-        unreadByRoot={unreadByRoot}
-        onOpenThread={onOpenThread}
-      />
+      {/* Reply count + live work chips on one line: replies first, then a chip per agent
+          triggered by this message. */}
+      {showFooterRow && (
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          <ThreadFooter
+            m={m}
+            replyCounts={replyCounts}
+            unreadByRoot={unreadByRoot}
+            onOpenThread={onOpenThread}
+          />
+          <MessageTurnChips turns={anchoredTurns} personById={personById} onOpenTurn={onOpenLiveTurn} />
+        </div>
+      )}
       <HoverActions
         m={m}
         showReply={isRoot && !hasReplies}
