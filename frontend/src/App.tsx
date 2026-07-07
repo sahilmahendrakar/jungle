@@ -41,8 +41,8 @@ import { SearchDialog } from "./SearchDialog";
 import { navigate, usePath } from "./route";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { AgentActivity } from "./AgentActivity";
 import { DmActivityView } from "./components/chat/DmActivityView";
+import { AgentActivityPanel } from "./components/chat/AgentActivityPanel";
 import { ChannelActivity } from "./components/chat/ChannelActivity";
 import { ChannelRoster } from "./components/chat/ChannelRoster";
 import { AgentCardProvider } from "./components/chat/AgentHoverCard";
@@ -177,13 +177,17 @@ export function App({
   // full-screen dialog (opened from the profile panel), "inline" for the DM header's
   // "View activity" toggle, which swaps the DM's message list for the same transcript in place.
   const [activityId, setActivityId] = useState<string | null>(null);
-  const [activityMode, setActivityMode] = useState<"modal" | "inline">("modal");
+  // "panel": the right-panel activity+steer view (the primary surface). "inline": the DM header's
+  // "View activity" toggle (swaps the DM message list). No modal — activity lives in the sidebar.
+  const [activityMode, setActivityMode] = useState<"panel" | "inline">("panel");
   const [activityEvents, setActivityEvents] = useState<AgentEvent[]>([]);
-  // When set, the modal Activity view opens scrolled to this turn ("view the work behind this").
+  // When set, the activity view opens scrolled to this turn ("view the work behind this").
   const [activityFocusTurn, setActivityFocusTurn] = useState<string | null>(null);
+  // Whether the activity panel was opened from the channel roster — drives the ← back arrow.
+  const [activityFromRoster, setActivityFromRoster] = useState(false);
   const activityIdRef = useRef<string | null>(null);
   activityIdRef.current = activityId;
-  const activityModeRef = useRef<"modal" | "inline">("modal");
+  const activityModeRef = useRef<"panel" | "inline">("panel");
   activityModeRef.current = activityMode;
   const selectedRef = useRef<string | null>(null);
   selectedRef.current = selected;
@@ -500,6 +504,8 @@ export function App({
     setProfileId(null);
     setSettingsPanelOpen(false);
     setThreadsListOpen(false);
+    setRosterOpen(false);
+    setActivityId(null);
     setThreadRootId(rootId);
     markThreadRead(rootId)
       .then(() => refreshThreads())
@@ -529,6 +535,7 @@ export function App({
     setThreadRootId(null);
     setThreadsListOpen(false);
     setRosterOpen(false);
+    setActivityId(null);
     setDrawerOpen(false);
   }
   function openSettingsPanel() {
@@ -537,6 +544,7 @@ export function App({
     setThreadRootId(null);
     setThreadsListOpen(false);
     setRosterOpen(false);
+    setActivityId(null);
     setDrawerOpen(false);
   }
   // Toggle the channel agent roster in the right panel (header 🤖 button).
@@ -550,6 +558,7 @@ export function App({
     setSettingsPanelOpen(false);
     setThreadRootId(null);
     setThreadsListOpen(false);
+    setActivityId(null);
     setDrawerOpen(false);
   }
   // Open the Threads list in the right panel (takes over from a profile/settings/open-thread view).
@@ -559,6 +568,7 @@ export function App({
     setThreadRootId(null);
     setThreadsListOpen(true);
     setRosterOpen(false);
+    setActivityId(null);
     refreshThreads();
     setDrawerOpen(false);
   }
@@ -610,14 +620,39 @@ export function App({
     }
   }
 
-  // Open an sdk agent's Activity view as a full-screen dialog (from the profile panel, the
-  // agents overview, or a message's "view work"). Reset the live buffer so it only holds frames
-  // that arrive while this view is open (history is fetched inside AgentActivity).
-  function openActivity(agentId: string, focusTurnId: string | null = null) {
+  // Open an sdk agent's Activity+steer view in the RIGHT PANEL (from a hover card, the roster,
+  // the profile panel, the agents overview, or a message's "view work"). Takes over the panel
+  // from any other view. Reset the live buffer so it only holds frames that arrive while open
+  // (history is fetched inside the transcript). `fromRoster` shows a ← back-to-roster arrow.
+  function openActivity(
+    agentId: string,
+    focusTurnId: string | null = null,
+    fromRoster = false,
+  ) {
     setActivityEvents([]);
-    setActivityMode("modal");
+    setActivityMode("panel");
     setActivityFocusTurn(focusTurnId);
+    setActivityFromRoster(fromRoster);
     setActivityId(agentId);
+    // Take over the right panel.
+    setProfileId(null);
+    setSettingsPanelOpen(false);
+    setThreadRootId(null);
+    setThreadsListOpen(false);
+    setRosterOpen(false);
+    setDrawerOpen(false);
+  }
+  // Close the activity panel entirely (the X).
+  function closeActivityPanel() {
+    setActivityId(null);
+    setActivityEvents([]);
+    setActivityFocusTurn(null);
+    setActivityFromRoster(false);
+  }
+  // The ← back arrow (shown only when opened from the roster): return to the roster list.
+  function backToRoster() {
+    closeActivityPanel();
+    setRosterOpen(true);
   }
 
   // "View the work behind this message": open the sender agent's Activity focused on the turn
@@ -668,13 +703,15 @@ export function App({
     setActivityId(agentId);
   }
 
-  // "Steer" an agent from the Activity footer: open/find the DM and post a normal message,
-  // which flows through the inbox to the agent's next turn (same path as the composer).
+  // "Steer" an agent from the Activity panel footer: open/find the DM and post a normal message,
+  // which flows through the inbox to the agent's next turn (same path as the composer). Quiet by
+  // design — the DM shows up in the sidebar but selection stays put, so you keep watching the
+  // transcript in the panel instead of being yanked into the DM (the whole point of steering
+  // from the sidebar).
   async function steerAgent(agent: Participant, body: string) {
     if (!participantId) return;
     const { id } = await createDm(participantId, agent.id);
-    // Ensure the DM shows in the sidebar; select it so the reply lands in view.
-    reloadChannels(id);
+    reloadChannels(); // surface the DM in the sidebar WITHOUT stealing the current selection
     const trySend = (attempt = 0) => {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(
@@ -817,17 +854,25 @@ export function App({
     setThreadsListOpen(false);
   };
 
-  // The right panel hosts one view at a time. Profile/settings win over threads/roster (opening
-  // either already cleared the others via the openers above).
-  const rightMode: "profile" | "settings" | "threads" | "roster" | null = profilePerson
-    ? "profile"
-    : settingsPanelOpen
-      ? "settings"
-      : threadPanelOpen
-        ? "threads"
-        : rosterOpen && sel?.kind !== "dm"
-          ? "roster"
-          : null;
+  // Activity+steer as a right-panel view (the primary Activity surface — no modal). Gated on an
+  // sdk agent target and panel mode (the DM inline toggle uses "inline", handled separately).
+  const activityPanelAgent =
+    activityMode === "panel" && activityAgent?.runtime === "sdk" ? activityAgent : undefined;
+
+  // The right panel hosts one view at a time. Precedence: activity/profile/settings (explicit
+  // opens) win over threads/roster; each opener already cleared the others.
+  const rightMode: "activity" | "profile" | "settings" | "threads" | "roster" | null =
+    activityPanelAgent
+      ? "activity"
+      : profilePerson
+        ? "profile"
+        : settingsPanelOpen
+          ? "settings"
+          : threadPanelOpen
+            ? "threads"
+            : rosterOpen && sel?.kind !== "dm"
+              ? "roster"
+              : null;
   const rightOpen = rightMode !== null;
   const closeRightPanel = () => {
     setProfileId(null);
@@ -835,6 +880,7 @@ export function App({
     setThreadRootId(null);
     setThreadsListOpen(false);
     setRosterOpen(false);
+    closeActivityPanel();
   };
 
   // The agent hover-card context: any @mention / sender / roster entry renders a card knowing
@@ -1127,6 +1173,21 @@ export function App({
             !resizing && "md:transition-[width] md:duration-200 md:ease-in-out",
           )}
         >
+          {/* Activity + steer view (the primary Activity surface — opened from hover cards, the
+              roster, the profile, the agents overview, or a message's "view work"). */}
+          {rightMode === "activity" && activityPanelAgent && (
+            <AgentActivityPanel
+              key={activityPanelAgent.id}
+              agent={activityPanelAgent}
+              events={activityEvents}
+              focusTurnId={activityFocusTurn}
+              onBack={activityFromRoster ? backToRoster : undefined}
+              onClose={closeActivityPanel}
+              onOpenProfile={openProfilePanel}
+              onSteer={steerAgent}
+            />
+          )}
+
           {/* Profile view (agent / human / self) */}
           {rightMode === "profile" && profilePerson && (
             <ParticipantProfilePanel
@@ -1164,7 +1225,8 @@ export function App({
             />
           )}
 
-          {/* Channel agent roster: this channel's agents, active-first, with live activity. */}
+          {/* Channel agent roster: this channel's agents, active-first, with live activity.
+              Card body → profile; Activity button → the activity panel (with a ← back to here). */}
           {rightMode === "roster" && sel && (
             <ChannelRoster
               channelName={sel.name}
@@ -1172,11 +1234,12 @@ export function App({
               liveTurns={liveTurnsRef.current}
               confirms={confirms}
               onClose={() => setRosterOpen(false)}
+              onOpenProfile={openProfilePanel}
               onMessage={(id) => {
                 goToChat();
                 openDm(id);
               }}
-              onOpenActivity={openActivity}
+              onOpenActivity={(id) => openActivity(id, null, true)}
             />
           )}
         </aside>
@@ -1222,23 +1285,6 @@ export function App({
 
       {workspaceId && (
         <InviteDialog open={showInvite} onOpenChange={setShowInvite} workspaceId={workspaceId} />
-      )}
-
-      {/* Live Claude-Code-style transcript for an sdk agent (full-screen dialog, opened from the
-          profile panel — the DM header's inline toggle renders DmActivityView instead). */}
-      {activityMode === "modal" && activityAgent && (
-        <AgentActivity
-          key={activityAgent.id}
-          agent={activityAgent}
-          events={activityEvents}
-          focusTurnId={activityFocusTurn}
-          onClose={() => {
-            setActivityId(null);
-            setActivityEvents([]);
-            setActivityFocusTurn(null);
-          }}
-          onSteer={steerAgent}
-        />
       )}
 
       {/* ⌘K search: messages (server FTS), channels, and people. */}

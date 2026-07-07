@@ -117,11 +117,33 @@ try {
   check("roster panel lists the agent", (await page.getByText(`Scope Agent ${tag}`).count()) > 0);
   await shot(page, "roster");
 
-  // Hover the agent mention -> hover card.
+  // Roster Activity button -> the activity+steer panel opens IN THE SIDEBAR with a back arrow.
+  await page.locator('[data-testid="roster-activity"]').first().click();
+  await page.waitForTimeout(700);
+  check("activity panel opens in sidebar from roster", (await page.locator('[data-testid="activity-panel-identity"]').count()) > 0);
+  check("activity panel shows the live turn", (await page.locator('[data-testid="activity-turn"]').count()) > 0);
+  check("activity panel has a steer box", (await page.locator('[data-testid="activity-panel-steer"]').count()) > 0);
+  check("activity panel has a back arrow (from roster)", (await page.locator('[data-testid="activity-panel-back"]').count()) > 0);
+  await shot(page, "activity-panel");
+  // Steer the agent — should NOT navigate away from the channel.
+  await page.locator('[data-testid="activity-panel-steer"]').fill("focus on the auth tests");
+  await page.locator('[data-testid="activity-panel-steer-send"]').click();
+  await page.waitForTimeout(600);
+  check("steering keeps me in the channel (no nav to DM)", await page.locator('[data-testid="composer-input"]').getAttribute("placeholder").then((p) => p?.includes(`work-${tag}`)));
+  // Back arrow returns to the roster.
+  await page.locator('[data-testid="activity-panel-back"]').click();
+  await page.waitForTimeout(400);
+  check("back arrow returns to the roster", (await page.locator('[data-testid="roster-row"]').count()) > 0);
+
+  // Hover the agent mention -> hover card -> its Activity button opens the sidebar panel too.
   await page.locator('[data-testid="mention-badge"]').first().hover();
   await page.waitForTimeout(500);
   check("agent hover card appears", (await page.locator('[data-testid="agent-hover-card"]').count()) > 0);
   await shot(page, "hovercard");
+  await page.locator('[data-testid="hovercard-activity"]').first().click();
+  await page.waitForTimeout(600);
+  check("hover card Activity opens the sidebar panel", (await page.locator('[data-testid="activity-panel-identity"]').count()) > 0);
+  check("hover-card-opened panel has NO back arrow", (await page.locator('[data-testid="activity-panel-back"]').count()) === 0);
 
   // Switch to channel B: no chip there (scoping).
   await page.locator(`[data-testid="channel-item"]`, { hasText: `general-${tag}` }).click();

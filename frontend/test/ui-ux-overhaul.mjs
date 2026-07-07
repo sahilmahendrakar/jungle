@@ -71,11 +71,13 @@ try {
   check("view-work hover action present", (await page.locator('[data-testid="view-work"]').count()) > 0);
   await page.locator('[data-testid="view-work"]').first().click();
   await page.waitForTimeout(900);
-  check("activity opens from view-work", await page.locator('[data-testid="agent-activity"]').isVisible());
+  // Activity now opens in the RIGHT PANEL (not a modal).
+  check("activity opens in the sidebar from view-work", await page.locator('[data-testid="activity-panel-identity"]').isVisible());
   const turnCount = await page.locator('[data-testid="activity-turn"]').count();
   check("activity shows the producing turn", turnCount > 0);
+  check("activity panel has a steer box", (await page.locator('[data-testid="activity-panel-steer"]').count()) > 0);
   await shot(page, "view-work");
-  await page.keyboard.press("Escape");
+  await page.locator('[data-testid="activity-panel-close"]').click();
   await page.waitForTimeout(400);
 
   // --- Approvals (empty after the backend test resolved its confirm) ---
