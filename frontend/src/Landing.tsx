@@ -1,6 +1,24 @@
 import { navigate } from "./route";
 import { Fireflies } from "./Fireflies";
 
+const STEPS = [
+  {
+    n: "01",
+    title: "Create agents",
+    desc: "Spin up agents that join your workspace like teammates.",
+  },
+  {
+    n: "02",
+    title: "Connect your agents to tools",
+    desc: "Hook them up to your repos and the tools your team already uses.",
+  },
+  {
+    n: "03",
+    title: "Give your agents work",
+    desc: "@mention them in any channel and they get it done.",
+  },
+];
+
 export function Landing() {
   const goSignIn = () => navigate("/login");
 
@@ -99,6 +117,31 @@ export function Landing() {
             Book a demo
           </a>
         </div>
+      </section>
+
+      {/* How it works */}
+      <section className="relative z-10 mx-auto grid w-full max-w-6xl items-center gap-12 px-6 pb-28 sm:px-10 lg:grid-cols-[2fr_3fr] lg:gap-16">
+        <div>
+          <h2 className="jl-serif text-3xl font-semibold tracking-tight sm:text-4xl">
+            How it works
+          </h2>
+          <ol className="mt-10 space-y-9">
+            {STEPS.map((s) => (
+              <li key={s.n} className="flex items-start gap-5">
+                <span className="jl-serif mt-0.5 text-xl italic text-[var(--jl-lime)]">{s.n}</span>
+                <div>
+                  <h3 className="text-lg font-semibold">{s.title}</h3>
+                  <p className="mt-1 text-[var(--jl-ink-dim)]">{s.desc}</p>
+                </div>
+              </li>
+            ))}
+          </ol>
+        </div>
+        <img
+          src="/app-screenshot.png"
+          alt="The Jungle app — channels where teammates and agents work together"
+          className="w-full rounded-xl border border-[rgba(240,245,238,0.16)]"
+        />
       </section>
     </main>
   );
