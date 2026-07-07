@@ -9,7 +9,7 @@ import {
   Target,
   type LucideIcon,
 } from "lucide-react";
-import { extractDeliverableLinks, type DeliverableKind } from "../../api";
+import { extractDeliverableLinks, type DeliverableKind, type ExtractedLink } from "../../api";
 import { cn } from "@/lib/utils";
 
 // Shared presentation for deliverables (work artifacts agents ship): kind → icon/label, the
@@ -33,12 +33,11 @@ export function shortDeliverableUrl(url: string): string {
   return stripped.length > 64 ? `${stripped.slice(0, 63)}…` : stripped;
 }
 
-// Compact artifact cards under an agent message that links real work (a PR, a doc, …).
-// Renders nothing when the body has no recognizable artifact links. `className="contents"` so
-// each chip is a direct flex item of the shared message footer row (replies, then turn/activity
-// chips, then these) instead of nesting its own row inside that row.
-export function DeliverableChips({ body, className }: { body: string; className?: string }) {
-  const links = extractDeliverableLinks(body);
+// Compact artifact cards linking real work (a PR, a doc, …) a thread produced. Renders nothing
+// for an empty list. `className="contents"` so each chip is a direct flex item of the shared
+// message footer row (replies, then turn/activity chips, then these) instead of nesting its own
+// row inside that row.
+export function DeliverableLinkChips({ links, className }: { links: ExtractedLink[]; className?: string }) {
   if (!links.length) return null;
   return (
     <div data-testid="deliverable-chips" className={cn("contents", className)}>
@@ -65,4 +64,9 @@ export function DeliverableChips({ body, className }: { body: string; className?
       })}
     </div>
   );
+}
+
+// Convenience wrapper for the common case of a single message body (extracts its links inline).
+export function DeliverableChips({ body, className }: { body: string; className?: string }) {
+  return <DeliverableLinkChips links={extractDeliverableLinks(body)} className={className} />;
 }

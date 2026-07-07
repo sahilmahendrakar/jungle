@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Activity, Check, Copy, MessageSquare, MessagesSquare } from "lucide-react";
-import type { Message, Participant } from "../../api";
+import type { Message, Participant, ExtractedLink } from "../../api";
 import { extractDeliverableLinks } from "../../api";
 import { fmtTime } from "../../lib/chat";
 import { Markdown } from "../../Markdown";
 import { AgentBadge, AttachmentList, EmptyState, PersonAvatar } from "./panels";
-import { DeliverableChips } from "./deliverableCards";
+import { DeliverableLinkChips } from "./deliverableCards";
 import { MessageTurnChips } from "./TurnChips";
 import { AgentHoverCard } from "./AgentHoverCard";
 import type { QueuedTurn, TurnChipData } from "../../ws/useLiveTurns";
@@ -164,6 +164,7 @@ function MessageBody({
   onOpenTurn,
   anchoredTurns,
   anchoredQueued,
+  anchoredDeliverables,
   personById,
   onOpenLiveTurn,
 }: {
@@ -178,13 +179,22 @@ function MessageBody({
   onOpenTurn: (m: Message) => void;
   anchoredTurns: TurnChipData[];
   anchoredQueued: QueuedTurn[];
+  // Deliverable links rolled up from this thread (root body + all its replies) — empty for a
+  // reply row, which shows only its own body's links instead (see below).
+  anchoredDeliverables: ExtractedLink[];
   personById: (id: string) => Participant | undefined;
   onOpenLiveTurn: (turn: TurnChipData) => void;
 }) {
   const isRoot = !m.thread_root_id;
   const hasReplies = isRoot && (replyCounts.get(m.id) ?? 0) > 0;
   const isAgent = personByHandle(m.sender_handle)?.kind === "agent";
-  const deliverableLinks = isAgent && m.body ? extractDeliverableLinks(m.body) : [];
+  // A root shows everything the thread produced (its own body + all replies, rolled up); an
+  // echoed reply row shows just its own body — it's already visible as its own message.
+  const deliverableLinks = isRoot
+    ? anchoredDeliverables
+    : isAgent && m.body
+      ? extractDeliverableLinks(m.body)
+      : [];
   // The thread affordance always shows for a reply row (isRoot false) or a root with replies;
   // the row only reserves space when it or a turn/queued/deliverable chip actually has something
   // to show.
@@ -221,7 +231,7 @@ function MessageBody({
             personById={personById}
             onOpenTurn={onOpenLiveTurn}
           />
-          {isAgent && m.body && <DeliverableChips body={m.body} />}
+          <DeliverableLinkChips links={deliverableLinks} />
         </div>
       )}
       <HoverActions
@@ -252,6 +262,7 @@ export function MessageList({
   onOpenTurn,
   turnsByMessage,
   queuedByMessage,
+  deliverablesByRoot,
   personById,
   onOpenLiveTurn,
   jumpToId,
@@ -273,6 +284,9 @@ export function MessageList({
   turnsByMessage: Map<string, TurnChipData[]>;
   // Dispatches still queued behind a busy turn, keyed by triggering message id.
   queuedByMessage: Map<string, QueuedTurn[]>;
+  // Deliverable links a thread produced (root body + all its replies), keyed by the root
+  // message's id.
+  deliverablesByRoot: Map<string, ExtractedLink[]>;
   personById: (id: string) => Participant | undefined;
   onOpenLiveTurn: (turn: TurnChipData) => void;
   // Jump target (from search / the deliverables feed): once this message renders, scroll it into
@@ -393,6 +407,7 @@ export function MessageList({
                   onOpenTurn={onOpenTurn}
                   anchoredTurns={turnsByMessage.get(lead.id) ?? []}
                   anchoredQueued={queuedByMessage.get(lead.id) ?? []}
+                  anchoredDeliverables={deliverablesByRoot.get(lead.id) ?? []}
                   personById={personById}
                   onOpenLiveTurn={onOpenLiveTurn}
                 />
@@ -410,6 +425,7 @@ export function MessageList({
                     onOpenTurn={onOpenTurn}
                     anchoredTurns={turnsByMessage.get(m.id) ?? []}
                     anchoredQueued={queuedByMessage.get(m.id) ?? []}
+                    anchoredDeliverables={deliverablesByRoot.get(m.id) ?? []}
                     personById={personById}
                     onOpenLiveTurn={onOpenLiveTurn}
                   />

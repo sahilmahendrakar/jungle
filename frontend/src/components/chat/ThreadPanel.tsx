@@ -4,6 +4,7 @@ import type { Channel, Message, Participant, UnreadThread } from "../../api";
 import { fmtTime } from "../../lib/chat";
 import { Markdown } from "../../Markdown";
 import { AgentBadge, AttachmentList, EmptyState, PersonAvatar } from "./panels";
+import { DeliverableChips } from "./deliverableCards";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
@@ -49,6 +50,11 @@ function ThreadMessageRow({
             </Markdown>
           )}
           {(m.attachments?.length ?? 0) > 0 && <AttachmentList attachments={m.attachments!} />}
+          {isAgent && m.body && (
+            <div className="mt-1.5 flex flex-wrap gap-1.5">
+              <DeliverableChips body={m.body} />
+            </div>
+          )}
         </div>
       </div>
     </div>
