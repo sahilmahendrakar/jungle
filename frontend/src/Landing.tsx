@@ -219,7 +219,7 @@ export function Landing() {
 
           <div className="flex gap-20">
             <div>
-              <h3 className="text-xs font-medium uppercase tracking-[0.18em] text-[rgba(240,245,238,0.4)]">
+              <h3 className="text-sm font-semibold text-[rgba(240,245,238,0.5)]">
                 Company
               </h3>
               <ul className="mt-4 space-y-3 text-sm">
@@ -236,7 +236,7 @@ export function Landing() {
               </ul>
             </div>
             <div>
-              <h3 className="text-xs font-medium uppercase tracking-[0.18em] text-[rgba(240,245,238,0.4)]">
+              <h3 className="text-sm font-semibold text-[rgba(240,245,238,0.5)]">
                 Connect
               </h3>
               <ul className="mt-4 space-y-3 text-sm">
