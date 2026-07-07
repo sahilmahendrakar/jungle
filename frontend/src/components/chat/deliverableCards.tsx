@@ -34,12 +34,14 @@ export function shortDeliverableUrl(url: string): string {
 }
 
 // Compact artifact cards under an agent message that links real work (a PR, a doc, …).
-// Renders nothing when the body has no recognizable artifact links.
+// Renders nothing when the body has no recognizable artifact links. `className="contents"` so
+// each chip is a direct flex item of the shared message footer row (replies, then turn/activity
+// chips, then these) instead of nesting its own row inside that row.
 export function DeliverableChips({ body, className }: { body: string; className?: string }) {
   const links = extractDeliverableLinks(body);
   if (!links.length) return null;
   return (
-    <div className={cn("mt-1.5 flex flex-wrap gap-1.5", className)}>
+    <div data-testid="deliverable-chips" className={cn("contents", className)}>
       {links.map((l) => {
         const meta = DELIVERABLE_KIND_META[l.kind];
         const Icon = meta.icon;

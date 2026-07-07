@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Activity, Check, Copy, MessageSquare, MessagesSquare } from "lucide-react";
 import type { Message, Participant } from "../../api";
+import { extractDeliverableLinks } from "../../api";
 import { fmtTime } from "../../lib/chat";
 import { Markdown } from "../../Markdown";
 import { AgentBadge, AttachmentList, EmptyState, PersonAvatar } from "./panels";
@@ -181,9 +182,10 @@ function MessageBody({
   const isRoot = !m.thread_root_id;
   const hasReplies = isRoot && (replyCounts.get(m.id) ?? 0) > 0;
   const isAgent = personByHandle(m.sender_handle)?.kind === "agent";
+  const deliverableLinks = isAgent && m.body ? extractDeliverableLinks(m.body) : [];
   // The thread affordance always shows for a reply row (isRoot false) or a root with replies;
-  // the row only reserves space when it or a turn chip actually has something to show.
-  const showFooterRow = !isRoot || hasReplies || anchoredTurns.length > 0;
+  // the row only reserves space when it or a turn/deliverable chip actually has something to show.
+  const showFooterRow = !isRoot || hasReplies || anchoredTurns.length > 0 || deliverableLinks.length > 0;
   return (
     <div
       data-testid="message"
@@ -196,11 +198,7 @@ function MessageBody({
         </Markdown>
       )}
       {(m.attachments?.length ?? 0) > 0 && <AttachmentList attachments={m.attachments!} />}
-      {/* Artifact cards for the work links agents post (PRs, docs, …) — agent messages only,
-          so a human pasting a PR link doesn't read as a "deliverable". */}
-      {isAgent && m.body && <DeliverableChips body={m.body} />}
-      {/* Reply count + live work chips on one line: replies first, then a chip per agent
-          triggered by this message. */}
+      {/* Reply count, then live work chips, then deliverable (artifact) chips — all on one line. */}
       {showFooterRow && (
         <div className="mt-1 flex flex-wrap items-center gap-2">
           <ThreadFooter
@@ -210,6 +208,7 @@ function MessageBody({
             onOpenThread={onOpenThread}
           />
           <MessageTurnChips turns={anchoredTurns} personById={personById} onOpenTurn={onOpenLiveTurn} />
+          {isAgent && m.body && <DeliverableChips body={m.body} />}
         </div>
       )}
       <HoverActions
