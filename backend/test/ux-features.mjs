@@ -112,6 +112,21 @@ const agentMsg = await waitFor(
 );
 check("agent reply carries turn_id", agentMsg.message.turn_id === TURN, `got ${agentMsg.message.turn_id}`);
 
+// agent_turn fans out with the turn's home context (channel + triggering message).
+const turnEvt = await waitFor("agent_turn", (f) => f.type === "agent_turn" && f.turnId === TURN);
+check(
+  "agent_turn carries the home channel",
+  turnEvt.context?.channelId === dm.id,
+  `got ${turnEvt.context?.channelId}`,
+);
+check("agent_turn carries the triggering messageId", !!turnEvt.context?.messageId);
+// agent_event frames also carry the context (mid-turn page-load recovery).
+const evtWithCtx = await waitFor(
+  "agent_event with context",
+  (f) => f.type === "agent_event" && f.turnId === TURN && f.context?.channelId === dm.id,
+);
+check("agent_event carries turn context", evtWithCtx.context?.channelId === dm.id);
+
 const delivEvt = await waitFor("deliverable_created", (f) => f.type === "deliverable_created");
 check(
   "deliverable extracted from the PR link",

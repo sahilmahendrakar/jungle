@@ -176,6 +176,8 @@ interface RunnerConn {
   // The current turn's dispatch context (fetched at turn_started from the batch's inbox rows),
   // attached to every event broadcast so clients know the turn's home channel.
   currentTurnContext: db.DispatchContext | null;
+  // Per-connection serialization chain: frames run in order (see enqueueFrame).
+  frameTail: Promise<void>;
   // The turn this socket most recently reported via `turn_started`. Mid-turn follow-up batches
   // emit `consumed` with no accompanying `turn_started`, so the consumed handler attributes
   // them to this turn.
@@ -656,7 +658,7 @@ async function accept(ws: WebSocket, token: string): Promise<void> {
   let conn: RunnerConn | null = null;
   const early: string[] = [];
   ws.on("message", (raw) => {
-    if (conn) void handleFrame(conn, raw.toString());
+    if (conn) enqueueFrame(conn, raw.toString());
     else early.push(raw.toString());
   });
   ws.on("error", (e) => console.error("runner socket error (pre-auth):", e));
@@ -685,6 +687,7 @@ async function accept(ws: WebSocket, token: string): Promise<void> {
     idleSince: null,
     currentTurnId: null,
     currentTurnContext: null,
+    frameTail: Promise.resolve(),
   };
   conns.set(agent.id, conn);
   console.log(`runner[${agent.id}] (@${agent.handle}) connected`);
@@ -700,8 +703,18 @@ async function accept(ws: WebSocket, token: string): Promise<void> {
     console.log(`runner[${agent.id}] disconnected`);
   });
 
-  // Replay any frames (notably `hello`) that arrived during the token lookup.
-  for (const raw of early) void handleFrame(conn, raw);
+  // Replay any frames (notably `hello`) that arrived during the token lookup, in order.
+  for (const raw of early) enqueueFrame(conn, raw);
+}
+
+// Serialize frame handling per connection: each frame runs only after the previous one settles,
+// so ordering-sensitive state (a turn's currentTurnContext, set by an async turn_started, is read
+// by the events that follow) is never overtaken by a later frame. A thrown handler doesn't stall
+// the queue.
+function enqueueFrame(conn: RunnerConn, raw: string): void {
+  conn.frameTail = conn.frameTail.then(() => handleFrame(conn, raw)).catch((e) =>
+    console.error(`runner[${conn.agentId}] frame handler:`, e),
+  );
 }
 
 async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
