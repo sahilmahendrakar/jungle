@@ -1,7 +1,6 @@
 import {
   AudioLines,
   CircleDot,
-  ExternalLink,
   FileText,
   FolderOpen,
   GitCommitHorizontal,
@@ -33,7 +32,18 @@ export function shortDeliverableUrl(url: string): string {
   return stripped.length > 64 ? `${stripped.slice(0, 63)}…` : stripped;
 }
 
-// Compact artifact cards linking real work (a PR, a doc, …) a thread produced. Renders nothing
+// The chip's own label: "owner/repo #42" for a GitHub PR/issue (repo + number, no full URL) —
+// the common case and worth optimizing for compactness; everything else falls back to the
+// agent-given title or a shortened URL.
+function chipLabel(l: ExtractedLink): string {
+  if (l.kind === "github_pr" || l.kind === "github_issue") {
+    const m = /^https?:\/\/github\.com\/([^/]+\/[^/]+)\/(?:pull|issues)\/(\d+)/.exec(l.url);
+    if (m) return `${m[1]} #${m[2]}`;
+  }
+  return l.title ?? shortDeliverableUrl(l.url);
+}
+
+// Compact artifact chips linking real work (a PR, a doc, …) a thread produced. Renders nothing
 // for an empty list. `className="contents"` so each chip is a direct flex item of the shared
 // message footer row (replies, then turn/activity chips, then these) instead of nesting its own
 // row inside that row.
@@ -42,8 +52,7 @@ export function DeliverableLinkChips({ links, className }: { links: ExtractedLin
   return (
     <div data-testid="deliverable-chips" className={cn("contents", className)}>
       {links.map((l) => {
-        const meta = DELIVERABLE_KIND_META[l.kind];
-        const Icon = meta.icon;
+        const Icon = DELIVERABLE_KIND_META[l.kind].icon;
         return (
           <a
             key={l.url}
@@ -51,14 +60,10 @@ export function DeliverableLinkChips({ links, className }: { links: ExtractedLin
             target="_blank"
             rel="noreferrer"
             data-testid="deliverable-chip"
-            className="group/chip inline-flex max-w-full items-center gap-1.5 rounded-lg border bg-card px-2.5 py-1.5 text-xs shadow-sm transition-colors hover:border-primary/40 hover:bg-accent"
+            className="inline-flex max-w-full items-center gap-1 rounded-md border bg-card px-1.5 py-0.5 text-[11px] shadow-sm transition-colors hover:border-primary/40 hover:bg-accent"
           >
-            <Icon className="size-3.5 shrink-0 text-primary" />
-            <span className="min-w-0 truncate font-medium">
-              {l.title ?? shortDeliverableUrl(l.url)}
-            </span>
-            <span className="shrink-0 text-muted-foreground">{meta.label}</span>
-            <ExternalLink className="size-3 shrink-0 text-muted-foreground/60 transition-colors group-hover/chip:text-muted-foreground" />
+            <Icon className="size-3 shrink-0 text-primary" />
+            <span className="min-w-0 truncate font-medium">{chipLabel(l)}</span>
           </a>
         );
       })}
