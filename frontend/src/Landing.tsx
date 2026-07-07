@@ -1,6 +1,28 @@
 import { navigate } from "./route";
 import { Fireflies } from "./Fireflies";
 
+function XIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden>
+      <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231 5.45-6.231Z" />
+    </svg>
+  );
+}
+
+function SubstackIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="currentColor" aria-hidden>
+      <path d="M22.539 8.242H1.46V5.406h21.08v2.836zM1.46 10.812V24L12 18.11 22.54 24V10.812H1.46zM22.54 0H1.46v2.836h21.08V0z" />
+    </svg>
+  );
+}
+
+const CONNECT = [
+  { label: "@suhaaspk", href: "https://x.com/suhaaspk", Icon: XIcon },
+  { label: "@sahilmdkr", href: "https://x.com/sahilmdkr", Icon: XIcon },
+  { label: "@suhaaspk", href: "https://substack.com/@suhaaspk", Icon: SubstackIcon },
+];
+
 const STEPS = [
   {
     n: "01",
@@ -181,6 +203,61 @@ export function Landing() {
           className="w-full rounded-xl border border-[rgba(240,245,238,0.16)] lg:w-[112%]"
         />
       </section>
+
+      {/* Footer */}
+      <footer className="relative z-10 border-t border-[rgba(240,245,238,0.12)]">
+        <div className="mx-auto flex w-full max-w-7xl flex-col justify-between gap-12 px-6 py-14 sm:px-10 md:flex-row">
+          <div>
+            <div className="flex items-center gap-2.5">
+              <img src="/icon-192.png" alt="" className="size-8 rounded-lg" />
+              <span className="jl-serif text-lg font-semibold">
+                Jungle<span className="text-[var(--jl-lime)]">.</span>
+              </span>
+            </div>
+            <p className="mt-6 text-xs text-[rgba(240,245,238,0.4)]">© 2026 Jungle</p>
+          </div>
+
+          <div className="flex gap-20">
+            <div>
+              <h3 className="text-xs font-medium uppercase tracking-[0.18em] text-[rgba(240,245,238,0.4)]">
+                Company
+              </h3>
+              <ul className="mt-4 space-y-3 text-sm">
+                <li>
+                  <a
+                    href="https://sahilandsuhaas.com"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-[var(--jl-ink-dim)] transition-colors hover:text-[var(--jl-ink)]"
+                  >
+                    Blog
+                  </a>
+                </li>
+              </ul>
+            </div>
+            <div>
+              <h3 className="text-xs font-medium uppercase tracking-[0.18em] text-[rgba(240,245,238,0.4)]">
+                Connect
+              </h3>
+              <ul className="mt-4 space-y-3 text-sm">
+                {CONNECT.map((c) => (
+                  <li key={c.href}>
+                    <a
+                      href={c.href}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="flex items-center gap-2.5 text-[var(--jl-ink-dim)] transition-colors hover:text-[var(--jl-ink)]"
+                    >
+                      <c.Icon className="size-3.5" />
+                      {c.label}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </div>
+      </footer>
     </main>
   );
 }
