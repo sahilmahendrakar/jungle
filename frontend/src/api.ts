@@ -17,6 +17,7 @@ import type {
   Deliverable,
   DeliverableKind,
   SearchResult,
+  ExtractedLink,
 } from "@jungle/shared";
 export {
   INTEGRATION_TYPES,
@@ -27,6 +28,7 @@ export {
   extractDeliverableLinks,
 } from "@jungle/shared";
 export type { IntegrationType, ConnectionType } from "@jungle/shared";
+export type { ExtractedLink };
 
 export type { Participant, Attachment, UnreadThread, AgentEvent, AgentStatus, AgentIntegration };
 export type { Schedule, Deliverable, DeliverableKind, SearchResult };

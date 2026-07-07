@@ -17,9 +17,11 @@ import {
   markThreadRead,
   listUnreadThreads,
   getChannelTurnChips,
+  extractDeliverableLinks,
   type AgentEvent,
   type Channel,
   type Deliverable,
+  type ExtractedLink,
   type Message,
   type Participant,
   type SearchResult,
@@ -766,6 +768,24 @@ export function App({
     return counts;
   }, [messages]);
 
+  // Deliverable links from a thread's replies, rolled up onto the root message so its chip row
+  // shows what the thread produced without opening it (agent messages only, own body links are
+  // handled separately by MessageBody so this only needs to cover reply bodies).
+  const deliverablesByRoot = useMemo(() => {
+    const agentHandles = new Set(people.filter((p) => p.kind === "agent").map((p) => p.handle));
+    const map = new Map<string, ExtractedLink[]>();
+    for (const m of messages) {
+      if (!m.body || !agentHandles.has(m.sender_handle)) continue;
+      const links = extractDeliverableLinks(m.body);
+      if (!links.length) continue;
+      const rootId = m.thread_root_id ?? m.id;
+      const existing = map.get(rootId) ?? [];
+      for (const l of links) if (!existing.some((e) => e.url === l.url)) existing.push(l);
+      map.set(rootId, existing);
+    }
+    return map;
+  }, [messages, people]);
+
   // Unread replies per followed thread (from the Threads endpoint), for the reply-footer badge.
   const unreadByRoot = useMemo(() => {
     const m = new Map<string, number>();
@@ -1117,6 +1137,7 @@ export function App({
             onOpenTurn={openTurnForMessage}
             turnsByMessage={turnsByMessage}
             queuedByMessage={queuedByMessage}
+            deliverablesByRoot={deliverablesByRoot}
             personById={(id) => peopleById.get(id)}
             onOpenLiveTurn={openLiveTurn}
             jumpToId={jumpToId}
