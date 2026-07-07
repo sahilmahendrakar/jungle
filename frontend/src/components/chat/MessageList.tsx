@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, Copy, MessageSquare, MessagesSquare } from "lucide-react";
+import { Activity, Check, Copy, MessageSquare, MessagesSquare } from "lucide-react";
 import type { Message, Participant } from "../../api";
 import { fmtTime } from "../../lib/chat";
 import { Markdown } from "../../Markdown";
 import { AgentBadge, AttachmentList, EmptyState, PersonAvatar } from "./panels";
+import { DeliverableChips } from "./deliverableCards";
 import {
   Tooltip,
   TooltipContent,
@@ -71,11 +72,16 @@ function ThreadFooter({
 function HoverActions({
   m,
   showReply,
+  showWork,
   onOpenThread,
+  onOpenTurn,
 }: {
   m: Message;
   showReply: boolean;
+  // The sender is an agent and this message is linked to the runner turn that produced it.
+  showWork: boolean;
   onOpenThread: (rootId: string) => void;
+  onOpenTurn: (m: Message) => void;
 }) {
   const [copied, setCopied] = useState(false);
   const copy = useCallback(() => {
@@ -121,12 +127,26 @@ function HoverActions({
             <TooltipContent side="top">Reply in thread</TooltipContent>
           </Tooltip>
         )}
+        {showWork && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                data-testid="view-work"
+                onClick={() => onOpenTurn(m)}
+                className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+              >
+                <Activity className="size-3.5" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="top">View the work behind this</TooltipContent>
+          </Tooltip>
+        )}
       </div>
     </div>
   );
 }
 
-// One message row body: markdown + attachments + hover actions + thread footer.
+// One message row body: markdown + attachments + deliverable chips + hover actions + thread footer.
 function MessageBody({
   m,
   className,
@@ -136,6 +156,7 @@ function MessageBody({
   replyCounts,
   unreadByRoot,
   onOpenThread,
+  onOpenTurn,
 }: {
   m: Message;
   className?: string;
@@ -145,12 +166,15 @@ function MessageBody({
   replyCounts: Map<string, number>;
   unreadByRoot: Map<string, number>;
   onOpenThread: (rootId: string) => void;
+  onOpenTurn: (m: Message) => void;
 }) {
   const isRoot = !m.thread_root_id;
   const hasReplies = isRoot && (replyCounts.get(m.id) ?? 0) > 0;
+  const isAgent = personByHandle(m.sender_handle)?.kind === "agent";
   return (
     <div
       data-testid="message"
+      data-message-id={m.id}
       className={cn("group/msg relative break-words", animate && "animate-msg-in", className)}
     >
       {m.body && (
@@ -159,13 +183,22 @@ function MessageBody({
         </Markdown>
       )}
       {(m.attachments?.length ?? 0) > 0 && <AttachmentList attachments={m.attachments!} />}
+      {/* Artifact cards for the work links agents post (PRs, docs, …) — agent messages only,
+          so a human pasting a PR link doesn't read as a "deliverable". */}
+      {isAgent && m.body && <DeliverableChips body={m.body} />}
       <ThreadFooter
         m={m}
         replyCounts={replyCounts}
         unreadByRoot={unreadByRoot}
         onOpenThread={onOpenThread}
       />
-      <HoverActions m={m} showReply={isRoot && !hasReplies} onOpenThread={onOpenThread} />
+      <HoverActions
+        m={m}
+        showReply={isRoot && !hasReplies}
+        showWork={isAgent && !!m.turn_id}
+        onOpenThread={onOpenThread}
+        onOpenTurn={onOpenTurn}
+      />
     </div>
   );
 }
@@ -184,6 +217,9 @@ export function MessageList({
   replyCounts,
   unreadByRoot,
   onOpenThread,
+  onOpenTurn,
+  jumpToId,
+  onJumpDone,
 }: {
   grouped: { lead: Message; rest: Message[] }[];
   hasChannel: boolean;
@@ -194,9 +230,27 @@ export function MessageList({
   replyCounts: Map<string, number>;
   unreadByRoot: Map<string, number>;
   onOpenThread: (rootId: string) => void;
+  // Open the agent Activity view focused on the turn that produced this message.
+  onOpenTurn: (m: Message) => void;
+  // Jump target (from search / the deliverables feed): once this message renders, scroll it into
+  // view with a flash highlight, then report done so the parent clears the target.
+  jumpToId: string | null;
+  onJumpDone: () => void;
 }) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const pinnedRef = useRef(true);
+
+  // Jump-to-message: runs after grouped renders; retries harmlessly until the target exists.
+  useEffect(() => {
+    if (!jumpToId) return;
+    const el = viewportRef.current?.querySelector(`[data-message-id="${jumpToId}"]`);
+    if (!el) return;
+    pinnedRef.current = false; // don't yank back to the bottom on the next content change
+    el.scrollIntoView({ block: "center" });
+    el.classList.add("animate-msg-flash");
+    setTimeout(() => el.classList.remove("animate-msg-flash"), 2000);
+    onJumpDone();
+  }, [jumpToId, grouped, onJumpDone]);
 
   // Track whether the user is at (near) the bottom, so new content only auto-scrolls when
   // they were already reading the newest messages.
@@ -289,6 +343,7 @@ export function MessageList({
                   replyCounts={replyCounts}
                   unreadByRoot={unreadByRoot}
                   onOpenThread={onOpenThread}
+                  onOpenTurn={onOpenTurn}
                 />
                 {rest.map((m) => (
                   <MessageBody
@@ -301,6 +356,7 @@ export function MessageList({
                     replyCounts={replyCounts}
                     unreadByRoot={unreadByRoot}
                     onOpenThread={onOpenThread}
+                    onOpenTurn={onOpenTurn}
                   />
                 ))}
               </div>

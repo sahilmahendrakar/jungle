@@ -135,6 +135,19 @@
       transform: translateY(0);
     }
   }
+
+  /* Jump-to-message highlight (search / deliverables): a primary-tinted wash that fades out. */
+  --animate-msg-flash: msg-flash 2s ease-out both;
+  @keyframes msg-flash {
+    0%,
+    30% {
+      background-color: color-mix(in oklab, var(--primary) 14%, transparent);
+      border-radius: 0.5rem;
+    }
+    100% {
+      background-color: transparent;
+    }
+  }
 }
 
 @layer base {

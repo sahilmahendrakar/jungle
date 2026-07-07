@@ -14,12 +14,22 @@ import type {
   InviteInfo,
   AgentIntegration,
   Schedule,
+  Deliverable,
+  DeliverableKind,
+  SearchResult,
 } from "@jungle/shared";
-export { INTEGRATION_TYPES, getIntegrationType, CONNECTION_TYPES, getConnectionType, connectionForIntegration } from "@jungle/shared";
+export {
+  INTEGRATION_TYPES,
+  getIntegrationType,
+  CONNECTION_TYPES,
+  getConnectionType,
+  connectionForIntegration,
+  extractDeliverableLinks,
+} from "@jungle/shared";
 export type { IntegrationType, ConnectionType } from "@jungle/shared";
 
 export type { Participant, Attachment, UnreadThread, AgentEvent, AgentStatus, AgentIntegration };
-export type { Schedule };
+export type { Schedule, Deliverable, DeliverableKind, SearchResult };
 export type { Me, GoogleProfile, Workspace, Membership, InviteInfo };
 // A message as delivered to the client (attachments carry signed download urls).
 export type Message = WireMessage;
@@ -450,6 +460,52 @@ export function confirmToolCall(confirmId: string, decision: "allow" | "deny"): 
     devAuth: true,
     errorMessage: "failed to submit decision",
   });
+}
+
+// A pending confirmation as listed by GET /api/confirmations (same payload as the WS card).
+export interface PendingConfirmation {
+  confirmId: string;
+  channelId: string;
+  agentId: string;
+  agentHandle: string;
+  agentName: string;
+  tool: string;
+  input: unknown;
+  createdAt: string;
+}
+
+// Every confirmation still awaiting my decision. Called on load/reconnect to rebuild the
+// approvals badge/inbox (the WS fan-out only reaches sockets open at request time).
+export function listPendingConfirms(): Promise<PendingConfirmation[]> {
+  return request<{ confirmations: PendingConfirmation[] }>(`/api/confirmations`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load approvals",
+  }).then((r) => r.confirmations);
+}
+
+// My deliverables feed (work artifacts agents shipped), newest first. Page backwards with
+// `before` = the smallest id already held.
+export function listDeliverables(opts: { before?: number; limit?: number } = {}): Promise<Deliverable[]> {
+  const qs = new URLSearchParams();
+  if (opts.before != null) qs.set("before", String(opts.before));
+  if (opts.limit != null) qs.set("limit", String(opts.limit));
+  const q = qs.toString();
+  return request<{ deliverables: Deliverable[] }>(`/api/deliverables${q ? `?${q}` : ""}`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load deliverables",
+  }).then((r) => r.deliverables);
+}
+
+// Full-text message search across my channels (the ⌘K palette).
+export function searchMessages(q: string, limit = 20): Promise<SearchResult[]> {
+  const qs = new URLSearchParams({ q, limit: String(limit) });
+  return request<{ results: SearchResult[] }>(`/api/search?${qs.toString()}`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "search failed",
+  }).then((r) => r.results);
 }
 
 // --- Channel members + delete ---

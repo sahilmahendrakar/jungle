@@ -324,3 +324,22 @@ export function turnSummary(items: Item[]): string {
   const note = items.find((i) => i.kind === "note") as NoteItem | undefined;
   return note?.text ?? "";
 }
+
+// "mcp__jungle__send_message" -> "send message"; PascalCase tool names stay as-is.
+function humanToolName(name: string): string {
+  const mcp = name.match(/^mcp__.+?__(.+)$/);
+  return (mcp ? mcp[1] : name).replace(/_/g, " ");
+}
+
+// What the agent is doing RIGHT NOW, for the ambient one-line working indicator: the still-
+// running tool call if there is one, else the freshest thinking/text tail.
+export function liveSummary(items: Item[]): string {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    if (it.kind === "tool" && !it.result) return `running ${humanToolName(it.name)}`;
+    if (it.kind === "tool") return `ran ${humanToolName(it.name)}`;
+    if (it.kind === "thinking") return "thinking…";
+    if (it.kind === "text") return clip(it.text.replace(/[#*`>]/g, "").trim());
+  }
+  return "getting started…";
+}

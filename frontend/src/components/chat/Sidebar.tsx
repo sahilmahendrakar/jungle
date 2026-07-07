@@ -6,7 +6,10 @@ import {
   MessagesSquare,
   Moon,
   MonitorSmartphone,
+  Package,
   PanelLeftClose,
+  Search,
+  ShieldQuestion,
   Sun,
 } from "lucide-react";
 import type { Channel, Participant, Membership } from "../../api";
@@ -79,6 +82,14 @@ export function Sidebar({
   onOpenThreads,
   onOpenScheduled,
   scheduledActive,
+  onOpenAgents,
+  agentsActive,
+  onOpenApprovals,
+  approvalsActive,
+  approvalsCount,
+  onOpenDeliverables,
+  deliverablesActive,
+  onOpenSearch,
   onNewChannel,
   onAddAgent,
   onCollapse,
@@ -110,6 +121,14 @@ export function Sidebar({
   onOpenThreads: () => void;
   onOpenScheduled: () => void;
   scheduledActive: boolean;
+  onOpenAgents: () => void;
+  agentsActive: boolean;
+  onOpenApprovals: () => void;
+  approvalsActive: boolean;
+  approvalsCount: number;
+  onOpenDeliverables: () => void;
+  deliverablesActive: boolean;
+  onOpenSearch: () => void;
   onNewChannel: () => void;
   onAddAgent: () => void;
   onCollapse: () => void;
@@ -171,6 +190,27 @@ export function Sidebar({
 
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div className="px-2 py-3">
+            {/* Search: the ⌘K palette (messages, channels, people). */}
+            <NavItem
+              testId="search-nav"
+              active={false}
+              onClick={onOpenSearch}
+              icon={<Search className="size-4 opacity-70" />}
+              label="Search"
+              trailing={
+                <kbd className="hidden rounded border border-sidebar-border px-1 font-mono text-[10px] text-sidebar-foreground/40 md:inline">
+                  ⌘K
+                </kbd>
+              }
+            />
+            {/* Agents: mission control — every agent, its live status, and what it's doing. */}
+            <NavItem
+              testId="agents-nav"
+              active={agentsActive}
+              onClick={onOpenAgents}
+              icon={<Bot className="size-4 opacity-70" />}
+              label="Agents"
+            />
             {/* Threads: my followed threads with unread replies (participation-gated). */}
             <NavItem
               testId="threads-nav"
@@ -181,6 +221,25 @@ export function Sidebar({
               unread={totalThreadUnread > 0}
               badgeCount={totalThreadUnread}
               badgeMention={totalThreadUnread > 0}
+            />
+            {/* Approvals: tool confirmations waiting on a human — badge = blocked agents. */}
+            <NavItem
+              testId="approvals-nav"
+              active={approvalsActive}
+              onClick={onOpenApprovals}
+              icon={<ShieldQuestion className="size-4 opacity-70" />}
+              label="Approvals"
+              unread={approvalsCount > 0}
+              badgeCount={approvalsCount}
+              badgeMention={approvalsCount > 0}
+            />
+            {/* Deliverables: the durable "what agents shipped" feed. */}
+            <NavItem
+              testId="deliverables-nav"
+              active={deliverablesActive}
+              onClick={onOpenDeliverables}
+              icon={<Package className="size-4 opacity-70" />}
+              label="Deliverables"
             />
             {/* Scheduled: workspace-wide scheduled agent turns (a main-column view in-layout). */}
             <NavItem

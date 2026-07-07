@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils";
 import { BrandTile, useConnections, type ConnectionState } from "@/lib/connections";
 import {
   ArrowLeft,
+  Bell,
   Check,
   ChevronDown,
   ExternalLink,
@@ -20,6 +21,12 @@ import {
   Unlink,
   X,
 } from "lucide-react";
+import {
+  notificationsEnabled,
+  notificationPermission,
+  requestNotificationPermission,
+  setNotificationsEnabled,
+} from "./lib/notifications";
 
 // One thin connection row: brand tile + name + live status, expanding on click to the
 // connect/disconnect controls (and, for GitHub, the App-installation details).
@@ -190,6 +197,65 @@ function GithubAppDetails({ github }: { github: NonNullable<ConnectionState["git
 // The account + connections settings body, shared by the right-panel `SettingsPanel` and the
 // legacy full-page `/settings` route. Pulls the current user from the auth context, so it must
 // render under an AuthProvider (i.e. only in Firebase mode).
+// Desktop notifications: permission request + on/off preference (lib/notifications.ts owns the
+// mechanics; the rules of what pings — DMs, mentions, approvals — live in App).
+function NotificationsSection() {
+  const [enabled, setEnabled] = useState(notificationsEnabled());
+  const [perm, setPerm] = useState(notificationPermission());
+  const active = enabled && perm === "granted";
+
+  async function toggle() {
+    if (active) {
+      setNotificationsEnabled(false);
+      setEnabled(false);
+      return;
+    }
+    const p = await requestNotificationPermission();
+    setPerm(p);
+    if (p === "granted") {
+      setNotificationsEnabled(true);
+      setEnabled(true);
+    }
+  }
+
+  return (
+    <section className="mt-8 space-y-3">
+      <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Notifications
+      </h2>
+      <div className="rounded-xl border bg-card p-4">
+        <div className="flex items-center gap-3">
+          <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10">
+            <Bell className="size-5 text-primary" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-medium">Desktop notifications</div>
+            <div className="text-xs text-muted-foreground">
+              {perm === "unsupported"
+                ? "Not supported in this browser."
+                : perm === "denied"
+                  ? "Blocked in your browser settings — allow notifications for this site to enable."
+                  : active
+                    ? "On — DMs, mentions, and approvals ping you when you're not looking."
+                    : "Get pinged for DMs, mentions, and approvals when the tab isn't focused."}
+            </div>
+          </div>
+          <Button
+            data-testid="settings-notifications-toggle"
+            onClick={toggle}
+            disabled={perm === "unsupported" || perm === "denied"}
+            size="sm"
+            variant={active ? "outline" : "default"}
+            className="shrink-0"
+          >
+            {active ? "Turn off" : "Turn on"}
+          </Button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function SettingsContent() {
   const { me, signOut } = useAuth();
   const profile = me?.profile;
@@ -245,6 +311,8 @@ function SettingsContent() {
           </div>
         </div>
       </section>
+
+      <NotificationsSection />
 
       {/* Connections: every account link agents can build on — one searchable list; each row
           expands for details. Integrations attach these per-agent (agent profile → Integrations). */}

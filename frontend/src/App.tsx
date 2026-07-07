@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   listChannels,
   markChannelRead,
@@ -10,14 +10,18 @@ import {
   removeChannelMember,
   deleteChannel,
   confirmToolCall,
+  listPendingConfirms,
+  listDeliverables,
   setDevParticipantId,
   getThread,
   markThreadRead,
   listUnreadThreads,
   type AgentEvent,
   type Channel,
+  type Deliverable,
   type Message,
   type Participant,
+  type SearchResult,
   type UnreadThread,
   type Membership,
 } from "./api";
@@ -26,16 +30,21 @@ import {
   newId,
   type ToolConfirm,
 } from "./lib/chat";
+import { notify, setAppBadge } from "./lib/notifications";
 import { SignIn } from "./SignIn";
 import { SettingsPanel } from "./Settings";
 import { Scheduled } from "./Scheduled";
+import { Approvals } from "./Approvals";
+import { DeliverablesView } from "./Deliverables";
+import { AgentsHome } from "./AgentsHome";
+import { SearchDialog } from "./SearchDialog";
 import { navigate, usePath } from "./route";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { AgentActivity } from "./AgentActivity";
 import { DmActivityView } from "./components/chat/DmActivityView";
+import { ChannelActivity } from "./components/chat/ChannelActivity";
 import {
-  WorkingDots,
   ResizeHandle,
   useMediaQuery,
   usePersistedWidth,
@@ -54,6 +63,7 @@ import { MembersDialog } from "./components/chat/MembersDialog";
 import { DeleteChannelDialog } from "./components/chat/DeleteChannelDialog";
 import { InviteDialog } from "./components/chat/InviteDialog";
 import { useChatSocket } from "./ws/useChatSocket";
+import { useLiveTurns } from "./ws/useLiveTurns";
 
 
 
@@ -92,6 +102,18 @@ export function App({
   const [showInvite, setShowInvite] = useState(false);
   // Pending tool-confirmation cards (always_ask agents), keyed by confirmId.
   const [confirms, setConfirms] = useState<ToolConfirm[]>([]);
+  // The deliverables feed (newest first): first page fetched on load, live rows appended via WS.
+  const [deliverables, setDeliverables] = useState<Deliverable[]>([]);
+  const [delivLoading, setDelivLoading] = useState(true);
+  const [delivHasMore, setDelivHasMore] = useState(false);
+  // ⌘K search palette.
+  const [searchOpen, setSearchOpen] = useState(false);
+  // Jump target from search / the deliverables feed: MessageList scrolls it into view with a
+  // flash once the message renders, then clears it via onJumpDone.
+  const [jumpToId, setJumpToId] = useState<string | null>(null);
+  // Bounded always-on buffer of each agent's current turn (ambient activity surfaces).
+  const { liveTurnsRef, liveVersion, ingestLiveEvent } = useLiveTurns();
+  void liveVersion; // consumed for re-render timing only; the data rides liveTurnsRef
 
   // Threads. The right-side panel is open when a thread is open (threadRootId) or the Threads
   // list is showing (threadsListOpen). Replies + the root are DERIVED from `messages` (the
@@ -132,6 +154,19 @@ export function App({
   // Firebase mode (workspaceId set): the page is workspace-scoped and uses the auth context.
   const path = usePath();
   const scheduledOpen = path === "/scheduled" && !!workspaceId;
+  // The other main-column views (deep-linkable like Scheduled, but not workspace-gated — they
+  // work in dev mode too).
+  const approvalsOpen = path === "/approvals";
+  const deliverablesOpen = path === "/deliverables";
+  const agentsOpen = path === "/agents";
+  const overlayViewOpen = scheduledOpen || approvalsOpen || deliverablesOpen || agentsOpen;
+  // Reading "am I on an overlay view" from long-lived callbacks without re-binding them.
+  const overlayViewRef = useRef(false);
+  overlayViewRef.current = overlayViewOpen;
+  // Leave any overlay view and land back in the chat column.
+  const goToChat = useCallback(() => {
+    if (overlayViewRef.current) navigate("/");
+  }, []);
   // Activity view: the sdk agent whose transcript is open, plus a live event buffer for it.
   // We only buffer while a view is open (activityIdRef gates the WS handler), so idle agents
   // don't accumulate unbounded memory. `activityMode` picks how it's rendered: "modal" for the
@@ -140,12 +175,18 @@ export function App({
   const [activityId, setActivityId] = useState<string | null>(null);
   const [activityMode, setActivityMode] = useState<"modal" | "inline">("modal");
   const [activityEvents, setActivityEvents] = useState<AgentEvent[]>([]);
+  // When set, the modal Activity view opens scrolled to this turn ("view the work behind this").
+  const [activityFocusTurn, setActivityFocusTurn] = useState<string | null>(null);
   const activityIdRef = useRef<string | null>(null);
   activityIdRef.current = activityId;
   const activityModeRef = useRef<"modal" | "inline">("modal");
   activityModeRef.current = activityMode;
   const selectedRef = useRef<string | null>(null);
   selectedRef.current = selected;
+  // Live channel list for the WS notification decision (is this a DM? what's it called?)
+  // without re-binding the socket handlers.
+  const channelsRef = useRef<Channel[]>([]);
+  channelsRef.current = channels;
   // Whether this tab is focused/visible — a message for the open channel only auto-marks-read
   // when the user is actually looking at it (Slack behaviour). Tracked via a ref so the WS
   // handler reads a live value without re-subscribing.
@@ -180,6 +221,36 @@ export function App({
   // Reload my followed-threads-with-unread list (drives the Threads nav badge + list view).
   function refreshThreads() {
     listUnreadThreads().then(setUnreadThreads).catch(() => {});
+  }
+
+  // Rebuild pending approvals from the backend (load + every WS reconnect — a confirm that
+  // arrived while disconnected never fanned out to this socket).
+  const refreshConfirms = useCallback(() => {
+    listPendingConfirms()
+      .then((rows) => setConfirms(rows.map((r) => ({ ...r }))))
+      .catch(() => {});
+  }, []);
+
+  // First page of the deliverables feed; older pages via loadMoreDeliverables.
+  function reloadDeliverables() {
+    setDelivLoading(true);
+    listDeliverables({ limit: 50 })
+      .then((ds) => {
+        setDeliverables(ds);
+        setDelivHasMore(ds.length >= 50);
+      })
+      .catch(() => {})
+      .finally(() => setDelivLoading(false));
+  }
+  async function loadMoreDeliverables() {
+    if (!deliverables.length) return;
+    const before = deliverables[deliverables.length - 1].id;
+    const page = await listDeliverables({ before, limit: 50 }).catch(() => [] as Deliverable[]);
+    setDeliverables((ds) => {
+      const seen = new Set(ds.map((d) => d.id));
+      return [...ds, ...page.filter((d) => !seen.has(d.id))];
+    });
+    setDelivHasMore(page.length >= 50);
   }
 
   function refreshMembers() {
@@ -228,12 +299,15 @@ export function App({
     }
   }
 
-  // Channels this participant belongs to + everyone (for the member picker).
+  // Channels this participant belongs to + everyone (for the member picker), plus the pending
+  // approvals and the deliverables feed's first page.
   useEffect(() => {
     if (!participantId) return;
     reloadChannels();
     listParticipants().then(setPeople).catch(() => {});
     refreshThreads();
+    refreshConfirms();
+    reloadDeliverables();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [participantId]);
 
@@ -300,6 +374,63 @@ export function App({
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // ⌘K / Ctrl+K: the search palette.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setSearchOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // Tab badge: everything that's directly for me — DM unreads, mention-flagged channel unreads,
+  // unread thread replies, and approvals waiting on a decision.
+  useEffect(() => {
+    const direct = channels.reduce(
+      (n, c) =>
+        n + (c.kind === "dm" || c.has_mention ? c.unread_count ?? 0 : 0),
+      0,
+    );
+    const threadUnread = unreadThreads.reduce((n, t) => n + t.unread_count, 0);
+    setAppBadge(direct + threadUnread + confirms.length);
+  }, [channels, unreadThreads, confirms.length]);
+
+  // Desktop ping for an incoming message: DMs and mentions of me, when I'm not looking at that
+  // conversation. Clicking focuses the tab and opens it. (lib/notifications gates on permission,
+  // the user's preference, and tab focus.)
+  const onNotifiableMessage = useCallback(
+    (m: Message, isOpen: boolean) => {
+      if (isOpen && focusedRef.current) return;
+      const ch = channelsRef.current.find((c) => c.id === m.channel_id);
+      const isDm = ch?.kind === "dm";
+      const mentionsMe = (m.mentions ?? []).some((x) => x.id === participantId);
+      if (!isDm && !mentionsMe) return;
+      notify({
+        title: isDm ? `@${m.sender_handle}` : `@${m.sender_handle} in #${ch?.name ?? "channel"}`,
+        body: m.body || "Sent an attachment",
+        tag: m.channel_id, // one notification per conversation, newest wins
+        onClick: () => {
+          goToChat();
+          setSelected(m.channel_id);
+        },
+      });
+    },
+    [participantId, goToChat],
+  );
+
+  // Desktop ping for a tool confirmation: an agent is blocked until someone decides.
+  const onConfirmRequested = useCallback((c: ToolConfirm) => {
+    notify({
+      title: "Approval needed",
+      body: `${c.agentName} wants to run ${c.tool}`,
+      tag: c.confirmId,
+      onClick: () => navigate("/approvals"),
+    });
+  }, []);
+
   // One auto-reconnecting WebSocket owning the ServerEvent dispatch (see useChatSocket). Returns
   // the socket ref for posting frames (messages, thread replies, steering).
   const wsRef = useChatSocket({
@@ -316,11 +447,16 @@ export function App({
     setSelected,
     setConfirms,
     setActivityEvents,
+    setDeliverables,
     setProfileId,
     setNotice,
     markRead,
     refreshThreads,
     reloadChannels,
+    ingestLiveEvent,
+    onNotifiableMessage,
+    onConfirmRequested,
+    onConnected: refreshConfirms,
   });
 
   // Post the composer's message over WS. No optimistic echo — the message appears when it
@@ -454,13 +590,44 @@ export function App({
     }
   }
 
-  // Open an sdk agent's Activity view as a full-screen dialog (from the profile panel). Reset
-  // the live buffer so it only holds frames that arrive while this view is open (history is
-  // fetched inside AgentActivity).
-  function openActivity(agentId: string) {
+  // Open an sdk agent's Activity view as a full-screen dialog (from the profile panel, the
+  // agents overview, or a message's "view work"). Reset the live buffer so it only holds frames
+  // that arrive while this view is open (history is fetched inside AgentActivity).
+  function openActivity(agentId: string, focusTurnId: string | null = null) {
     setActivityEvents([]);
     setActivityMode("modal");
+    setActivityFocusTurn(focusTurnId);
     setActivityId(agentId);
+  }
+
+  // "View the work behind this message": open the sender agent's Activity focused on the turn
+  // that produced it.
+  function openTurnForMessage(m: Message) {
+    const sender = people.find((p) => p.handle === m.sender_handle);
+    if (!sender || !m.turn_id) return;
+    openActivity(sender.id, m.turn_id);
+  }
+
+  // Jump to a message (search hit / deliverable): land in its channel, open its thread if it
+  // was a pure thread reply, and let MessageList scroll + flash it once rendered.
+  function jumpToMessage(channelId: string, messageId: string, threadRootId?: string | null) {
+    goToChat();
+    if (channelId !== selectedRef.current) setSelected(channelId);
+    if (threadRootId) {
+      // A pure thread reply doesn't render in the timeline — open its thread instead. Seed the
+      // messages so the pane isn't blank while the channel history loads.
+      getThread(channelId, threadRootId)
+        .then((msgs) => setMessages((prev) => mergeById(prev, msgs)))
+        .catch(() => {});
+      openThread(threadRootId, channelId);
+    } else {
+      setJumpToId(messageId);
+    }
+    setDrawerOpen(false);
+  }
+
+  function jumpToSearchResult(r: SearchResult) {
+    jumpToMessage(r.channel_id, r.message_id, r.thread_root_id);
   }
 
   // The DM header's "View activity"/"View chat" toggle: swaps the message list for the same
@@ -644,19 +811,30 @@ export function App({
         personByHandle={personByHandle}
         dmChannelWith={dmChannelWith}
         onSelectChannel={(id) => {
-          if (scheduledOpen) navigate("/");
+          goToChat();
           selectAndClose(id);
         }}
         onOpenDm={(id) => {
-          if (scheduledOpen) navigate("/");
+          goToChat();
           openDm(id);
         }}
         onOpenThreads={() => {
-          if (scheduledOpen) navigate("/");
+          goToChat();
           openThreadsList();
         }}
         onOpenScheduled={() => navigate("/scheduled")}
         scheduledActive={scheduledOpen}
+        onOpenAgents={() => navigate("/agents")}
+        agentsActive={agentsOpen}
+        onOpenApprovals={() => navigate("/approvals")}
+        approvalsActive={approvalsOpen}
+        approvalsCount={confirms.length}
+        onOpenDeliverables={() => navigate("/deliverables")}
+        deliverablesActive={deliverablesOpen}
+        onOpenSearch={() => {
+          setSearchOpen(true);
+          setDrawerOpen(false);
+        }}
         onNewChannel={() => setShowNew(true)}
         onAddAgent={() => setShowAddAgent(true)}
         onCollapse={() => {
@@ -664,11 +842,11 @@ export function App({
           setDrawerOpen(false); // mobile: close the off-canvas drawer
         }}
         onOpenProfile={(id) => {
-          if (scheduledOpen) navigate("/");
+          goToChat();
           openProfilePanel(id);
         }}
         onOpenSettings={() => {
-          if (scheduledOpen) navigate("/");
+          goToChat();
           openSettingsPanel();
         }}
         onSignOut={signOut}
@@ -702,6 +880,52 @@ export function App({
           sidebarOpen={sidebarOpen}
           onOpenDrawer={() => setDrawerOpen(true)}
           onExpandSidebar={() => setSidebarOpen(true)}
+        />
+      ) : approvalsOpen ? (
+        <Approvals
+          confirms={confirms}
+          channels={channels}
+          sidebarOpen={sidebarOpen}
+          onOpenDrawer={() => setDrawerOpen(true)}
+          onExpandSidebar={() => setSidebarOpen(true)}
+          onDecide={decideConfirm}
+          onJumpToChannel={(channelId) => {
+            goToChat();
+            selectAndClose(channelId);
+          }}
+        />
+      ) : deliverablesOpen ? (
+        <DeliverablesView
+          deliverables={deliverables}
+          loading={delivLoading}
+          hasMore={delivHasMore}
+          onLoadMore={loadMoreDeliverables}
+          sidebarOpen={sidebarOpen}
+          onOpenDrawer={() => setDrawerOpen(true)}
+          onExpandSidebar={() => setSidebarOpen(true)}
+          onJumpToMessage={(channelId, messageId) => jumpToMessage(channelId, messageId)}
+        />
+      ) : agentsOpen || !sel ? (
+        // Mission control — also the landing view when no conversation is open.
+        <AgentsHome
+          agents={others.filter((p) => p.kind === "agent")}
+          liveTurns={liveTurnsRef.current}
+          confirms={confirms}
+          deliverables={deliverables}
+          sidebarOpen={sidebarOpen}
+          onOpenDrawer={() => setDrawerOpen(true)}
+          onExpandSidebar={() => setSidebarOpen(true)}
+          onOpenDm={(id) => {
+            goToChat();
+            openDm(id);
+          }}
+          onOpenActivity={openActivity}
+          onOpenProfile={(id) => {
+            goToChat();
+            openProfilePanel(id);
+          }}
+          onOpenApprovals={() => navigate("/approvals")}
+          onAddAgent={() => setShowAddAgent(true)}
         />
       ) : (
       <main className="flex min-w-0 flex-1 flex-col bg-background">
@@ -737,26 +961,21 @@ export function App({
             replyCounts={replyCounts}
             unreadByRoot={unreadByRoot}
             onOpenThread={openThread}
+            onOpenTurn={openTurnForMessage}
+            jumpToId={jumpToId}
+            onJumpDone={() => setJumpToId(null)}
           />
         )}
 
-        {/* Working / waking indicator — DMs only; in a multi-member channel this fires for every
-            agent's every turn and mostly reads as noise. Hidden while viewing the activity
-            transcript, which already shows live status in its own header. */}
-        {sel?.kind === "dm" && !inlineActivityOpen && busyMembers.length > 0 && (
-          <div
-            data-testid="working-indicator"
-            className="flex items-center gap-2 px-3 py-1.5 text-sm text-muted-foreground md:px-5"
-          >
-            <WorkingDots />
-            <span>
-              <span className="font-medium text-foreground">
-                {busyMembers.map((m) => `@${m.handle}`).join(", ")}
-              </span>{" "}
-              {busyMembers.length > 1 ? "are" : "is"}{" "}
-              {busyMembers.every((m) => m.status === "waking") ? "waking up…" : "working…"}
-            </span>
-          </div>
+        {/* Ambient agent activity — one row per busy agent with a live "doing X" summary,
+            expandable in place to the current turn's transcript. Channels AND DMs. Hidden while
+            the inline activity view is open (it already shows the live transcript). */}
+        {!inlineActivityOpen && (
+          <ChannelActivity
+            busyAgents={busyMembers}
+            liveTurns={liveTurnsRef.current}
+            onOpenActivity={openActivity}
+          />
         )}
 
         {/* Pending tool confirmations for this channel (always_ask agents) */}
@@ -911,13 +1130,33 @@ export function App({
           key={activityAgent.id}
           agent={activityAgent}
           events={activityEvents}
+          focusTurnId={activityFocusTurn}
           onClose={() => {
             setActivityId(null);
             setActivityEvents([]);
+            setActivityFocusTurn(null);
           }}
           onSteer={steerAgent}
         />
       )}
+
+      {/* ⌘K search: messages (server FTS), channels, and people. */}
+      <SearchDialog
+        open={searchOpen}
+        onOpenChange={setSearchOpen}
+        channels={channels}
+        people={people}
+        participantId={participantId}
+        onSelectChannel={(id) => {
+          goToChat();
+          selectAndClose(id);
+        }}
+        onOpenDm={(id) => {
+          goToChat();
+          openDm(id);
+        }}
+        onJumpToMessage={jumpToSearchResult}
+      />
     </div>
   );
 }

@@ -14,11 +14,15 @@ export function ActivityTranscript({
   agent,
   events,
   running,
+  focusTurnId,
 }: {
   agent: Participant;
   // Live-merged events for this agent, oldest-first, owned by the parent (buffered while open).
   events: AgentEvent[];
   running: boolean;
+  // Open scrolled to (and expanded on) this turn instead of pinned to the newest — the
+  // "view the work behind this message" entry point.
+  focusTurnId?: string | null;
 }) {
   const isSdk = agent.runtime === "sdk";
   const [history, setHistory] = useState<AgentEvent[]>([]);
@@ -89,6 +93,17 @@ export function ActivityTranscript({
     if (vp && pinnedRef.current) vp.scrollTop = vp.scrollHeight;
   }, [all.length, loading]);
 
+  // Focused open: once loaded, scroll the focus turn into view (instead of the bottom pin).
+  const focusedRef = useRef(false);
+  useEffect(() => {
+    if (!focusTurnId || loading || focusedRef.current) return;
+    const el = viewportRef.current?.querySelector(`[data-turn-id="${focusTurnId}"]`);
+    if (!el) return; // may be beyond the first page — the user can "Load earlier"
+    focusedRef.current = true;
+    pinnedRef.current = false;
+    el.scrollIntoView({ block: "start" });
+  }, [focusTurnId, loading, turns.length]);
+
   const empty = !loading && turns.length === 0;
 
   return (
@@ -132,7 +147,7 @@ export function ActivityTranscript({
               <TurnSection
                 key={t.turnId}
                 turn={t}
-                defaultOpen={i === turns.length - 1}
+                defaultOpen={i === turns.length - 1 || t.turnId === focusTurnId}
                 running={running && i === turns.length - 1}
               />
             ))}

@@ -34,10 +34,12 @@ export const EFFORT_OPTIONS = [
 export interface ToolConfirm {
   confirmId: string;
   channelId: string;
+  agentId?: string;
   agentName: string;
   agentHandle: string;
   tool: string;
   input: unknown;
+  createdAt?: string;
   status?: "resolved";
   result?: "allow" | "deny";
   by?: string;

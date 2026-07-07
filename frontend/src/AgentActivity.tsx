@@ -31,12 +31,15 @@ function StatusDot({ status }: { status: AgentStatus }) {
 export function AgentActivity({
   agent,
   events,
+  focusTurnId,
   onClose,
   onSteer,
 }: {
   agent: Participant;
   // Live-merged events for this agent, oldest-first, owned by the parent (buffered while open).
   events: AgentEvent[];
+  // Open scrolled to this turn ("view the work behind this message").
+  focusTurnId?: string | null;
   onClose: () => void;
   // Send a normal DM to the agent (flows through the inbox to the next turn boundary).
   onSteer: (agent: Participant, body: string) => Promise<void>;
@@ -123,7 +126,7 @@ export function AgentActivity({
           )}
         </DialogHeader>
 
-        <ActivityTranscript agent={agent} events={events} running={running} />
+        <ActivityTranscript agent={agent} events={events} running={running} focusTurnId={focusTurnId} />
 
         {err && (
           <div className="mx-4 mb-1 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive">

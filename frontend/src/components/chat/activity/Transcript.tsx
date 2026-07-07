@@ -284,7 +284,9 @@ function RawRow({ item }: { item: RawItem }) {
   );
 }
 
-function ItemRow({ item, turnDone }: { item: Item; turnDone: boolean }) {
+// One renderable transcript item. Exported for the ambient channel-activity card, which renders
+// a live turn's items without the TurnSection chrome.
+export function ItemRow({ item, turnDone }: { item: Item; turnDone: boolean }) {
   switch (item.kind) {
     case "text":
       return (
@@ -344,7 +346,7 @@ export function TurnSection({
   const startedAt = turn.events[0]?.created_at;
 
   return (
-    <div data-testid="activity-turn" className="rounded-lg border bg-card">
+    <div data-testid="activity-turn" data-turn-id={turn.turnId} className="rounded-lg border bg-card">
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
