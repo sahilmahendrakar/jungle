@@ -41,7 +41,7 @@ function TurnChip({
       onClick={() => onOpenTurn(turn)}
       title="View this work in Activity"
       className={cn(
-        "mt-1 flex w-fit max-w-full items-center gap-2 rounded-lg border px-2.5 py-1 text-left text-xs transition-colors",
+        "flex w-fit max-w-full items-center gap-2 rounded-lg border px-2.5 py-1 text-left text-xs transition-colors",
         turn.done
           ? "border-border bg-muted/40 text-muted-foreground hover:bg-accent"
           : "border-emerald-500/30 bg-emerald-500/5 hover:bg-emerald-500/10",
@@ -69,6 +69,8 @@ function TurnChip({
 }
 
 // All chips for one message (a multi-agent mention triggers several turns — one chip each).
+// `contents` so each chip is a direct flex item of the shared footer row (reply chip + turn
+// chips, all on one line) instead of nesting its own row inside that row.
 export function MessageTurnChips({
   turns,
   personById,
@@ -80,7 +82,7 @@ export function MessageTurnChips({
 }) {
   if (!turns.length) return null;
   return (
-    <div data-testid="turn-chips" className="flex flex-col items-start">
+    <div data-testid="turn-chips" className="contents">
       {turns.map((t) => (
         <TurnChip key={`${t.agentId}:${t.turnId}`} turn={t} agent={personById(t.agentId)} onOpenTurn={onOpenTurn} />
       ))}
