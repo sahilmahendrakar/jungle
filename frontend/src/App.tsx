@@ -1245,6 +1245,10 @@ export function App({
               onClose={closeThreadPanel}
               onOpenThreadFromList={openThreadFromList}
               onSendReply={sendThreadReply}
+              rootTurns={(threadRootId && turnsByMessage.get(threadRootId)) || []}
+              rootQueued={(threadRootId && queuedByMessage.get(threadRootId)) || []}
+              personById={(id) => peopleById.get(id)}
+              onOpenTurn={openLiveTurn}
             />
           )}
 
