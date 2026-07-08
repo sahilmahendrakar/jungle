@@ -15,7 +15,7 @@ import { broadcastWorkspace } from "../../ws/appSocket";
 import { listPendingConfirmsFor, resolveConfirmDecision } from "../../services/confirmations";
 import { wrap, ApiError } from "../errors";
 import { optInt } from "../validate";
-import { publicParticipant, requireAgent, requireRequester } from "../guards";
+import { publicParticipant, requireAgent, requireRequester, accountUid } from "../guards";
 import { adapterFor } from "../../integrations";
 
 const router = Router();
@@ -75,7 +75,20 @@ router.post(
     if (!isSdkMode(mode)) throw new ApiError(400, `unsupported mode: ${mode}`);
     const integrations = validateIntegrations(req.body?.integrations);
     const runnerToken = randomBytes(32).toString("hex");
-    const runnerProvider = req.body?.runnerProvider === "fly" ? "fly" : RUNNER_PROVIDER_DEFAULT;
+    // Environment: cloud default, 'fly' opt-in, or 'self_hosted' bound to one of the requester's
+    // registered devices (must be assignable — their own device, or one shared into this workspace).
+    let runnerProvider = RUNNER_PROVIDER_DEFAULT;
+    let hostId: string | null = null;
+    if (req.body?.runnerProvider === "fly") {
+      runnerProvider = "fly";
+    } else if (req.body?.runnerProvider === "self_hosted") {
+      runnerProvider = "self_hosted";
+      hostId = String(req.body?.hostId ?? "");
+      if (!hostId) throw new ApiError(400, "hostId is required for a self-hosted agent");
+      if (!(await db.canAssignHost(hostId, accountUid(me), me.workspace_id))) {
+        throw new ApiError(403, "you don't have access to run agents on that device");
+      }
+    }
     // The agent joins the creator's workspace, subject to the workspace's agent cap. The cap check
     // + insert run in one transaction (FOR UPDATE on the workspace row) so concurrent creates can't
     // both slip past the limit.
@@ -87,19 +100,26 @@ router.post(
         model, mode, runnerProvider,
       }, client);
     });
+    // Bind the agent to its device before provisioning reads runner_meta.hostId.
+    if (hostId) await db.setRunnerMeta(participant.id, { hostId });
     for (const { key, config } of integrations) {
       await db.setAgentIntegration(participant.id, key, await resolveIntegrationConfig(me, participant.id, key, config));
     }
     // Respond immediately — provisioning (esp. a Fly machine's first boot / image pull) can take
-    // up to ~1min, and the row + status UI ("waking") already give the client what it needs.
-    res.status(201).json({ ...publicParticipant(participant), integrations });
+    // up to ~1min, and the row + status UI ("waking"/"offline") already give the client what it needs.
+    const runnerMeta = hostId ? { hostId } : participant.runner_meta;
+    res.status(201).json({ ...publicParticipant({ ...participant, runner_meta: runnerMeta }), integrations });
     // Provision + start in the background. Best-effort: if the provisioner isn't available the
-    // agent row still exists and a runner can be started later; just log the failure.
+    // agent row still exists and a runner can be started later; just log the failure. For
+    // self-hosted, start() sends a run command to the device (no-op if it's offline — the agent
+    // shows `offline` until the daemon reconnects), and we only show "waking" if the device is up.
     void (async () => {
       try {
         await provisionerFor(participant).create({ id: participant.id, handle, runnerToken });
         await provisionerFor(participant).start(participant.id);
-        runners.noteProvisionerStart(participant.id); // show "waking" until the runner connects
+        if (runnerProvider !== "self_hosted" || runners.isAgentDeviceOnline(participant.id)) {
+          runners.noteProvisionerStart(participant.id); // show "waking" until the runner connects
+        }
       } catch (e) {
         console.error("provisioner create/start:", e);
       }

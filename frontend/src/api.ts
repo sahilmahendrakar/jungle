@@ -18,6 +18,7 @@ import type {
   DeliverableKind,
   SearchResult,
   ExtractedLink,
+  RunnerHost,
 } from "@jungle/shared";
 export {
   INTEGRATION_TYPES,
@@ -30,7 +31,7 @@ export {
 export type { IntegrationType, ConnectionType } from "@jungle/shared";
 export type { ExtractedLink };
 
-export type { Participant, Attachment, UnreadThread, AgentEvent, AgentStatus, AgentIntegration };
+export type { Participant, Attachment, UnreadThread, AgentEvent, AgentStatus, AgentIntegration, RunnerHost };
 export type { Schedule, Deliverable, DeliverableKind, SearchResult };
 export type { Me, GoogleProfile, Workspace, Membership, InviteInfo };
 // A message as delivered to the client (attachments carry signed download urls).
@@ -187,6 +188,10 @@ export function createParticipant(p: {
   integrations?: Array<{ key: string; config: Record<string, unknown> }>;
   model?: string;
   mode?: string;
+  // Environment: omitted = cloud default; "self_hosted" + hostId runs the agent on a registered
+  // device (see listDevices).
+  runnerProvider?: string;
+  hostId?: string;
 }): Promise<Participant> {
   const path = p.kind === "agent" ? "/api/agents" : "/api/participants";
   const json =
@@ -197,9 +202,65 @@ export function createParticipant(p: {
           ...(p.integrations?.length ? { integrations: p.integrations } : {}),
           ...(p.model ? { model: p.model } : {}),
           ...(p.mode ? { mode: p.mode } : {}),
+          ...(p.runnerProvider ? { runnerProvider: p.runnerProvider } : {}),
+          ...(p.hostId ? { hostId: p.hostId } : {}),
         }
       : { kind: "human", handle: p.handle, displayName: p.displayName };
   return request<Participant>(path, { json, auth: true, devAuth: true, errorMessage: "create failed" });
+}
+
+// --- Self-hosted devices (Environments) ---
+
+// The signed-in account's registered devices (the Environments page).
+export function listDevices(): Promise<RunnerHost[]> {
+  return request<RunnerHost[]>(`/api/devices`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load devices",
+  });
+}
+
+// Rename a device or change its assign policy / shared workspaces (owner only).
+export function updateDevice(
+  id: string,
+  patch: { name?: string; assignPolicy?: string; sharedWorkspaceIds?: string[] },
+): Promise<RunnerHost> {
+  return request<RunnerHost>(`/api/devices/${id}`, {
+    method: "PATCH",
+    json: patch,
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to update device",
+  });
+}
+
+// Remove a device (revoke its token; its agents go offline until reassigned).
+export function removeDevice(id: string): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`/api/devices/${id}`, {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to remove device",
+  });
+}
+
+// Approve a device-code shown by `jungle-runner connect` on a machine (the /link page).
+export function approveDeviceCode(userCode: string): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`/api/devices/auth/approve`, {
+    json: { userCode },
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to approve device",
+  });
+}
+
+// Whether a device code is still valid + unapproved (drives the /link confirm page).
+export function checkDeviceCode(userCode: string): Promise<{ valid: boolean }> {
+  return request<{ valid: boolean }>(`/api/devices/auth/${encodeURIComponent(userCode)}`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to check code",
+  });
 }
 
 // This agent's attached integrations (the settings panel's Integrations section).

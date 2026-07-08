@@ -379,3 +379,35 @@ create table if not exists agent_turn_messages (
   foreign key (agent_id, turn_id) references agent_turns (agent_id, turn_id) on delete cascade
 );
 create index if not exists agent_turn_messages_message_idx on agent_turn_messages (message_id);
+
+-- Self-hosted devices (see migrations/021_runner_hosts.sql). A device is an account-scoped machine
+-- registered via `jungle-runner connect` that runs agents (runner_provider='self_hosted'). Its
+-- daemon dials the host-control channel (/api/host, shared/src/host-protocol.ts).
+create table if not exists runner_hosts (
+  id                   uuid primary key default gen_random_uuid(),
+  owner_uid            text not null,
+  name                 text not null,
+  hostname             text,
+  platform             text,
+  arch                 text,
+  runner_version       text,
+  device_token_hash    text not null unique,
+  assign_policy        text not null default 'owner_only',  -- owner_only | workspace_members
+  shared_workspace_ids uuid[] not null default '{}',
+  created_at           timestamptz not null default now(),
+  last_seen_at         timestamptz,
+  revoked_at           timestamptz
+);
+create index if not exists runner_hosts_owner_idx on runner_hosts (owner_uid) where revoked_at is null;
+
+-- OAuth-device-grant-style backing for `jungle-runner connect` (short-lived, single-use).
+create table if not exists device_auth_requests (
+  device_code   text primary key,
+  user_code     text not null unique,
+  created_at    timestamptz not null default now(),
+  expires_at    timestamptz not null,
+  approved_uid  text,
+  approved_at   timestamptz,
+  host_id       uuid references runner_hosts(id) on delete set null,
+  claimed_at    timestamptz
+);

@@ -37,6 +37,7 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { log } from "./log.js";
 import { Connection } from "./connection.js";
@@ -78,6 +79,9 @@ export interface RunnerEnv {
   wsUrl: string;
   token: string;
 }
+
+// Reported to the backend in the self-hosted `hello`. Set by the daemon from its package version.
+const RUNNER_VERSION = process.env.JUNGLE_RUNNER_VERSION ?? "0.1.0";
 
 // Tools that never need a human in `default` mode: read-only, informational, or
 // SDK-internal (ToolSearch loads tool schemas; TodoWrite is the agent's own bookkeeping).
@@ -274,6 +278,19 @@ export class Runner {
       agentId: this.env.agentId,
       sessionId: this.sessionId,
       protocol: PROTOCOL_VERSION,
+      // Self-hosted runners (spawned by the daemon, which sets JUNGLE_SELF_HOSTED=1) report their
+      // machine so the backend can show it and tailor the agent's "your environment" prompt. Cloud
+      // runners omit it. `host` is optional in the protocol, so this needs no version bump.
+      ...(process.env.JUNGLE_SELF_HOSTED === "1"
+        ? {
+            host: {
+              hostname: os.hostname(),
+              platform: process.platform,
+              arch: process.arch,
+              runnerVersion: RUNNER_VERSION,
+            },
+          }
+        : {}),
     });
   }
 

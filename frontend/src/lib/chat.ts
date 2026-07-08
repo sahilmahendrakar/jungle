@@ -131,15 +131,17 @@ export const fmtRelative = (iso: string | null | undefined): string => {
 };
 
 // Status priority for a channel row with several agent members: the most noteworthy wins.
-export const STATUS_RANK: Record<AgentStatus, number> = { working: 0, waking: 1, idle: 2, sleeping: 3 };
+export const STATUS_RANK: Record<AgentStatus, number> = { working: 0, waking: 1, idle: 2, sleeping: 3, offline: 4 };
 
-// Tailwind classes for an agent's status dot. sleeping is slate (deliberately distinct from
-// the muted gray we'd use for a truly-offline participant).
+// Tailwind classes for an agent's status dot. sleeping is slate (a cloud machine we can wake);
+// offline is a dimmer gray ring for a self-hosted agent whose device is disconnected — the backend
+// can't wake it, so it reads as truly "not here right now".
 export const STATUS_DOT: Record<AgentStatus, string> = {
   working: "animate-pulse bg-emerald-400",
   idle: "bg-emerald-500/60",
   waking: "animate-pulse bg-amber-400",
   sleeping: "bg-slate-400/70",
+  offline: "bg-slate-500/40 ring-1 ring-inset ring-slate-500/30",
 };
 
 export const STATUS_LABEL: Record<AgentStatus, string> = {
@@ -147,4 +149,5 @@ export const STATUS_LABEL: Record<AgentStatus, string> = {
   idle: "Idle",
   waking: "Waking up",
   sleeping: "Sleeping",
+  offline: "Offline",
 };

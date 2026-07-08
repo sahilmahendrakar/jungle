@@ -6,8 +6,10 @@ import {
   BookOpenText,
   Check,
   ChevronDown,
+  Cloud,
   FileText,
   FoldVertical,
+  MonitorSmartphone,
   Plus,
   ShieldQuestion,
   Sparkles,
@@ -410,6 +412,7 @@ export function ParticipantProfilePanel({
               </p>
             </div>
             <IntegrationsEditor value={integrations} onChange={setIntegrations} connections={connections} />
+            <EnvironmentCard person={person} />
             <MemoryCard person={person} />
             <ContextUsageCard person={person} />
             <Button
@@ -502,6 +505,41 @@ export function ParticipantProfilePanel({
 // Context-window occupancy + compaction control in an agent's profile. `person` is the live
 // row from `people`, so the meter updates in place whenever an `agent_context` broadcast
 // lands — including the one the runner sends after a requested compaction finishes.
+// Where this agent runs: a cloud sandbox, or one of the creator's own devices (self-hosted). For a
+// self-hosted agent we show the host details the runner reported (runner_meta.host) + which device.
+export function EnvironmentCard({ person }: { person: Participant }) {
+  const selfHosted = person.runner_provider === "self_hosted";
+  const host = (person.runner_meta as { host?: { hostname?: string; platform?: string; arch?: string } } | null)?.host;
+  const offline = person.status === "offline";
+  return (
+    <div data-testid="environment-card" className="space-y-1.5 rounded-lg border bg-muted/30 p-3">
+      <div className="text-xs font-medium text-muted-foreground">Environment</div>
+      <div className="flex items-center gap-2">
+        <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary/10">
+          {selfHosted ? <MonitorSmartphone className="size-3.5 text-primary" /> : <Cloud className="size-3.5 text-primary" />}
+        </span>
+        <div className="min-w-0">
+          <div className="truncate text-sm font-medium">
+            {selfHosted ? host?.hostname ?? "Your device" : "Cloud sandbox"}
+          </div>
+          <div className="truncate text-[11px] text-muted-foreground">
+            {selfHosted
+              ? [host?.platform && host?.arch ? `${host.platform}/${host.arch}` : host?.platform, offline ? "offline" : null]
+                  .filter(Boolean)
+                  .join(" · ") || "self-hosted"
+              : "managed by Jungle"}
+          </div>
+        </div>
+      </div>
+      {selfHosted && offline && (
+        <p className="text-[11px] leading-tight text-muted-foreground">
+          This agent's device is offline — messages queue until it reconnects.
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function ContextUsageCard({ person }: { person: Participant }) {
   const [requesting, setRequesting] = useState(false);
   const [requested, setRequested] = useState(false);

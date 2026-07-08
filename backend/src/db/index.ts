@@ -10,6 +10,7 @@ export * from "./messages";
 export * from "./threads";
 export * from "./attachments";
 export * from "./agents";
+export * from "./hosts";
 export * from "./github";
 export * from "./google";
 export * from "./integrations";

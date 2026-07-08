@@ -10,8 +10,14 @@ import path from "node:path";
 import { log } from "./log.js";
 
 const HOME = process.env.HOME ?? os.homedir();
-const CREDENTIALS_FILE = path.join(HOME, ".git-credentials");
-const REPO_DIR = "/workspace/repo";
+// Portability (self-hosted): the repo clones inside the workspace (not a hardcoded /workspace), and
+// the credential store is redirectable via JUNGLE_GIT_CREDENTIALS. On a user's own machine the
+// daemon points JUNGLE_GIT_CREDENTIALS + GIT_CONFIG_GLOBAL into the agent's private state dir so the
+// agent never clobbers the person's real ~/.gitconfig / ~/.git-credentials. In a container both are
+// unset and this stays exactly as before (~/.git-credentials, global gitconfig).
+const WORKSPACE = process.env.JUNGLE_WORKSPACE ?? "/workspace";
+const CREDENTIALS_FILE = process.env.JUNGLE_GIT_CREDENTIALS ?? path.join(HOME, ".git-credentials");
+const REPO_DIR = path.join(WORKSPACE, "repo");
 
 // Latest known token, injected into the SDK env option (see runner.ts).
 let currentToken: string | null = null;
@@ -45,7 +51,9 @@ export async function applyGitCredentials(token: string, login: string): Promise
   const line = `https://x-access-token:${token}@github.com\n`;
   try {
     await fs.writeFile(CREDENTIALS_FILE, line, { mode: 0o600 });
-    await run("git", ["config", "--global", "credential.helper", "store"]);
+    // Point the store helper explicitly at our file so it works regardless of HOME and never reads
+    // the user's default ~/.git-credentials on a self-hosted machine.
+    await run("git", ["config", "--global", "credential.helper", `store --file=${CREDENTIALS_FILE}`]);
     // Identity for commits the agent makes.
     await run("git", ["config", "--global", "user.name", user]);
     await run("git", ["config", "--global", "user.email", `${user}@users.noreply.github.com`]);

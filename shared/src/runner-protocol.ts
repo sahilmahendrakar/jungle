@@ -22,6 +22,10 @@ export interface HelloFrame {
   agentId: string;
   sessionId: string | null;
   protocol: 1;
+  // Where this runner is executing. Reported by self-hosted runners so the backend can surface
+  // the host in the UI and tailor the "your environment" system-prompt block; omitted by cloud
+  // (docker/fly) runners. Optional → no protocol version bump; old runners simply don't send it.
+  host?: { hostname: string; platform: string; arch: string; runnerVersion: string };
 }
 
 export interface StateFrame {

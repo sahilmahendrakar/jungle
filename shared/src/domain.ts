@@ -5,9 +5,18 @@
 
 export type Kind = "human" | "agent";
 
-// One of an agent's four live statuses. Working = actively running a turn; Idle = connected,
-// waiting; Sleeping = machine stopped to save cost; Waking = machine starting, not yet connected.
-export type AgentStatus = "working" | "idle" | "sleeping" | "waking";
+// One of an agent's live statuses. Working = actively running a turn; Idle = connected,
+// waiting; Sleeping = machine stopped to save cost; Waking = machine starting, not yet connected;
+// Offline = a self-hosted agent whose device/daemon is not connected (the backend cannot wake it —
+// queued work waits until the device comes back online). Offline is distinct from Sleeping, which
+// the platform CAN wake on demand.
+export type AgentStatus = "working" | "idle" | "sleeping" | "waking" | "offline";
+
+// The provisioners an agent's runner can run under. 'docker'/'fly' are cloud sandboxes the backend
+// owns; 'self_hosted' runs on a user's own registered device (see RunnerHost) via a daemon that
+// dials the host-control channel (shared/src/host-protocol.ts).
+export const RUNNER_PROVIDERS = ["docker", "fly", "self_hosted"] as const;
+export type RunnerProvider = (typeof RUNNER_PROVIDERS)[number];
 
 // The public shape of a participant row (everything persisted except server-only secrets like
 // runner_token). This is what the backend serializes; the DB row type extends it server-side.
@@ -30,8 +39,9 @@ export interface ParticipantBase {
   context_tokens: number | null;
   context_max_tokens: number | null;
   context_updated_at: string | null;
-  runner_provider: string; // 'docker' | 'fly' — which Provisioner impl owns this agent's runner
-  runner_meta: Record<string, unknown> | null; // provider handles (Fly: {machineId, volumeId})
+  runner_provider: string; // RunnerProvider — which Provisioner impl owns this agent's runner
+  // Provider handles (Fly: {machineId, volumeId}; self_hosted: {hostId, host?: {hostname,…}}).
+  runner_meta: Record<string, unknown> | null;
   // Creator-written role/personality injected into the agent's system prompt (agents; null = none).
   // The agent's MEMORY.md mirror is NOT here — it can be large, so clients fetch it on demand
   // via GET /api/agents/:id/memory.
@@ -45,6 +55,33 @@ export interface ParticipantBase {
 export interface Participant extends ParticipantBase {
   status?: AgentStatus;
   memory_changed_at?: string;
+}
+
+// --- Self-hosted devices (a registered machine that can run agents) ---
+
+// Who, besides the owner, may assign an agent to run on a device. 'owner_only' (default) = only
+// the account that registered it; 'workspace_members' = any member of a workspace the owner has
+// shared the device into (shared_workspace_ids). Running an agent on a device is code execution
+// with the owner's OS privileges, so this defaults closed.
+export type DeviceAssignPolicy = "owner_only" | "workspace_members";
+
+// A machine a user registered with `jungle-runner connect`. Account-scoped (owned by a Google
+// account, selectable across that account's workspaces). `online` is derived at serialization
+// time from whether the device's control connection is live; `running_agents` counts agents
+// currently executing on it. Server-only fields (the device token hash) never appear here.
+export interface RunnerHost {
+  id: string;
+  name: string; // user-editable; defaults to the hostname
+  hostname: string | null;
+  platform: string | null; // process.platform, e.g. 'darwin' | 'linux'
+  arch: string | null; // process.arch, e.g. 'arm64' | 'x64'
+  runner_version: string | null;
+  assign_policy: DeviceAssignPolicy;
+  shared_workspace_ids: string[]; // workspaces the device is shared into (workspace_members policy)
+  created_at: string;
+  last_seen_at: string | null;
+  online: boolean; // derived: control channel currently connected
+  running_agents: number; // derived: agents with a live runner on this device
 }
 
 // --- Workspaces (Slack-style multi-tenancy) ---

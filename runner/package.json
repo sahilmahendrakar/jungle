@@ -5,10 +5,15 @@
   "type": "module",
   "description": "Jungle agent-runner: a long-lived process that bridges a Claude Agent SDK session to the Jungle backend over one outbound WebSocket.",
   "main": "dist/index.js",
+  "bin": {
+    "jungle-runner": "dist/cli.js"
+  },
+  "files": ["dist"],
   "scripts": {
     "prebuild": "node scripts/sync-protocol.mjs",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
+    "cli": "node dist/cli.js",
     "dev": "tsc -p tsconfig.json && node dist/index.js",
     "mock": "node test/mock-backend.mjs"
   },

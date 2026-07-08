@@ -64,6 +64,15 @@ export class Connection {
       log.warn("backend connection closed", { code });
       this.ws = null;
       this.handlers.onClose();
+      // Terminal closes: 4001 = the backend rejected our token; 4003 = the agent was deleted /
+      // its device removed. Don't reconnect-loop against the backend. Exit with a distinct code so
+      // a supervising daemon knows this child should NOT be restarted (an ordinary crash exits
+      // differently and DOES get restarted). In a cloud container the container is torn down anyway.
+      if (code === 4001 || code === 4003) {
+        this.closed = true;
+        log.info("terminal close; exiting", { code });
+        process.exit(3);
+      }
       this.scheduleReconnect();
     });
 

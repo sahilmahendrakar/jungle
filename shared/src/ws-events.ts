@@ -31,6 +31,16 @@ export interface AgentStatusChangedEvent {
   status: AgentStatus;
 }
 
+// A self-hosted device's control connection came up or went down. Fanned out to the sockets of
+// the device's OWNER account (a device is account-scoped, not workspace-scoped), so an open
+// Environments page flips the online dot without a refetch. The agents running on that device
+// emit their own agent_status_changed (offline/idle) separately.
+export interface DeviceStatusChangedEvent {
+  type: "device_status_changed";
+  deviceId: string;
+  online: boolean;
+}
+
 // A channel's membership changed (added/removed member); clients refetch members.
 export interface MembersChangedEvent {
   type: "members_changed";
@@ -148,6 +158,7 @@ export type ServerEvent =
   | ErrorEvent
   | MessageEvent
   | AgentStatusChangedEvent
+  | DeviceStatusChangedEvent
   | MembersChangedEvent
   | ChannelDeletedEvent
   | ParticipantUpdatedEvent

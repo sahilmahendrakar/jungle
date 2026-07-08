@@ -125,6 +125,12 @@ export function useChatSocket(opts: {
           setPeople((ps) => ps.map((p) => (p.id === evt.agentId ? { ...p, status: evt.status } : p)));
           return;
         }
+        if (evt.type === "device_status_changed") {
+          // Account-scoped device up/down. The Environments page (not part of the chat store)
+          // listens for this to flip its online dot without a refetch.
+          window.dispatchEvent(new CustomEvent("jungle:device_status", { detail: evt }));
+          return;
+        }
         if (evt.type === "members_changed") {
           if (evt.channelId === selectedRef.current)
             listChannelMembers(evt.channelId).then(setMembers).catch(() => {});

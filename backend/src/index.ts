@@ -2,11 +2,12 @@ import "./env";
 import { createServer } from "node:http";
 import * as db from "./db";
 import * as runners from "./runners";
+import * as hostcontrol from "./hostcontrol";
 import * as att from "./attachments";
 import { setProvisioner, provisionerFor } from "./provisioner";
 import { FlyProvisioner } from "./provisioner-fly";
 import { createApp } from "./app";
-import { initAppSocket } from "./ws/appSocket";
+import { initAppSocket, broadcastUid } from "./ws/appSocket";
 import { triggerMentionedAgents, buildRunnerHooks } from "./services/orchestrator";
 import { startScheduler } from "./services/scheduler";
 import { registerBuiltinIntegrations } from "./integrations";
@@ -42,6 +43,23 @@ initAppSocket(server, { onMessagePosted: triggerMentionedAgents });
 // The SDK runner subsystem: runners dial into /api/runner (its own upgrade listener). Wire the
 // chat-side effects a runner needs (post messages, confirm cards, events, status) back in.
 runners.init(server, buildRunnerHooks());
+
+// The host-control subsystem: self-hosted devices' daemons dial into /api/host. When a device
+// comes up/down, tell its owner's open Environments page (device_status_changed) and re-emit the
+// status of every agent on it (they flip offline <-> sleeping/idle); on up, kick the sweeper so
+// any agent with queued work starts without waiting for the next tick.
+hostcontrol.init(server, {
+  onHostStatusChange: (hostId, ownerUid, online) => {
+    broadcastUid(ownerUid, { type: "device_status_changed", deviceId: hostId, online });
+    void db
+      .agentsOnHost(hostId)
+      .then((agents) => {
+        for (const a of agents) runners.refreshStatus(a.id);
+        if (online) runners.kickSweep();
+      })
+      .catch((e) => console.error(`onHostStatusChange(${hostId}):`, e));
+  },
+});
 
 // Hourly attachment GC: abandoned composer uploads (never linked to a message) and blobs whose
 // rows were removed by FK cascades (deleted messages/channels/agents).

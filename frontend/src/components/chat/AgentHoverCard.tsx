@@ -1,5 +1,5 @@
 import { createContext, useContext, useMemo, type ReactNode } from "react";
-import { Activity as ActivityIcon, MessageSquare } from "lucide-react";
+import { Activity as ActivityIcon, MessageSquare, MonitorSmartphone } from "lucide-react";
 import type { Participant } from "../../api";
 import type { LiveTurn } from "../../ws/useLiveTurns";
 import { STATUS_DOT, STATUS_LABEL } from "../../lib/chat";
@@ -71,6 +71,9 @@ function CardInner({ agent, ctx }: { agent: Participant; ctx: AgentCardCtx }) {
           <div className="truncate text-xs text-muted-foreground">@{agent.handle}</div>
         </div>
         <span className="mt-0.5 flex shrink-0 items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+          {agent.runner_provider === "self_hosted" && (
+            <MonitorSmartphone className="size-3 opacity-70" aria-label="Runs on your device" />
+          )}
           <span className={cn("size-1.5 rounded-full", STATUS_DOT[status])} />
           {STATUS_LABEL[status]}
         </span>

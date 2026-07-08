@@ -228,6 +228,12 @@ async function runAgentReply(
     // disconnected runner won't have received the drain above — kick the provisioner so it comes
     // up and connects, at which point `hello` drains the real inbox.
     if (!runners.isConnected(agent.id)) {
+      // Self-hosted with an offline device: there's nothing to wake — the backend doesn't own the
+      // machine. The item stays queued and drains when the daemon reconnects; the agent shows
+      // `offline`. Skip the provisioner kick (it would no-op and just log a spurious wake timeout).
+      if (agent.runner_provider === "self_hosted" && !runners.isAgentDeviceOnline(agent.id)) {
+        return;
+      }
       try {
         await provisionerFor(agent).start(agent.id);
         runners.noteProvisionerStart(agent.id);

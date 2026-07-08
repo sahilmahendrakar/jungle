@@ -40,6 +40,8 @@ import { Scheduled } from "./Scheduled";
 import { Approvals } from "./Approvals";
 import { DeliverablesView } from "./Deliverables";
 import { AgentsHome } from "./AgentsHome";
+import { Environments } from "./Environments";
+import { LinkDevice } from "./LinkDevice";
 import { SearchDialog } from "./SearchDialog";
 import { navigate, usePath } from "./route";
 import { Button } from "@/components/ui/button";
@@ -169,7 +171,10 @@ export function App({
   const approvalsOpen = path === "/approvals";
   const deliverablesOpen = path === "/deliverables";
   const agentsOpen = path === "/agents";
-  const overlayViewOpen = scheduledOpen || approvalsOpen || deliverablesOpen || agentsOpen;
+  const environmentsOpen = path === "/environments";
+  const linkOpen = path === "/link";
+  const overlayViewOpen =
+    scheduledOpen || approvalsOpen || deliverablesOpen || agentsOpen || environmentsOpen || linkOpen;
   // Reading "am I on an overlay view" from long-lived callbacks without re-binding them.
   const overlayViewRef = useRef(false);
   overlayViewRef.current = overlayViewOpen;
@@ -1006,6 +1011,8 @@ export function App({
         approvalsCount={confirms.length}
         onOpenDeliverables={() => navigate("/deliverables")}
         deliverablesActive={deliverablesOpen}
+        onOpenEnvironments={() => navigate("/environments")}
+        environmentsActive={environmentsOpen}
         onOpenSearch={() => {
           setSearchOpen(true);
           setDrawerOpen(false);
@@ -1069,6 +1076,19 @@ export function App({
             goToChat();
             selectAndClose(channelId);
           }}
+        />
+      ) : environmentsOpen ? (
+        <Environments
+          workspaceId={workspaceId ?? null}
+          sidebarOpen={sidebarOpen}
+          onOpenDrawer={() => setDrawerOpen(true)}
+          onExpandSidebar={() => setSidebarOpen(true)}
+        />
+      ) : linkOpen ? (
+        <LinkDevice
+          sidebarOpen={sidebarOpen}
+          onOpenDrawer={() => setDrawerOpen(true)}
+          onExpandSidebar={() => setSidebarOpen(true)}
         />
       ) : deliverablesOpen ? (
         <DeliverablesView

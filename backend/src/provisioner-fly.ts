@@ -31,6 +31,8 @@ const volumeName = (agentId: string) => `jr_${agentId.replace(/-/g, "").slice(0,
 // shelling out to flyctl — the backend has no flyctl install and this is a thin enough
 // surface (create volume+machine, start/stop/destroy, poll state) to hit with plain fetch.
 export class FlyProvisioner implements Provisioner {
+  readonly managesLifecycle = true;
+
   async create(agent: { id: string; handle: string; runnerToken: string }): Promise<void> {
     if ((await db.getRunnerMeta(agent.id))?.machineId) return;
     const vol = await fly<{ id: string }>(`/apps/${FLY_APP}/volumes`, {

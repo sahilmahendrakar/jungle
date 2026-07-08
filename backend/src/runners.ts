@@ -13,6 +13,7 @@ import { isSdkMode } from "@jungle/shared";
 import * as db from "./db";
 import { signedPath } from "./attachments";
 import { provisionerFor } from "./provisioner";
+import * as hostcontrol from "./hostcontrol";
 import { adapterFor } from "./integrations";
 
 export type { AgentStatus };
@@ -198,7 +199,11 @@ export function isConnected(agentId: string): boolean {
   return conns.has(agentId);
 }
 
-// --- Agent status (Working / Idle / Sleeping / Waking up) ---
+// Re-exported for callers that already depend on runners (orchestrator, routes): whether a
+// self-hosted agent's device is currently connected. False for cloud agents. See hostcontrol.
+export const isAgentDeviceOnline = hostcontrol.isAgentDeviceOnline;
+
+// --- Agent status (Working / Idle / Sleeping / Waking / Offline) ---
 
 // AgentStatus (imported from @jungle/shared) is the single user-facing status for an agent,
 // derived from two independent facts: whether a runner socket is currently connected (+ its
@@ -216,6 +221,10 @@ const WAKE_TIMEOUT_MS = 3 * 60_000;
 export function agentStatus(agentId: string): AgentStatus {
   const conn = conns.get(agentId);
   if (conn) return conn.state === "running" ? "working" : "idle"; // connected always wins
+  // Self-hosted with its device disconnected: the backend CANNOT wake it (no machine to start) —
+  // it's offline, not sleeping. Queued work waits for the device to come back. This predicate is
+  // false for cloud agents, so the machine-map logic below is unchanged for them.
+  if (hostcontrol.isAgentDeviceOffline(agentId)) return "offline";
   const m = machine.get(agentId);
   if (m?.kind === "starting") return "waking";
   if (m?.kind === "stopped") return "sleeping";
@@ -224,6 +233,13 @@ export function agentStatus(agentId: string): AgentStatus {
 
 function emitStatus(agentId: string): void {
   hooks?.onStatusChanged(agentId, agentStatus(agentId));
+}
+
+// Public re-emit, for hostcontrol: when a device connects/disconnects, its agents flip between
+// `offline` and `sleeping`/`idle` with no per-agent socket event of their own to trigger a
+// broadcast. index.ts calls this for each agent on the device.
+export function refreshStatus(agentId: string): void {
+  emitStatus(agentId);
 }
 
 // Set a conn's turn state, tracking when it most recently entered idle (idleSince). Used by
@@ -385,12 +401,29 @@ export function systemPromptAppend(
     `"remind me", "check every morning", or "do X weekly", use these tools — never just promise ` +
     `to remember. (Schedules are for future ACTIONS; MEMORY.md is for durable FACTS.)`;
   for (const block of integrationBlocks) s += block;
-  s +=
-    `\n\n— Your environment —\n` +
-    `You run in a Linux container: no sudo/apt, ~3GB memory (don't run several heavy ` +
-    `processes at once), Chromium preinstalled for Playwright (PLAYWRIGHT_BROWSERS_PATH is set). ` +
-    `Dev servers and other long-running processes MUST use the Bash tool's run_in_background ` +
-    `option — plain \`&\` background jobs are killed when the Bash call returns.`;
+  s += `\n\n— Your environment —\n`;
+  if (agent.runner_provider === "self_hosted") {
+    // A user's OWN machine: real privileges, real files, real consequences. Say so plainly — the
+    // container caveats above are false here, and understating the stakes would be dangerous.
+    const host = (agent.runner_meta as db.RunnerMeta | null)?.host;
+    const where = host ? `directly on ${host.hostname} (${host.platform}/${host.arch})` : `directly on a personal computer`;
+    s +=
+      `You run ${where} — a personal machine belonging to your creator, NOT a disposable cloud ` +
+      `sandbox. You have that machine's real user account, real files, and real network access, so ` +
+      `your actions can have real and possibly irreversible effects. Be conservative and explicit: ` +
+      `prefer reversible steps, explain what you're about to do before anything destructive, and ` +
+      `never delete or overwrite files outside your workspace without asking. Treat credentials, ` +
+      `keys, and personal data on the machine as strictly off-limits unless the person explicitly ` +
+      `directs you to use them for the task at hand. Dev servers and other long-running processes ` +
+      `MUST use the Bash tool's run_in_background option — plain \`&\` background jobs are killed ` +
+      `when the Bash call returns.`;
+  } else {
+    s +=
+      `You run in a Linux container: no sudo/apt, ~3GB memory (don't run several heavy ` +
+      `processes at once), Chromium preinstalled for Playwright (PLAYWRIGHT_BROWSERS_PATH is set). ` +
+      `Dev servers and other long-running processes MUST use the Bash tool's run_in_background ` +
+      `option — plain \`&\` background jobs are killed when the Bash call returns.`;
+  }
   return s;
 }
 
@@ -500,8 +533,13 @@ async function sweepOnce(): Promise<void> {
     const agents = await db.listSdkAgents();
     for (const agent of agents) {
       const conn = conns.get(agent.id);
+      const selfHosted = agent.runner_provider === "self_hosted";
       try {
         if (conn) {
+          // Self-hosted: keep the runner child alive while the device is online (no idle-stop) —
+          // it's cheap when idle on the user's own machine, and killing/respawning it would add
+          // session-resume latency to every message. The child stops when the device disconnects.
+          if (selfHosted) continue;
           if (IDLE_STOP_MS === 0) continue;
           if (conn.state !== "idle" || conn.idleSince == null) continue;
           if (Date.now() - conn.idleSince < IDLE_STOP_MS) continue;
@@ -509,6 +547,9 @@ async function sweepOnce(): Promise<void> {
           await provisionerFor(agent).stop(agent.id);
           noteProvisionerStop(agent.id);
         } else {
+          // Self-hosted with an offline device: we can't wake it — skip (the work stays queued and
+          // drains when the daemon reconnects). Only start when the device is actually online.
+          if (selfHosted && !hostcontrol.isAgentDeviceOnline(agent.id)) continue;
           if (machine.get(agent.id)?.kind === "starting") continue;
           if ((await db.pendingInbox(agent.id)).length === 0) continue;
           await provisionerFor(agent).start(agent.id);
@@ -528,6 +569,13 @@ async function sweepOnce(): Promise<void> {
 // Start the recurring sweep. Call once at boot (index.ts, after runners.init).
 export function startIdleSweeper(): void {
   setInterval(() => void sweepOnce(), SWEEP_INTERVAL_MS).unref();
+}
+
+// Run one sweep pass immediately (out of band from the 15s timer). Used when a self-hosted device
+// just came online, so any agent that queued work while it was offline starts without waiting for
+// the next tick.
+export function kickSweep(): void {
+  void sweepOnce();
 }
 
 // Loop guard for the fatal-restart path below: at most FATAL_RESTART_MAX restarts per agent
@@ -594,6 +642,11 @@ export async function compactOrWake(
   agent: db.Participant,
 ): Promise<"sent" | "waking" | "wake_failed"> {
   if (compact(agent.id)) return "sent";
+  // Self-hosted with an offline device: nothing to wake — report failure so the UI can say the
+  // device is offline rather than spinning on "waking" forever.
+  if (agent.runner_provider === "self_hosted" && !hostcontrol.isAgentDeviceOnline(agent.id)) {
+    return "wake_failed";
+  }
   pendingCompact.add(agent.id);
   try {
     await provisionerFor(agent).start(agent.id);
@@ -746,6 +799,15 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         conn.currentTurnId = null;
         conn.currentTurnContext = null;
         clearMachine(agentId); // a live hello always wins over stale starting/stopped state
+        // Self-hosted: persist the host details the runner reports so the "your environment"
+        // prompt block and the profile's Environment card reflect the real machine. Merge (don't
+        // clobber) so the hostId set at assignment survives.
+        if (agent.runner_provider === "self_hosted" && frame.host) {
+          const meta = (agent.runner_meta as db.RunnerMeta | null) ?? {};
+          const merged: db.RunnerMeta = { ...meta, host: frame.host };
+          await db.setRunnerMeta(agentId, merged);
+          agent.runner_meta = merged as Record<string, unknown>; // reflect in the configure we build below
+        }
         emitStatus(agentId);
         send(conn, await buildConfigure(agent));
         // Runner is idle after configure — push any queued work, plus a compact requested
@@ -961,6 +1023,10 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         const agent = await db.getAgentRow(agentId);
         if (agent && hooks) hooks.onTurnFailed({ id: agent.id, handle: agent.handle }, `fatal: ${frame.error}`);
         if (!agent) break;
+        // Self-hosted: the device's own daemon supervises its runner children (it restarts a
+        // crashed child with backoff). Don't also drive a provisioner restart from here — we don't
+        // own that machine, and stop/start would just race the daemon's own recovery.
+        if (agent.runner_provider === "self_hosted") break;
         const now = Date.now();
         const hist = (fatalRestarts.get(agentId) ?? []).filter((t) => now - t < FATAL_RESTART_WINDOW_MS);
         if (hist.length >= FATAL_RESTART_MAX) {
