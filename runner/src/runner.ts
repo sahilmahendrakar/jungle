@@ -66,6 +66,8 @@ import {
   type EnqueueAttachment,
   type McpIntegrationGrant,
   type PermissionMode,
+  type ProviderConfig,
+  type SetModelFrame,
 } from "./protocol.js";
 
 interface QueueItem {
@@ -120,6 +122,7 @@ const DRIVE_WRITE_TOOLS = new Set(["mcp__gdrive__drive_create_file", "mcp__gdriv
 // occupancy; modelUsage carries the model's context window when present.
 function contextFromResult(
   msg: unknown,
+  fallbackMaxTokens: number,
 ): { tokens: number; maxTokens: number } | null {
   const m = msg as {
     usage?: {
@@ -142,7 +145,7 @@ function contextFromResult(
       maxTokens = mu.contextWindow;
     }
   }
-  if (maxTokens <= 0) maxTokens = 200_000; // conservative default when unknown
+  if (maxTokens <= 0) maxTokens = fallbackMaxTokens; // model's window when the SDK doesn't report
   return { tokens, maxTokens };
 }
 
@@ -171,6 +174,9 @@ export class Runner {
 
   // Config (from `configure`; updated by set_model / set_permission_mode / set_effort).
   private model: string | null = null;
+  // Non-Anthropic provider routing for `model` (from `configure`/`set_model`). null = first-party
+  // Anthropic (use the container's ANTHROPIC_API_KEY). Applied to the CLI child env per turn.
+  private provider: ProviderConfig | null = null;
   private permissionMode: PermissionMode = "default";
   // Reasoning effort passed to query(). undefined = let the SDK/CLI use its default (the backend
   // always sends one post-migration, so this is only undefined against an old backend).
@@ -210,6 +216,9 @@ export class Runner {
   private activeAbortController: AbortController | null = null;
   private static readonly INTERRUPT_GRACE_MS = 2_000;
   private pendingModel: string | null = null;
+  // Provider routing that lands together with pendingModel at the next turn boundary. `undefined`
+  // means "no pending model change" (distinct from `null` = pending switch to an Anthropic model).
+  private pendingProvider: ProviderConfig | null | undefined = undefined;
   // Set by a `compact` frame; consumed at the next idle boundary by running a
   // dedicated `/compact` turn. A flag (not a queue item) so it can't interleave
   // with real messages and is naturally coalesced if pressed repeatedly.
@@ -335,7 +344,7 @@ export class Runner {
         void this.handleSetPermissionMode(frame.mode);
         break;
       case "set_model":
-        this.handleSetModel(frame.model);
+        this.handleSetModel(frame);
         break;
       case "set_effort":
         this.handleSetEffort(frame.effort);
@@ -413,6 +422,7 @@ export class Runner {
 
   private async handleConfigure(frame: ConfigureFrame): Promise<void> {
     this.model = frame.model;
+    this.provider = frame.provider ?? null;
     this.permissionMode = frame.permissionMode;
     this.effort = frame.effort as EffortLevel | undefined;
     this.systemPromptAppend = frame.systemPromptAppend ?? "";
@@ -523,16 +533,21 @@ export class Runner {
     this.sendState();
   }
 
-  private handleSetModel(model: string): void {
-    log.info("set model requested", { model });
+  private handleSetModel(frame: SetModelFrame): void {
+    const { model } = frame;
+    const provider = frame.provider ?? null;
+    log.info("set model requested", { model, provider: provider?.name ?? "anthropic" });
     if (!this.running) {
-      // Idle: apply immediately; next turn uses the new model.
+      // Idle: apply model + provider immediately; next turn uses both.
       this.model = model;
+      this.provider = provider;
       void saveState({ sessionId: this.sessionId, model: this.model });
       this.sendState();
     } else {
-      // Running: apply at the next turn boundary by ending the current query.
+      // Running: apply at the next turn boundary by ending the current query. Model and provider
+      // land together (see the pendingModel block in endTurn) so the env swap is atomic.
       this.pendingModel = model;
+      this.pendingProvider = provider;
       // Release any pending follow-up wait so the generator returns and query ends.
       if (this.batchResolver) {
         const resolve = this.batchResolver;
@@ -626,13 +641,26 @@ export class Runner {
         : "");
     const abortController = new AbortController();
     this.activeAbortController = abortController;
+    // Child env for the SDK's CLI subprocess. For a non-Anthropic model, point the CLI at that
+    // provider's Anthropic-compatible endpoint and auth with its token — and DELETE the container's
+    // ANTHROPIC_API_KEY: if both it and ANTHROPIC_AUTH_TOKEN are set the request is rejected, and an
+    // empty string still wins the credential precedence, so it must be removed, not blanked.
+    const childEnv = this.childEnv();
+    if (this.provider) {
+      childEnv.ANTHROPIC_BASE_URL = this.provider.baseUrl;
+      childEnv.ANTHROPIC_AUTH_TOKEN = this.provider.authToken;
+      delete childEnv.ANTHROPIC_API_KEY;
+    }
     const q = query({
       prompt: this.makeInputGenerator(firstBatch, turnId, compacting),
       options: {
         abortController,
         cwd: this.workspace,
         model: this.model ?? undefined,
-        effort: this.effort,
+        // Gate effort: a routed model whose registry entry says it doesn't support the Agent SDK
+        // effort/output_config knob would 400 on it. Anthropic models pass effort through (Haiku
+        // silently downgrades, as before).
+        effort: this.provider && !this.provider.supportsEffort ? undefined : this.effort,
         permissionMode: this.permissionMode,
         resume: resumeId ?? undefined,
         systemPrompt: {
@@ -652,7 +680,7 @@ export class Runner {
           PreToolUse: [{ hooks: [(input) => this.preToolUseHook(input)] }],
         },
         canUseTool: (toolName, input, opts) => this.handleCanUseTool(toolName, input, opts),
-        env: this.childEnv(),
+        env: childEnv,
       },
     });
     this.activeQuery = q;
@@ -751,12 +779,18 @@ export class Runner {
     // After turn_done so a slow read can't delay the idle transition; best-effort by design.
     void this.reportMemoryIfChanged();
 
-    // Apply a pending model change now (at the turn boundary).
+    // Apply a pending model change now (at the turn boundary). The provider lands with it so the
+    // next turn's child env routes to the right endpoint. pendingProvider === undefined means no
+    // model change is pending; null means switch to an Anthropic (unrouted) model.
     if (this.pendingModel !== null) {
       this.model = this.pendingModel;
       this.pendingModel = null;
+      if (this.pendingProvider !== undefined) {
+        this.provider = this.pendingProvider;
+        this.pendingProvider = undefined;
+      }
       void saveState({ sessionId: this.sessionId, model: this.model });
-      log.info("applied pending model change", { model: this.model });
+      log.info("applied pending model change", { model: this.model, provider: this.provider?.name ?? "anthropic" });
     }
 
     this.sendState();
@@ -842,7 +876,7 @@ export class Runner {
       log.warn("getContextUsage failed; using result usage", { err: String(err) });
     }
     if (tokens <= 0 || maxTokens <= 0) {
-      const fb = contextFromResult(resultMessage);
+      const fb = contextFromResult(resultMessage, this.provider?.contextWindow ?? 200_000);
       if (!fb) return;
       tokens = fb.tokens;
       maxTokens = fb.maxTokens;

@@ -5,13 +5,45 @@ import type { PermissionMode } from "./runner-protocol.js";
 // Agent handles: 2–30 chars, lowercase/digits/_/-, no leading symbol.
 export const HANDLE_RE = /^[a-z0-9][a-z0-9_-]{1,29}$/;
 
-// Anthropic model ids selectable for an agent.
+// Model ids selectable for an agent. Membership list for validation; the catalog below carries
+// the per-model metadata. Kept as a `const` tuple so `AllowedModel` stays a literal union.
 export const ALLOWED_MODELS = [
   "claude-haiku-4-5-20251001",
   "claude-sonnet-5",
   "claude-opus-4-8",
+  "glm-5.2",
 ] as const;
 export type AllowedModel = (typeof ALLOWED_MODELS)[number];
+
+// Which provider actually serves a model. "anthropic" = first-party (the runner container's
+// ANTHROPIC_API_KEY); every other provider is an Anthropic-compatible endpoint the runner routes
+// to by overriding ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN in the CLI child env. Add a new tier-1
+// (Anthropic-compatible) model with one MODEL_CATALOG row + one PROVIDER_ENV entry (backend).
+export type ModelProvider = "anthropic" | "zai";
+
+export interface ModelCatalogEntry {
+  id: AllowedModel;
+  label: string; // UI label, e.g. "GLM 5.2"
+  hint: string; // UI hint under the label
+  provider: ModelProvider;
+  supportsEffort: boolean; // false => runner omits the Agent SDK `effort` option, UI disables it
+  contextWindow: number; // runner fallback when the SDK doesn't report a context window
+}
+
+// Single source of truth for the model picker (backend validation + frontend UI derive from this).
+// Order defines the picker order; the first entry is the default for new agents.
+export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
+  { id: "claude-opus-4-8", label: "Opus 4.8", hint: "Most capable", provider: "anthropic", supportsEffort: true, contextWindow: 200_000 },
+  { id: "claude-sonnet-5", label: "Sonnet 5", hint: "Balanced", provider: "anthropic", supportsEffort: true, contextWindow: 200_000 },
+  { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5", hint: "Fastest", provider: "anthropic", supportsEffort: false, contextWindow: 200_000 },
+  { id: "glm-5.2", label: "GLM 5.2", hint: "Open source · fast & cheap", provider: "zai", supportsEffort: false, contextWindow: 200_000 },
+];
+
+// Catalog lookup by model id. Accepts null/undefined (agent's model override may be unset) so
+// callers can pass `agent.model` directly.
+export function catalogEntry(model: string | null | undefined): ModelCatalogEntry | undefined {
+  return model ? MODEL_CATALOG.find((m) => m.id === model) : undefined;
+}
 
 // SDK permission modes an agent may be configured with (mirrors the protocol's PermissionMode).
 export const SDK_MODES = [

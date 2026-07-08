@@ -1,13 +1,15 @@
 // Pure helpers, constants, and view types shared across the chat UI (extracted from App.tsx).
+import { MODEL_CATALOG } from "@jungle/shared";
 import type { AgentStatus, Attachment, Message } from "../api";
 
-// Agent model + permission-mode choices for the create-agent dialog. Model ids must match
-// the backend's ALLOWED_MODELS; the first entry is the default.
-export const MODEL_OPTIONS = [
-  { id: "claude-opus-4-8", label: "Opus 4.8", hint: "Most capable" },
-  { id: "claude-sonnet-5", label: "Sonnet 5", hint: "Balanced" },
-  { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5", hint: "Fastest" },
-];
+// Agent model choices for the create-agent dialog + settings panel, derived from the shared
+// catalog (single source of truth) so the picker never drifts from backend validation. Catalog
+// order defines UI order; the first entry is the default for new agents.
+export const MODEL_OPTIONS = MODEL_CATALOG.map(({ id, label, hint }) => ({
+  id: id as string,
+  label,
+  hint,
+}));
 // Agent permission modes (SDK runner). `default` is first (the create-agent default).
 export const SDK_MODE_OPTIONS = [
   {

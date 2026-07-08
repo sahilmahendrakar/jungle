@@ -9,7 +9,8 @@ import type {
   AgentStatus,
   PermissionMode,
 } from "@jungle/shared";
-import { isSdkMode } from "@jungle/shared";
+import { isSdkMode, catalogEntry } from "@jungle/shared";
+import { resolveProvider } from "./providers";
 import * as db from "./db";
 import { signedPath } from "./attachments";
 import { provisionerFor } from "./provisioner";
@@ -424,6 +425,18 @@ export function systemPromptAppend(
       `Dev servers and other long-running processes MUST use the Bash tool's run_in_background ` +
       `option — plain \`&\` background jobs are killed when the Bash call returns.`;
   }
+  // Non-Anthropic models don't have Claude's native memory convention trained in, so spell the
+  // mechanic out explicitly (the section above assumes the "base instructions" memory system).
+  if (catalogEntry(agent.model)?.provider !== "anthropic" && agent.model) {
+    s +=
+      `\n\n— How your memory works (mechanics) —\n` +
+      `Your memory lives as markdown files under $CLAUDE_CONFIG_DIR/projects/<slug>/memory/, ` +
+      `indexed by a MEMORY.md file in that directory. To remember a durable fact: write (or edit) ` +
+      `a short markdown file there and add a one-line entry for it to MEMORY.md. To recall: read ` +
+      `MEMORY.md (its contents are injected each turn) and Read any file whose entry looks ` +
+      `relevant before acting. Nothing you keep only in your reply survives to the next ` +
+      `conversation — if a fact should outlast this turn, write it to a memory file now.`;
+  }
   return s;
 }
 
@@ -438,6 +451,11 @@ async function buildConfigure(agent: db.AgentRow): Promise<ConfigureFrame> {
     model: agent.model ?? null,
     permissionMode: toPermissionMode(agent.mode),
     effort: agent.effort,
+    // Non-Anthropic model? Resolve its endpoint + key so the runner routes there. null for
+    // Anthropic/default models (runner keeps its container ANTHROPIC_API_KEY). If a routed
+    // provider's key is missing this returns null and logs — the turn then fails loudly against
+    // Anthropic rather than silently misrouting.
+    provider: resolveProvider(agent.model ?? null),
     systemPromptAppend: "",
   };
   const blocks: string[] = [];
@@ -593,7 +611,9 @@ export function setPermissionMode(agentId: string, mode: PermissionMode): void {
 }
 export function setModel(agentId: string, model: string): void {
   const conn = conns.get(agentId);
-  if (conn) send(conn, { type: "set_model", model });
+  // Carry the new model's provider routing so the runner swaps model + credentials together at
+  // its next turn boundary (see runner handleSetModel). null for Anthropic/default models.
+  if (conn) send(conn, { type: "set_model", model, provider: resolveProvider(model) });
 }
 export function setEffort(agentId: string, effort: string): void {
   const conn = conns.get(agentId);

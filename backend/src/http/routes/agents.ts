@@ -7,6 +7,7 @@ import {
   getIntegrationType,
   PERSONA_MAX_LENGTH,
 } from "@jungle/shared";
+import { providerConfigured } from "../../providers";
 import * as db from "../../db";
 import * as auth from "../../auth";
 import * as runners from "../../runners";
@@ -71,6 +72,9 @@ router.post(
     if (!handle || !displayName) throw new ApiError(400, "handle, displayName required");
     const model = req.body?.model ? String(req.body.model) : null;
     if (model && !isAllowedModel(model)) throw new ApiError(400, `unsupported model: ${model}`);
+    if (model && !providerConfigured(model)) {
+      throw new ApiError(400, `model unavailable: ${model}'s provider API key is not configured`);
+    }
     const mode = req.body?.mode ? String(req.body.mode) : "default";
     if (!isSdkMode(mode)) throw new ApiError(400, `unsupported mode: ${mode}`);
     const integrations = validateIntegrations(req.body?.integrations);
@@ -161,6 +165,9 @@ router.patch(
     if (req.body?.model !== undefined) {
       const model = String(req.body.model);
       if (!isAllowedModel(model)) throw new ApiError(400, `unsupported model: ${model}`);
+      if (!providerConfigured(model)) {
+        throw new ApiError(400, `model unavailable: ${model}'s provider API key is not configured`);
+      }
       if (model !== agent.model) runners.setModel(agent.id, model);
       patch.model = model;
     }

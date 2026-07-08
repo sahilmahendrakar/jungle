@@ -47,6 +47,7 @@ import {
   STATUS_LABEL,
   type ToolConfirm,
 } from "../../lib/chat";
+import { catalogEntry } from "@jungle/shared";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -131,17 +132,24 @@ export function SelectMenu({
   onChange,
   options,
   testId,
+  disabled,
 }: {
   value: string;
   onChange: (v: string) => void;
   options: { id: string; label: string; hint?: string }[];
   testId?: string;
+  disabled?: boolean;
 }) {
   const current = options.find((o) => o.id === value) ?? options[0];
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button variant="outline" data-testid={testId} className="w-full justify-between font-normal">
+      <DropdownMenuTrigger asChild disabled={disabled}>
+        <Button
+          variant="outline"
+          data-testid={testId}
+          disabled={disabled}
+          className="w-full justify-between font-normal"
+        >
           <span className="truncate">{current?.label}</span>
           <ChevronDown className="size-4 shrink-0 opacity-50" />
         </Button>
@@ -406,9 +414,12 @@ export function ParticipantProfilePanel({
                 onChange={setEffort}
                 options={EFFORT_OPTIONS}
                 testId="agent-effort-select"
+                disabled={catalogEntry(model)?.supportsEffort === false}
               />
               <p className="text-[11px] leading-tight text-muted-foreground">
-                Lower effort spends fewer tokens. Applies at the agent's next turn.
+                {catalogEntry(model)?.supportsEffort === false
+                  ? "Not supported by this model."
+                  : "Lower effort spends fewer tokens. Applies at the agent's next turn."}
               </p>
             </div>
             <IntegrationsEditor value={integrations} onChange={setIntegrations} connections={connections} />

@@ -187,11 +187,27 @@ export interface McpIntegrationGrant {
   requireApproval: boolean;
 }
 
+// Routing + credentials for a non-Anthropic model served by an Anthropic-compatible endpoint
+// (e.g. GLM 5.2 via z.ai). The backend resolves this from the agent's model; the runner applies
+// it by setting ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN (and removing ANTHROPIC_API_KEY) in the
+// CLI child env for that turn. Absent/null on a frame => first-party Anthropic (container key).
+// `authToken` is a secret — never log it (log `name` instead).
+export interface ProviderConfig {
+  name: string; // provider id, e.g. "zai" (logging/telemetry only)
+  baseUrl: string; // e.g. "https://api.z.ai/api/anthropic"
+  authToken: string; // operator-owned provider API key
+  supportsEffort: boolean; // false => runner omits the SDK `effort` option for this model
+  contextWindow: number; // fallback context window when the SDK doesn't report one
+}
+
 export interface ConfigureFrame {
   type: "configure";
   model: string | null; // null = let the runner use the SDK/agent-config default model
   permissionMode: PermissionMode;
   effort?: string; // reasoning effort (low|medium|high|xhigh); omitted = SDK/CLI default
+  // Non-Anthropic provider routing for `model`, if any (see ProviderConfig). Absent/null = the
+  // model is served by first-party Anthropic using the runner container's ANTHROPIC_API_KEY.
+  provider?: ProviderConfig | null;
   systemPromptAppend?: string;
   git?: { token: string; login: string; repoUrl?: string };
   // The agent's attached Gmail integration, if any: a fresh OAuth access token for the
@@ -242,6 +258,10 @@ export interface SetPermissionModeFrame {
 export interface SetModelFrame {
   type: "set_model";
   model: string;
+  // Provider routing for the new model (see ProviderConfig). Carried alongside `model` so the
+  // model swap and its credentials apply atomically at the runner's next turn boundary. Absent/
+  // null => the new model is first-party Anthropic.
+  provider?: ProviderConfig | null;
 }
 
 export interface SetEffortFrame {
