@@ -49,10 +49,10 @@ export function AddAgentDialog({
   }, [open]);
 
   const envOptions = [
-    { id: "cloud", label: "☁️  Cloud sandbox (recommended)" },
+    { id: "cloud", label: <span className="flex items-center gap-2"><Cloud className="size-4" /> Cloud</span> },
     ...devices.map((d) => ({
       id: `self:${d.id}`,
-      label: `💻  ${d.name}${d.online ? "" : " — offline"}`,
+      label: <span className="flex items-center gap-2"><MonitorSmartphone className="size-4" /> {d.name}{d.online ? "" : " — offline"}</span>,
     })),
   ];
   const selectedDevice = env.startsWith("self:") ? devices.find((d) => `self:${d.id}` === env) : null;
@@ -131,10 +131,7 @@ export function AddAgentDialog({
           </div>
           <IntegrationsEditor value={integrations} onChange={setIntegrations} connections={connections} />
           <div className="space-y-1.5">
-            <Label className="flex items-center gap-1.5">
-              {selectedDevice ? <MonitorSmartphone className="size-3.5" /> : <Cloud className="size-3.5" />}
-              Environment
-            </Label>
+            <Label>Environment</Label>
             <SelectMenu value={env} onChange={setEnv} options={envOptions} testId="agent-environment" />
             {selectedDevice ? (
               <p className="text-xs text-muted-foreground">
