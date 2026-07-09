@@ -422,6 +422,19 @@ export function compactAgent(id: string): Promise<{ ok: boolean; waking?: boolea
   });
 }
 
+// Ask an sdk agent to clear its conversation/context window (Claude Code's `/clear`). The
+// runner drops the session at the next idle boundary; the meter drops to 0% when the runner
+// reports the emptied window. `waking: true` if the agent was asleep — the clear runs once its
+// runner reconnects. Memory files are untouched.
+export function clearAgentContext(id: string): Promise<{ ok: boolean; waking?: boolean; error?: string }> {
+  return request(`/api/agents/${id}/clear`, {
+    method: "POST",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to clear context",
+  });
+}
+
 export function listChannels(participantId: string): Promise<Channel[]> {
   // participantId is the dev/no-token identity (read by the backend under DEV_BYPASS). In
   // Firebase mode the bearer token identifies the requester and this query param is ignored.

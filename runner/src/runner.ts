@@ -223,6 +223,12 @@ export class Runner {
   // dedicated `/compact` turn. A flag (not a queue item) so it can't interleave
   // with real messages and is naturally coalesced if pressed repeatedly.
   private compactRequested = false;
+  // Set by a `clear` frame; consumed at the next idle boundary by dropping the current
+  // session so the next turn starts with an empty context window (Claude Code's /clear).
+  // Same flag-not-queue rationale as compact; coalesces if pressed repeatedly. A pending
+  // compact is dropped too (see runTurn) — summarizing a context you're about to clear is
+  // wasted work. Memory files live in a separate dir and are untouched.
+  private clearRequested = false;
 
   // Streaming-input generator plumbing: the running query's generator awaits this between
   // yields; deliverFollowupBatch resolves it with items (mid-turn splice) and endTurn()
@@ -243,6 +249,11 @@ export class Runner {
   // backend (`memory` frame), so we only report actual changes. null = nothing reported yet
   // on this process; the post-configure report seeds it.
   private lastMemoryHash: string | null = null;
+
+  // The maxTokens the runner last reported (from getContextUsage), so a `clear` can emit a
+  // context_usage frame with the same ceiling and tokens=0 to drop the meter to empty. 0
+  // until the first turn reports usage; clear then falls back to the provider's window.
+  private lastMaxTokens = 0;
 
   // In-flight request/response correlation.
   private pendingSendMessages = new Map<string, (r: SendMessageResult) => void>();
@@ -339,6 +350,9 @@ export class Runner {
         break;
       case "compact":
         this.handleCompact();
+        break;
+      case "clear":
+        this.handleClear();
         break;
       case "set_permission_mode":
         void this.handleSetPermissionMode(frame.mode);
@@ -511,6 +525,15 @@ export class Runner {
     this.maybeStartTurn();
   }
 
+  // Clear request: remember it and drop the session at the next idle boundary. If a turn is
+  // already running we don't interrupt it — the flag is picked up when it finishes (runTurn's
+  // tail calls maybeStartTurn). See runTurn for why this also clears a pending compact.
+  private handleClear(): void {
+    this.clearRequested = true;
+    log.info("clear requested");
+    this.maybeStartTurn();
+  }
+
   private async handleSetPermissionMode(mode: PermissionMode): Promise<void> {
     this.permissionMode = mode;
     log.info("set permission mode", { mode });
@@ -561,12 +584,28 @@ export class Runner {
 
   private maybeStartTurn(): void {
     if (this.running || !this.configured) return;
-    if (this.queue.length === 0 && !this.compactRequested) return;
+    if (this.queue.length === 0 && !this.compactRequested && !this.clearRequested) return;
     void this.runTurn();
   }
 
   private async runTurn(): Promise<void> {
     this.running = true;
+
+    // A clear drops the conversation session at an idle boundary — no model work, so it
+    // short-circuits before any query/MCP setup. It also supersedes a pending compact
+    // (summarizing a context you're about to drop is wasted work). Real queued messages
+    // always win over a clear: they're drained into a normal turn and the clear is retried
+    // at its tail (maybeStartTurn), so a clear never eats pending user messages.
+    const clearing = this.queue.length === 0 && this.clearRequested;
+    if (clearing) {
+      this.clearRequested = false;
+      this.compactRequested = false;
+      await this.applyClear();
+      this.running = false;
+      this.sendState();
+      this.maybeStartTurn();
+      return;
+    }
 
     // A compact turn runs only when there's no real work queued, so `/compact`
     // operates on a settled context and never mixes with user messages.
@@ -882,8 +921,24 @@ export class Runner {
       maxTokens = fb.maxTokens;
     }
     if (maxTokens <= 0) return;
+    this.lastMaxTokens = maxTokens;
     const percent = Math.min(100, Math.max(0, Math.round((tokens / maxTokens) * 100)));
     this.conn.send({ type: "context_usage", tokens, maxTokens, percent });
+  }
+
+  // Clear the conversation/context window (Claude Code's `/clear`): drop the current session so
+  // the next turn's resumableSessionId() returns null and starts a fresh, empty context. The
+  // old transcript file is left on the volume (harmless — orphaned) rather than risk deleting
+  // state the agent might still be referencing mid-shutdown. Memory files live in a different
+  // dir and are re-injected via the system prompt each turn, so they're unaffected. Then report
+  // an empty context window so the profile meter reflects the clear immediately.
+  private async applyClear(): Promise<void> {
+    const prev = this.sessionId;
+    log.info("clearing context (dropping session)", { prevSessionId: prev });
+    this.sessionId = null;
+    await saveState({ sessionId: null, model: this.model });
+    const maxTokens = this.lastMaxTokens || this.provider?.contextWindow || 200_000;
+    this.conn.send({ type: "context_usage", tokens: 0, maxTokens, percent: 0 });
   }
 
   // Emit a synthetic "jungle_inbound" event through the existing event-frame path (the same
