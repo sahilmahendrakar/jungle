@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Check, Copy, Loader2, MonitorSmartphone, Plus, ShieldAlert, Trash2, Wifi, WifiOff } from "lucide-react";
 import { listDevices, updateDevice, removeDevice, type RunnerHost } from "./api";
+import { supportsUnsandboxed } from "@jungle/shared";
 import { fmtRelative } from "./lib/chat";
 import { ViewShell } from "./components/chat/ViewShell";
 import { SelectMenu } from "./components/chat/panels";
@@ -94,6 +95,13 @@ function DeviceCard({
     device.last_seen_at ? `seen ${fmtRelative(device.last_seen_at)}` : null,
   ].filter(Boolean);
 
+  // A device whose reported CLI version is known to be too old to honor `sandboxed` can't run
+  // unsandboxed, so don't offer that option (the backend would reject it anyway). An unknown
+  // version (never connected) is allowed through; the provisioner downgrades at run time if it
+  // turns out old, and the warning below surfaces that.
+  const cliTooOld = device.runner_version !== null && !supportsUnsandboxed(device.runner_version);
+  const sandboxOptions = cliTooOld ? SANDBOX_OPTIONS.filter((o) => o.id === "true") : SANDBOX_OPTIONS;
+
   return (
     <div data-testid="device-card" className="rounded-xl border bg-card p-4 shadow-sm">
       <div className="flex items-start gap-3">
@@ -143,7 +151,7 @@ function DeviceCard({
               <SelectMenu
                 value={String(device.sandboxed)}
                 onChange={(v) => setSandboxed(v === "true")}
-                options={SANDBOX_OPTIONS}
+                options={sandboxOptions}
                 testId="device-sandboxed"
               />
             </div>
@@ -154,6 +162,14 @@ function DeviceCard({
               Agents run in the directory where <code>jungle-agents connect</code> was run, with your
               real files and privileges. GitHub repo cloning is disabled (the agent uses the repo
               already in that directory).
+            </p>
+          )}
+          {!device.sandboxed && !supportsUnsandboxed(device.runner_version) && (
+            <p className="mt-1.5 flex items-start gap-1.5 text-[11px] leading-snug text-amber-600">
+              <ShieldAlert className="mt-0.5 size-3.5 shrink-0" />
+              This device's CLI (version {device.runner_version ?? "unknown"}) is too old to run
+              unsandboxed — agents will run sandboxed until you run{" "}
+              <code>npx jungle-agents@latest up</code> here.
             </p>
           )}
         </div>

@@ -1,6 +1,7 @@
 import "./env";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { supportsUnsandboxed, UNSANDBOXED_MIN_RUNNER_VERSION } from "@jungle/shared";
 import * as db from "./db";
 import * as hostcontrol from "./hostcontrol";
 
@@ -158,7 +159,17 @@ export class SelfHostedProvisioner implements Provisioner {
     // was run from (unsandboxed — the agent runs in the user's real cwd). Falls back to true
     // for an unknown/host-less row so an old or racey read never silently unsandboxes.
     const host = await db.getHost(hostId);
-    const sandboxed = host ? host.sandboxed : true;
+    let sandboxed = host ? host.sandboxed : true;
+    // Safety net: an unsandboxed device whose CLI is too old to honor the `sandboxed` field would
+    // silently keep running in the isolated workspace. Downgrade to sandboxed here so behavior
+    // matches the UI warning, and the device works correctly once it updates + reconnects.
+    if (!sandboxed && host && !supportsUnsandboxed(host.runner_version)) {
+      console.warn(
+        `agent ${agentId} on host ${hostId} is set unsandboxed but CLI version ` +
+          `${host.runner_version ?? "unknown"} < ${UNSANDBOXED_MIN_RUNNER_VERSION}; running sandboxed`,
+      );
+      sandboxed = true;
+    }
     hostcontrol.sendToHost(hostId, {
       type: "run_agent",
       agentId,

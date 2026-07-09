@@ -88,6 +88,31 @@ export interface RunnerHost {
   running_agents: number; // derived: agents with a live runner on this device
 }
 
+// The minimum `jungle-agents` CLI (runner) version that honors the `sandboxed` flag on the
+// run_agent frame. Older daemons ignore it and always run agents in the isolated per-agent
+// workspace, so the backend downgrades to sandboxed for them and the UI warns. Bump this (and the
+// runner package version) when the unsandboxed wire contract changes again.
+export const UNSANDBOXED_MIN_RUNNER_VERSION = "0.1.1";
+
+// Compare two dotted numeric version strings ("0.1.1" vs "0.2.0"). Returns <0 if a<b, 0 if equal,
+// >0 if a>b. Missing/shorter parts count as 0; non-numeric parts count as 0.
+export function compareVersions(a: string, b: string): number {
+  const pa = a.split(".").map((n) => parseInt(n, 10) || 0);
+  const pb = b.split(".").map((n) => parseInt(n, 10) || 0);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
+// True if `version` is new enough to run agents unsandboxed. null/unknown versions are treated as
+// "not known to be new enough" — callers decide whether to block or just warn.
+export function supportsUnsandboxed(version: string | null | undefined): boolean {
+  return !!version && compareVersions(version, UNSANDBOXED_MIN_RUNNER_VERSION) >= 0;
+}
+
 // --- Workspaces (Slack-style multi-tenancy) ---
 
 // A workspace as sent to clients.

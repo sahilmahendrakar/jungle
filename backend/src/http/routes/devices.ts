@@ -1,5 +1,5 @@
 import { Router } from "express";
-import type { RunnerHost, DeviceAssignPolicy } from "@jungle/shared";
+import { supportsUnsandboxed, type RunnerHost, type DeviceAssignPolicy } from "@jungle/shared";
 import * as db from "../../db";
 import * as runners from "../../runners";
 import * as hostcontrol from "../../hostcontrol";
@@ -161,6 +161,17 @@ router.patch(
     }
     if (req.body?.sandboxed !== undefined) {
       patch.sandboxed = Boolean(req.body.sandboxed);
+      // Block flipping a device to unsandboxed when we KNOW its CLI is too old to honor it. The
+      // runtime provisioner also downgrades as a safety net, but rejecting here makes the
+      // requirement visible at toggle time. A null runner_version (never connected / unknown) is
+      // allowed through — the device may update and reconnect before any agent runs.
+      if (patch.sandboxed === false && !supportsUnsandboxed(host.runner_version)) {
+        throw new ApiError(
+          400,
+          `This device's CLI (version ${host.runner_version ?? "unknown"}) is too old to run ` +
+            `unsandboxed. Update it on the device with \`npx jungle-agents@latest up\`, then try again.`,
+        );
+      }
     }
     await db.updateHost(host.id, patch);
     const updated = await db.getHost(host.id);
