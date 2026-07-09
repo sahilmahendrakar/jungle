@@ -672,9 +672,22 @@ export function compact(agentId: string): boolean {
   return true;
 }
 
+// Ask the agent's runner to clear its conversation/context window (Claude Code's `/clear`).
+// The runner drops the session at the next idle boundary. Returns false if no runner is
+// connected (see clearContextOrWake for the asleep/wake path).
+export function clearContext(agentId: string): boolean {
+  const conn = conns.get(agentId);
+  if (!conn) return false;
+  send(conn, { type: "clear" });
+  return true;
+}
+
 // agentId -> a compact request made while the machine was asleep/waking, to be delivered the
 // moment its runner says `hello` (see the "hello" case below).
 const pendingCompact = new Set<string>();
+
+// Same as pendingCompact, but for a clear-context request made while asleep/waking.
+const pendingClear = new Set<string>();
 
 // Compact-button entry point: sends immediately if a runner is connected; otherwise wakes the
 // agent's machine (same wake-on-message path as a triggering chat message) and remembers the
@@ -696,6 +709,27 @@ export async function compactOrWake(
   } catch (e) {
     pendingCompact.delete(agent.id);
     console.error(`compactOrWake: wake failed for ${agent.id}:`, e);
+    return "wake_failed";
+  }
+}
+
+// Clear-context button entry point: same shape as compactOrWake — send immediately if a runner
+// is connected, otherwise wake the machine and deliver the clear once it says `hello`.
+export async function clearContextOrWake(
+  agent: db.Participant,
+): Promise<"sent" | "waking" | "wake_failed"> {
+  if (clearContext(agent.id)) return "sent";
+  if (agent.runner_provider === "self_hosted" && !hostcontrol.isAgentDeviceOnline(agent.id)) {
+    return "wake_failed";
+  }
+  pendingClear.add(agent.id);
+  try {
+    await provisionerFor(agent).start(agent.id);
+    noteProvisionerStart(agent.id);
+    return "waking";
+  } catch (e) {
+    pendingClear.delete(agent.id);
+    console.error(`clearContextOrWake: wake failed for ${agent.id}:`, e);
     return "wake_failed";
   }
 }
@@ -855,6 +889,7 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         // while this agent was asleep/waking (see compactOrWake).
         await drain(agentId);
         if (pendingCompact.delete(agentId)) send(conn, { type: "compact" });
+        if (pendingClear.delete(agentId)) send(conn, { type: "clear" });
         break;
       }
       case "state": {
@@ -900,7 +935,10 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
       case "context_usage": {
         const tokens = Number(frame.tokens);
         const maxTokens = Number(frame.maxTokens);
-        if (Number.isFinite(tokens) && Number.isFinite(maxTokens) && tokens > 0 && maxTokens > 0) {
+        // tokens may be 0 (a `/clear` reporting an emptied context window); maxTokens must
+        // still be positive so a junk/missing frame is ignored. The runner only ever sends
+        // tokens=0 for an intentional clear — reportContextUsage returns early on <=0.
+        if (Number.isFinite(tokens) && Number.isFinite(maxTokens) && tokens >= 0 && maxTokens > 0) {
           hooks?.onContextUsage(agentId, { tokens: Math.round(tokens), maxTokens: Math.round(maxTokens) });
         }
         break;

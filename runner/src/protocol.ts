@@ -253,6 +253,15 @@ export interface CompactFrame {
   type: "compact";
 }
 
+// Ask the agent to clear its conversation/context window (Claude Code's `/clear`).
+// Applied at the next idle boundary: the runner drops its current session so the
+// next turn starts with an empty context. Memory files are separate (a different
+// dir, re-injected via the system prompt each turn) so they're preserved. A pending
+// compact is superseded — no point summarizing a context that's about to be dropped.
+export interface ClearFrame {
+  type: "clear";
+}
+
 export interface SetPermissionModeFrame {
   type: "set_permission_mode";
   mode: PermissionMode;
@@ -340,6 +349,7 @@ export type BackendToRunner =
   | EnqueueFrame
   | InterruptFrame
   | CompactFrame
+  | ClearFrame
   | SetPermissionModeFrame
   | SetModelFrame
   | SetEffortFrame

@@ -330,6 +330,19 @@ router.post(
   }),
 );
 
+// Ask an sdk agent to clear its conversation/context window (the profile's Clear button —
+// Claude Code's `/clear`). The runner drops the session at the next idle boundary; memory
+// files are untouched. Same wake-if-asleep path as compact.
+router.post(
+  "/api/agents/:id/clear",
+  wrap(async (req, res) => {
+    const { agent } = await requireAgent(req);
+    const result = await runners.clearContextOrWake(agent);
+    if (result === "wake_failed") return res.json({ ok: false, error: "failed to wake agent" });
+    res.json({ ok: true, waking: result === "waking" });
+  }),
+);
+
 // Every confirmation still awaiting a decision that the requester can act on (member of the
 // confirm's channel). Clients call this on load/reconnect to rebuild the approvals badge/inbox —
 // the request-time WS fan-out only reaches sockets that were open at that moment.

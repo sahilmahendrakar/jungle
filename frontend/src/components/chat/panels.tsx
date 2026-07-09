@@ -21,6 +21,7 @@ import {
   updateAgent,
   deleteAgent,
   compactAgent,
+  clearAgentContext,
   attachmentUrl,
   getAgentMemory,
   listAgentIntegrations,
@@ -557,6 +558,17 @@ export function ContextUsageCard({ person }: { person: Participant }) {
   const [waking, setWaking] = useState(false);
   const [err, setErr] = useState("");
 
+  // Clear-context (Claude Code's /clear): drops the conversation, keeps memory. Destructive, so
+  // the button arms on first click and fires on the second (disarms after a few seconds).
+  const [clearing, setClearing] = useState(false);
+  const [clearRequested, setClearRequested] = useState(false);
+  const [clearWaking, setClearWaking] = useState(false);
+  const [clearArmed, setClearArmed] = useState(false);
+  const armedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (armedTimer.current) clearTimeout(armedTimer.current);
+  }, []);
+
   const tokens = person.context_tokens ?? null;
   const max = person.context_max_tokens ?? null;
   const pct =
@@ -577,15 +589,23 @@ export function ContextUsageCard({ person }: { person: Participant }) {
         ? "text-amber-600 dark:text-amber-400"
         : "text-muted-foreground";
 
-  // A fresh usage report (e.g. the compaction turn finishing) supersedes the queued note.
+  // A fresh usage report (e.g. the compaction turn finishing, or a clear dropping it to 0)
+  // supersedes the queued note for whichever action was requested.
   const updatedAt = person.context_updated_at ?? null;
-  const requestedAtRef = useRef<string | null>(null);
+  const compactRequestedAtRef = useRef<string | null>(null);
+  const clearRequestedAtRef = useRef<string | null>(null);
   useEffect(() => {
-    if (requested && updatedAt !== requestedAtRef.current) {
+    if (requested && updatedAt !== compactRequestedAtRef.current) {
       setRequested(false);
       setWaking(false);
     }
   }, [updatedAt, requested]);
+  useEffect(() => {
+    if (clearRequested && updatedAt !== clearRequestedAtRef.current) {
+      setClearRequested(false);
+      setClearWaking(false);
+    }
+  }, [updatedAt, clearRequested]);
 
   async function compact() {
     if (requesting || requested) return;
@@ -594,13 +614,39 @@ export function ContextUsageCard({ person }: { person: Participant }) {
     try {
       const r = await compactAgent(person.id);
       if (!r.ok) throw new Error(r.error ?? "compact failed");
-      requestedAtRef.current = updatedAt;
+      compactRequestedAtRef.current = updatedAt;
       setRequested(true);
       setWaking(!!r.waking);
     } catch (e) {
       setErr(String((e as Error).message ?? e));
     } finally {
       setRequesting(false);
+    }
+  }
+
+  function armClear() {
+    if (clearing || clearRequested) return;
+    setClearArmed(true);
+    if (armedTimer.current) clearTimeout(armedTimer.current);
+    armedTimer.current = setTimeout(() => setClearArmed(false), 4_000);
+  }
+
+  async function clear() {
+    if (clearing || clearRequested) return;
+    setClearing(true);
+    setErr("");
+    setClearArmed(false);
+    if (armedTimer.current) clearTimeout(armedTimer.current);
+    try {
+      const r = await clearAgentContext(person.id);
+      if (!r.ok) throw new Error(r.error ?? "clear failed");
+      clearRequestedAtRef.current = updatedAt;
+      setClearRequested(true);
+      setClearWaking(!!r.waking);
+    } catch (e) {
+      setErr(String((e as Error).message ?? e));
+    } finally {
+      setClearing(false);
     }
   }
 
@@ -632,17 +678,46 @@ export function ContextUsageCard({ person }: { person: Participant }) {
           No usage reported yet — updates after the agent's next turn.
         </p>
       )}
-      <Button
-        variant="outline"
-        size="sm"
-        data-testid="agent-compact"
-        onClick={compact}
-        disabled={requesting || requested}
-        className="w-full gap-2 text-muted-foreground"
-      >
-        <FoldVertical className="size-3.5" />
-        {requesting ? "Requesting…" : requested ? "Compaction queued" : "Compact context"}
-      </Button>
+      <div className="flex gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          data-testid="agent-compact"
+          onClick={compact}
+          disabled={requesting || requested}
+          className="flex-1 gap-2 text-muted-foreground"
+        >
+          <FoldVertical className="size-3.5" />
+          {requesting ? "Requesting…" : requested ? "Compaction queued" : "Compact context"}
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          data-testid="agent-clear"
+          onClick={clearArmed ? clear : armClear}
+          disabled={clearing || clearRequested}
+          className={cn(
+            "flex-1 gap-2",
+            clearArmed
+              ? "border-destructive text-destructive hover:bg-destructive/10"
+              : "text-muted-foreground",
+          )}
+        >
+          <Trash2 className="size-3.5" />
+          {clearing
+            ? "Requesting…"
+            : clearRequested
+              ? "Clear queued"
+              : clearArmed
+                ? "Confirm clear"
+                : "Clear context"}
+        </Button>
+      </div>
+      {clearArmed && (
+        <p className="text-[11px] leading-tight text-destructive">
+          Clears the conversation (memory is kept). Click again to confirm.
+        </p>
+      )}
       {requested && (
         <p className="text-[11px] leading-tight text-muted-foreground">
           {waking
@@ -650,6 +725,15 @@ export function ContextUsageCard({ person }: { person: Participant }) {
               "conversation; the meter updates when it finishes."
             : "The agent will summarize its older conversation when it's next idle; the meter " +
               "updates when it finishes."}
+        </p>
+      )}
+      {clearRequested && (
+        <p className="text-[11px] leading-tight text-muted-foreground">
+          {clearWaking
+            ? "The agent was asleep — waking its machine, then it'll clear its conversation; " +
+              "the meter drops to 0% when it finishes."
+            : "The agent will clear its conversation when it's next idle; the meter drops to " +
+              "0% when it finishes."}
         </p>
       )}
       {err && <p className="text-[11px] text-destructive">{err}</p>}
