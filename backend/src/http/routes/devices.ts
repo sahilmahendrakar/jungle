@@ -11,7 +11,7 @@ import { requireRequester, accountUid } from "../guards";
 
 // Self-hosted devices. Two audiences use this router:
 //   • the web app (authenticated): device-code approval, and listing/renaming/removing devices;
-//   • a machine's `jungle-runner` CLI (unauthenticated, code-gated): starting a device-code
+//   • a machine's `jungle-agents` CLI (unauthenticated, code-gated): starting a device-code
 //     request and polling to exchange it for a durable device token.
 // A device is account-scoped (owner = accountUid). See db/hosts.ts + shared/src/host-protocol.ts.
 

@@ -1,4 +1,4 @@
-// On-disk config for the self-hosted CLI/daemon. Everything lives under ~/.jungle-runner:
+// On-disk config for the self-hosted CLI/daemon. Everything lives under ~/.jungle-agents:
 //   config.json                — the device registration (token + backend URLs)
 //   agents/<agentId>/workspace — each agent's working dir (files, repo, memory)
 //   agents/<agentId>/state     — each agent's runner state (session, git config/creds)
@@ -9,7 +9,7 @@ import path from "node:path";
 export const RUNNER_VERSION = process.env.JUNGLE_RUNNER_VERSION ?? "0.1.0";
 
 export function configRoot(): string {
-  return process.env.JUNGLE_RUNNER_HOME ?? path.join(os.homedir(), ".jungle-runner");
+  return process.env.JUNGLE_AGENTS_HOME ?? path.join(os.homedir(), ".jungle-agents");
 }
 export function configPath(): string {
   return path.join(configRoot(), "config.json");
@@ -18,7 +18,7 @@ export function agentsRoot(): string {
   return path.join(configRoot(), "agents");
 }
 
-// The device registration saved after `jungle-runner connect`. `controlWs` is the host-control
+// The device registration saved after `jungle-agents connect`. `controlWs` is the host-control
 // endpoint the daemon dials; `deviceToken` authenticates it. Per-agent runner tokens are never
 // stored here — the backend hands them to the daemon over the control channel at run time.
 export interface DeviceConfig {

@@ -1,4 +1,4 @@
-// The self-hosted DAEMON. After `jungle-runner connect` registers this machine, the daemon holds
+// The self-hosted DAEMON. After `jungle-agents connect` registers this machine, the daemon holds
 // one host-control WebSocket to the backend (shared/src/host-protocol.ts) and spawns/kills a
 // per-agent runner CHILD (dist/index.js — the same runner cloud uses) on the backend's command.
 // Each child dials /api/runner with its own runner_token and runs a normal SDK session; the daemon

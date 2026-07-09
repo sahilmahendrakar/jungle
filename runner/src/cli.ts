@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// `jungle-runner` — the CLI you run on a machine to make it a Jungle "environment". Typical use:
+// `jungle-agents` — the CLI you run on a machine to make it a Jungle "environment". Typical use:
 //
-//     jungle-runner connect            # authenticate this device (browser), then run the daemon
+//     jungle-agents connect            # authenticate this device (browser), then run the daemon
 //
 // After connecting once you never touch the terminal again: pick this device as an agent's
 // environment in the Jungle web app, and the daemon runs that agent here. `up` re-runs the daemon
@@ -59,7 +59,7 @@ async function connect(flags: Record<string, string>): Promise<void> {
   const existing = await loadConfig();
   if (existing && !flags.force) {
     console.log(`This machine is already connected as "${existing.device.name}". Running the daemon…`);
-    console.log(`(Run \`jungle-runner connect --force\` to re-register.)`);
+    console.log(`(Run \`jungle-agents connect --force\` to re-register.)`);
     new Daemon(existing).start();
     return;
   }
@@ -108,7 +108,7 @@ async function connect(flags: Record<string, string>): Promise<void> {
     break;
   }
   if (!cfg) {
-    console.error("\nTimed out waiting for approval. Run `jungle-runner connect` again.");
+    console.error("\nTimed out waiting for approval. Run `jungle-agents connect` again.");
     process.exit(1);
   }
 
@@ -122,7 +122,7 @@ async function connect(flags: Record<string, string>): Promise<void> {
 async function up(): Promise<void> {
   const cfg = await loadConfig();
   if (!cfg) {
-    console.error("This machine isn't connected yet. Run `jungle-runner connect` first.");
+    console.error("This machine isn't connected yet. Run `jungle-agents connect` first.");
     process.exit(1);
   }
   new Daemon(cfg).start();
@@ -131,7 +131,7 @@ async function up(): Promise<void> {
 async function status(): Promise<void> {
   const cfg = await loadConfig();
   if (!cfg) {
-    console.log("Not connected. Run `jungle-runner connect`.");
+    console.log("Not connected. Run `jungle-agents connect`.");
     return;
   }
   console.log(`Connected as "${cfg.device.name}" (${cfg.device.id})`);
@@ -197,7 +197,7 @@ async function main(): Promise<void> {
       await logout();
       break;
     default:
-      console.log("Usage: jungle-runner <connect|up|status|logout> [--backend URL] [--name NAME]");
+      console.log("Usage: jungle-agents <connect|up|status|logout> [--backend URL] [--name NAME]");
       process.exit(cmd === "help" || cmd === "--help" ? 0 : 1);
   }
 }

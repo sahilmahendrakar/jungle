@@ -8,10 +8,10 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
 // The Environments (Devices) page: the account's registered machines that can run agents. A
-// machine appears here after `jungle-runner connect`; from then on it's a selectable environment
+// machine appears here after `jungle-agents connect`; from then on it's a selectable environment
 // in the New Agent dialog. Account-scoped (shown across all the user's workspaces).
 
-const CONNECT_CMD = "npx jungle-runner connect";
+const CONNECT_CMD = "npx jungle-agents connect";
 
 function CopyButton({ text, label = "Copy" }: { text: string; label?: string }) {
   const [copied, setCopied] = useState(false);

@@ -5,7 +5,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import type { HostToBackend, BackendToHost } from "@jungle/shared";
 import * as db from "./db";
 
-// The host-control side of self-hosted devices. A user's `jungle-runner` DAEMON dials INTO the
+// The host-control side of self-hosted devices. A user's `jungle-agents` DAEMON dials INTO the
 // backend at GET /api/host?token=<device_token> (WS upgrade) and speaks
 // shared/src/host-protocol.ts. Over this one connection per device the backend tells the daemon
 // which agents to run (`run_agent`/`stop_agent`/`remove_agent`); the daemon spawns/kills per-agent

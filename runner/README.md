@@ -1,9 +1,9 @@
-# jungle-runner
+# jungle-agents
 
 Run [Jungle](https://jungleagents.com) agents on your own machine.
 
 ```bash
-npx jungle-runner connect
+npx jungle-agents connect
 ```
 
 This authenticates your device (opens a browser to approve), registers it to your
@@ -16,12 +16,12 @@ handle an API key: model calls are proxied through the Jungle backend.
 
 | command | what it does |
 |---|---|
-| `jungle-runner connect` | authenticate + register this device, then run the daemon |
-| `jungle-runner up` | run the daemon on an already-connected device (e.g. at login) |
-| `jungle-runner status` | show this device's registration |
-| `jungle-runner logout` | disconnect this device locally (also remove it from the web app to fully revoke) |
+| `jungle-agents connect` | authenticate + register this device, then run the daemon |
+| `jungle-agents up` | run the daemon on an already-connected device (e.g. at login) |
+| `jungle-agents status` | show this device's registration |
+| `jungle-agents logout` | disconnect this device locally (also remove it from the web app to fully revoke) |
 
-Config and per-agent workspaces live under `~/.jungle-runner/`. Requires Node 18+
+Config and per-agent workspaces live under `~/.jungle-agents/`. Requires Node 18+
 and `git` on PATH. Point at a different backend with `--backend <url>`.
 
 ---
@@ -31,7 +31,7 @@ and `git` on PATH. Point at a different backend with `--backend <url>`.
 A long-lived Node/TypeScript process that runs the Claude Agent SDK inside a
 sandbox (one container per agent) and bridges it to the Jungle backend over a
 single **outbound** WebSocket. The protocol is defined in
-[`../docs/runner-protocol.md`](../docs/runner-protocol.md). The `jungle-runner`
+[`../docs/runner-protocol.md`](../docs/runner-protocol.md). The `jungle-agents`
 CLI/daemon (self-hosted) additionally speaks the host-control protocol and spawns
 one of these runner processes per agent assigned to the device.
 

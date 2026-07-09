@@ -2,7 +2,7 @@
 // Regenerate with `npm run build` (runs scripts/sync-protocol.mjs) in the runner package.
 
 // Jungle host-control protocol (v1). See docs/runner-protocol.md for the sibling per-agent
-// protocol. This is the control channel between a user's `jungle-runner` DAEMON and the backend,
+// protocol. This is the control channel between a user's `jungle-agents` DAEMON and the backend,
 // used only for self-hosted agents (runner_provider = 'self_hosted').
 //
 // Direction & auth: the daemon dials OUT and holds ONE WebSocket per device:

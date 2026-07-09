@@ -65,7 +65,7 @@ export interface Participant extends ParticipantBase {
 // with the owner's OS privileges, so this defaults closed.
 export type DeviceAssignPolicy = "owner_only" | "workspace_members";
 
-// A machine a user registered with `jungle-runner connect`. Account-scoped (owned by a Google
+// A machine a user registered with `jungle-agents connect`. Account-scoped (owned by a Google
 // account, selectable across that account's workspaces). `online` is derived at serialization
 // time from whether the device's control connection is live; `running_agents` counts agents
 // currently executing on it. Server-only fields (the device token hash) never appear here.

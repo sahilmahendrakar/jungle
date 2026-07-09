@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
-// The /link page: where a signed-in user approves a device code shown by `jungle-runner connect`
+// The /link page: where a signed-in user approves a device code shown by `jungle-agents connect`
 // on one of their machines. The CLI opens this with ?code=… prefilled; the user just confirms.
 
 export function LinkDevice({
@@ -70,7 +70,7 @@ export function LinkDevice({
           <div className="rounded-xl border bg-card p-6 shadow-sm">
             <h2 className="text-base font-semibold">Approve this device</h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              Enter the code shown by <code className="font-mono text-xs">jungle-runner connect</code> on your
+              Enter the code shown by <code className="font-mono text-xs">jungle-agents connect</code> on your
               machine. Approving lets that machine run agents you assign to it.
             </p>
             <div className="mt-4 space-y-1.5">

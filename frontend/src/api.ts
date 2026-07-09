@@ -244,7 +244,7 @@ export function removeDevice(id: string): Promise<{ ok: boolean }> {
   });
 }
 
-// Approve a device-code shown by `jungle-runner connect` on a machine (the /link page).
+// Approve a device-code shown by `jungle-agents connect` on a machine (the /link page).
 export function approveDeviceCode(userCode: string): Promise<{ ok: boolean }> {
   return request<{ ok: boolean }>(`/api/devices/auth/approve`, {
     json: { userCode },
