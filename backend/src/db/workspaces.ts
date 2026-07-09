@@ -5,7 +5,7 @@ import { withTransaction } from "./tx";
 import type { Participant } from "./participants";
 
 // Per-workspace agent cap when the workspace has no explicit override (workspaces.max_agents).
-const DEFAULT_MAX_AGENTS = Number(process.env.MAX_AGENTS_PER_WORKSPACE ?? 10);
+const DEFAULT_MAX_AGENTS = Number(process.env.MAX_AGENTS_PER_WORKSPACE ?? 50);
 
 export interface WorkspaceRow extends Workspace {
   max_agents: number | null;
