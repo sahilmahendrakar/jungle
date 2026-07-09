@@ -868,7 +868,10 @@ export function App({
     // Per (message, agent), keep only the MOST RECENT turn's chip — a thread root now
     // accumulates one anchor per reply that re-triggers the agent (see orchestrator.ts), so
     // without this an old "finished" chip from an earlier reply would just sit there forever
-    // next to the new one instead of being replaced by it.
+    // next to the new one instead of being replaced by it. This is the turn-chip half of the
+    // "one active chip per (agent, thread-root)" invariant; the queued-chip half is enforced in
+    // useLiveTurns (ingestQueued / ingestLiveEvent / hydrateChannel), so a message never shows a
+    // queued chip alongside a running turn chip.
     const latestByMessage = new Map<string, Map<string, TurnChipData>>();
     for (const chip of turnChipsRef.current.values()) {
       for (const mid of chip.messageIds) {
