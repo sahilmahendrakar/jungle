@@ -32,6 +32,7 @@ function toRunnerHost(row: db.RunnerHostRow, runningAgents: number): RunnerHost 
     runner_version: row.runner_version,
     assign_policy: row.assign_policy,
     shared_workspace_ids: row.shared_workspace_ids,
+    sandboxed: row.sandboxed,
     created_at: row.created_at,
     last_seen_at: row.last_seen_at,
     online: hostcontrol.isHostOnline(row.id),
@@ -142,7 +143,12 @@ router.patch(
     const me = await requireRequester(req);
     const host = await db.getOwnedHost(String(req.params.id), accountUid(me));
     if (!host) throw new ApiError(404, "device not found");
-    const patch: { name?: string; assignPolicy?: DeviceAssignPolicy; sharedWorkspaceIds?: string[] } = {};
+    const patch: {
+      name?: string;
+      assignPolicy?: DeviceAssignPolicy;
+      sharedWorkspaceIds?: string[];
+      sandboxed?: boolean;
+    } = {};
     if (req.body?.name !== undefined) patch.name = reqString(req.body.name, "name");
     if (req.body?.assignPolicy !== undefined) {
       const p = String(req.body.assignPolicy);
@@ -152,6 +158,9 @@ router.patch(
     if (req.body?.sharedWorkspaceIds !== undefined) {
       if (!Array.isArray(req.body.sharedWorkspaceIds)) throw new ApiError(400, "sharedWorkspaceIds must be an array");
       patch.sharedWorkspaceIds = req.body.sharedWorkspaceIds.map(String);
+    }
+    if (req.body?.sandboxed !== undefined) {
+      patch.sandboxed = Boolean(req.body.sandboxed);
     }
     await db.updateHost(host.id, patch);
     const updated = await db.getHost(host.id);

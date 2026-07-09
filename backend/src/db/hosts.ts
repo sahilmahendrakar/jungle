@@ -19,6 +19,7 @@ export interface RunnerHostRow {
   device_token_hash: string;
   assign_policy: DeviceAssignPolicy;
   shared_workspace_ids: string[];
+  sandboxed: boolean;
   created_at: string;
   last_seen_at: string | null;
   revoked_at: string | null;
@@ -27,7 +28,7 @@ export interface RunnerHostRow {
 // Column list backing RunnerHostRow queries (the token hash is included so control-channel auth
 // can look a host up by it; strip it before anything reaches a client — see toRunnerHost).
 const HOST_COLUMNS = `id, owner_uid, name, hostname, platform, arch, runner_version,
-                      device_token_hash, assign_policy, shared_workspace_ids,
+                      device_token_hash, assign_policy, shared_workspace_ids, sandboxed,
                       created_at, last_seen_at, revoked_at`;
 
 export function hashToken(token: string): string {
@@ -200,15 +201,27 @@ export async function canAssignHost(hostId: string, uid: string, workspaceId: st
 
 export async function updateHost(
   id: string,
-  patch: { name?: string; assignPolicy?: DeviceAssignPolicy; sharedWorkspaceIds?: string[] },
+  patch: {
+    name?: string;
+    assignPolicy?: DeviceAssignPolicy;
+    sharedWorkspaceIds?: string[];
+    sandboxed?: boolean;
+  },
 ): Promise<void> {
   await pool.query(
     `update runner_hosts set
        name = coalesce($2, name),
        assign_policy = coalesce($3, assign_policy),
-       shared_workspace_ids = coalesce($4, shared_workspace_ids)
+       shared_workspace_ids = coalesce($4, shared_workspace_ids),
+       sandboxed = coalesce($5, sandboxed)
      where id = $1`,
-    [id, patch.name ?? null, patch.assignPolicy ?? null, patch.sharedWorkspaceIds ?? null],
+    [
+      id,
+      patch.name ?? null,
+      patch.assignPolicy ?? null,
+      patch.sharedWorkspaceIds ?? null,
+      patch.sandboxed ?? null,
+    ],
   );
 }
 

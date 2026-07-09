@@ -78,6 +78,10 @@ export interface RunnerHost {
   runner_version: string | null;
   assign_policy: DeviceAssignPolicy;
   shared_workspace_ids: string[]; // workspaces the device is shared into (workspace_members policy)
+  // Whether agents on this device run in an isolated per-agent workspace (true, the default) or
+  // directly in the directory `jungle-agents connect` was run from (false). False = the agent has
+  // the user's real files in its cwd; per-agent state (memory/session/git-creds) stays isolated.
+  sandboxed: boolean;
   created_at: string;
   last_seen_at: string | null;
   online: boolean; // derived: control channel currently connected

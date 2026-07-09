@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, Copy, Loader2, MonitorSmartphone, Plus, Trash2, Wifi, WifiOff } from "lucide-react";
+import { Check, Copy, Loader2, MonitorSmartphone, Plus, ShieldAlert, Trash2, Wifi, WifiOff } from "lucide-react";
 import { listDevices, updateDevice, removeDevice, type RunnerHost } from "./api";
 import { fmtRelative } from "./lib/chat";
 import { ViewShell } from "./components/chat/ViewShell";
@@ -37,6 +37,14 @@ const ASSIGN_OPTIONS = [
   { id: "workspace_members", label: "Anyone in this workspace" },
 ];
 
+// Whether agents on this device run in an isolated per-agent workspace (sandboxed) or directly in
+// the directory `jungle-agents connect` was run from (unsandboxed — the agent edits your real
+// project files in place).
+const SANDBOX_OPTIONS = [
+  { id: "true", label: "Sandboxed (isolated workspace)" },
+  { id: "false", label: "Not sandboxed (runs in connect directory)" },
+];
+
 function DeviceCard({
   device,
   workspaceId,
@@ -67,6 +75,11 @@ function DeviceCard({
     await updateDevice(device.id, { assignPolicy: policy, sharedWorkspaceIds })
       .then(onChanged)
       .finally(() => setBusy(false));
+  }
+
+  async function setSandboxed(sandboxed: boolean) {
+    setBusy(true);
+    await updateDevice(device.id, { sandboxed }).then(onChanged).finally(() => setBusy(false));
   }
 
   async function remove() {
@@ -124,6 +137,25 @@ function DeviceCard({
             </div>
             {busy && <Loader2 className="size-3.5 animate-spin text-muted-foreground" />}
           </div>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span className="text-xs text-muted-foreground">Sandboxing:</span>
+            <div className="w-64">
+              <SelectMenu
+                value={String(device.sandboxed)}
+                onChange={(v) => setSandboxed(v === "true")}
+                options={SANDBOX_OPTIONS}
+                testId="device-sandboxed"
+              />
+            </div>
+          </div>
+          {!device.sandboxed && (
+            <p className="mt-1.5 flex items-start gap-1.5 text-[11px] leading-snug text-amber-600">
+              <ShieldAlert className="mt-0.5 size-3.5 shrink-0" />
+              Agents run in the directory where <code>jungle-agents connect</code> was run, with your
+              real files and privileges. GitHub repo cloning is disabled (the agent uses the repo
+              already in that directory).
+            </p>
+          )}
         </div>
         <Button variant="ghost" size="icon" className="shrink-0 text-muted-foreground" onClick={remove} disabled={busy}>
           <Trash2 className="size-4" />

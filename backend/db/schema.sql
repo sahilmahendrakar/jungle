@@ -394,6 +394,7 @@ create table if not exists runner_hosts (
   device_token_hash    text not null unique,
   assign_policy        text not null default 'owner_only',  -- owner_only | workspace_members
   shared_workspace_ids uuid[] not null default '{}',
+  sandboxed            boolean not null default true,       -- isolated per-agent workspace (true) vs the connect cwd (false)
   created_at           timestamptz not null default now(),
   last_seen_at         timestamptz,
   revoked_at           timestamptz

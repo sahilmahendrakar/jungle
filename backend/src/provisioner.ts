@@ -153,6 +153,12 @@ export class SelfHostedProvisioner implements Provisioner {
     const hostId = agent?.runner_meta?.hostId as string | undefined;
     if (!agent || !hostId || !agent.runner_token) return;
     hostcontrol.setAgentHost(agentId, hostId);
+    // The device's sandbox setting tells the daemon where to root the agent's workspace: an
+    // isolated per-agent dir (sandboxed, the default) or the directory `jungle-agents connect`
+    // was run from (unsandboxed — the agent runs in the user's real cwd). Falls back to true
+    // for an unknown/host-less row so an old or racey read never silently unsandboxes.
+    const host = await db.getHost(hostId);
+    const sandboxed = host ? host.sandboxed : true;
     hostcontrol.sendToHost(hostId, {
       type: "run_agent",
       agentId,
@@ -160,6 +166,7 @@ export class SelfHostedProvisioner implements Provisioner {
       runnerToken: agent.runner_token,
       backendWs: RUNNER_BACKEND_WS,
       llmBaseUrl: LLM_BASE_URL,
+      sandboxed,
     });
   }
 
