@@ -41,6 +41,9 @@ const BRAND_PATHS: Record<string, string> = {
   // Granola: simple meeting-notes glyph (no official mark in simple-icons).
   granola:
     "M5 2.5h14a1 1 0 0 1 1 1v17a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-17a1 1 0 0 1 1-1zm2.5 4.75a.75.75 0 0 0 0 1.5h9a.75.75 0 0 0 0-1.5zm0 4a.75.75 0 0 0 0 1.5h9a.75.75 0 0 0 0-1.5zm0 4a.75.75 0 0 0 0 1.5h5.5a.75.75 0 0 0 0-1.5z",
+  // X (formerly Twitter): official monochrome mark — black in light mode, white in dark.
+  x:
+    "M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z",
 };
 
 // Brand accent per connection/integration key, used for the glyph on a neutral tile so the
@@ -53,6 +56,7 @@ const BRAND_COLORS: Record<string, string> = {
   notion: "", // black/white mark
   "google-drive": "#34A853",
   granola: "#D97706",
+  x: "", // black/white mark — uses text-foreground
 };
 
 // The raw brand glyph (an SVG path on a 24×24 viewBox).

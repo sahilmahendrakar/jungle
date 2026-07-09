@@ -95,6 +95,15 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     connection: "oauth",
     readOnly: true,
   },
+  {
+    key: "x",
+    name: "X (Twitter)",
+    description: "Summarize activity on your X account — your recent tweets, mentions, replies and notifications.",
+    connectionKey: "x",
+    configFields: [],
+    connection: "oauth",
+    readOnly: true,
+  },
 ];
 
 // The per-user connection catalog — everything a user can link in Settings → Connections.
@@ -152,4 +161,13 @@ export interface GmailIntegrationConfig {
   backingParticipantId: string;
   email: string;
   requireSendApproval: boolean;
+}
+
+// The `config` stored on an agent's `x` integration row. Holds NO secrets — the OAuth 2.0 User
+// Context tokens live in the per-user integration_connections table (key "x"). This only records
+// which connected account backs the agent (the attaching user) and its @handle for display; the
+// backend mints access tokens from that connection at runtime (see backend/src/integrations/x.ts).
+export interface XIntegrationConfig {
+  backingParticipantId: string;
+  account: string; // the @handle of the connected account
 }
