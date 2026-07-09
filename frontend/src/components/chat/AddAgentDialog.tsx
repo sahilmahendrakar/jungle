@@ -52,10 +52,29 @@ export function AddAgentDialog({
     { id: "cloud", label: <span className="flex items-center gap-2"><Cloud className="size-4" /> Cloud</span> },
     ...devices.map((d) => ({
       id: `self:${d.id}`,
-      label: <span className="flex items-center gap-2"><MonitorSmartphone className="size-4" /> {d.name}{d.online ? "" : " — offline"}</span>,
+      label: (
+        <span className="flex items-center gap-2">
+          <MonitorSmartphone className="size-4" />
+          {d.name}
+          {d.online ? "" : " — offline"}
+          {!d.sandboxed && <span className="text-xs text-muted-foreground">· unsandboxed</span>}
+        </span>
+      ),
     })),
   ];
   const selectedDevice = env.startsWith("self:") ? devices.find((d) => `self:${d.id}` === env) : null;
+  // An unsandboxed device roots the agent in the user's real repo, so the GitHub repo integration
+  // (which clones into <workspace>/repo) is meaningless and would collide — hide it from the picker.
+  const unsandboxedLocal = !!selectedDevice && !selectedDevice.sandboxed;
+  const integrationDisabledKeys = unsandboxedLocal ? new Set(["github"]) : undefined;
+
+  // If the user switches an already-configured agent to an unsandboxed device, drop any attached
+  // GitHub repo integration — it can't clone into the user's real repo and the picker hides it.
+  useEffect(() => {
+    if (unsandboxedLocal && integrations.some((i) => i.key === "github")) {
+      setIntegrations((prev) => prev.filter((i) => i.key !== "github"));
+    }
+  }, [unsandboxedLocal, integrations, setIntegrations]);
 
   async function submitAddAgent() {
     if (!agHandle.trim() || !agName.trim()) {
@@ -129,7 +148,12 @@ export function AddAgentDialog({
               placeholder="e.g. Deploy Bot"
             />
           </div>
-          <IntegrationsEditor value={integrations} onChange={setIntegrations} connections={connections} />
+          <IntegrationsEditor
+            value={integrations}
+            onChange={setIntegrations}
+            connections={connections}
+            disabledKeys={integrationDisabledKeys}
+          />
           <div className="space-y-1.5">
             <Label>Environment</Label>
             <SelectMenu value={env} onChange={setEnv} options={envOptions} testId="agent-environment" />

@@ -146,10 +146,23 @@ export class Daemon {
     if (!child || child.proc) return;
     const { spec } = child;
     const dir = path.join(agentsRoot(), agentId);
-    const workspace = path.join(dir, "workspace");
     const state = path.join(dir, "state");
-    await fs.mkdir(workspace, { recursive: true });
     await fs.mkdir(state, { recursive: true });
+
+    // `sandboxed` (default true) decides where the agent's working directory is rooted. Sandboxed
+    // = the historical isolated per-agent workspace dir. Unsandboxed = the directory the
+    // `jungle-agents connect` process was launched from (the daemon's own cwd), so the agent runs
+    // directly in the user's real project. Per-agent STATE (session transcripts, memory, git
+    // config/credentials) stays in the private state dir either way — never clobber the user's.
+    const sandboxed = spec.sandboxed !== false;
+    let workspace: string;
+    if (sandboxed) {
+      workspace = path.join(dir, "workspace");
+      await fs.mkdir(workspace, { recursive: true });
+    } else {
+      // The daemon never chdirs, so its cwd is exactly where `connect` was invoked.
+      workspace = process.cwd();
+    }
 
     const env: NodeJS.ProcessEnv = {
       ...process.env,
@@ -161,6 +174,10 @@ export class Daemon {
       JUNGLE_STATE_DIR: state,
       JUNGLE_SELF_HOSTED: "1",
       JUNGLE_RUNNER_VERSION: RUNNER_VERSION,
+      // When unsandboxed the agent runs in the user's real repo, so cloning a configured GitHub
+      // repo into <workspace>/repo would nest/collide. Suppress auto-clone; creds are still
+      // applied so pushes against the existing repo work.
+      ...(sandboxed ? {} : { JUNGLE_AUTO_CLONE_REPO: "0" }),
       // Model calls go to the backend proxy, authenticated by the runner token — no real key here.
       ANTHROPIC_BASE_URL: spec.llmBaseUrl,
       ANTHROPIC_API_KEY: spec.runnerToken,
@@ -169,7 +186,9 @@ export class Daemon {
       JUNGLE_GIT_CREDENTIALS: path.join(state, "git-credentials"),
     };
 
-    console.log(`[daemon] starting @${spec.handle} (${agentId})`);
+    console.log(
+      `[daemon] starting @${spec.handle} (${agentId}) cwd=${workspace}${sandboxed ? "" : " (unsandboxed)"}`,
+    );
     const proc = spawn(process.execPath, [RUNNER_ENTRY], { env, stdio: ["ignore", "pipe", "pipe"] });
     child.proc = proc;
     const tag = `[@${spec.handle}]`;

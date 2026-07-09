@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { Check, Copy, Loader2, MonitorSmartphone, Plus, Trash2, Wifi, WifiOff } from "lucide-react";
+import { Check, Copy, Loader2, MonitorSmartphone, Plus, ShieldAlert, Trash2, Wifi, WifiOff } from "lucide-react";
 import { listDevices, updateDevice, removeDevice, type RunnerHost } from "./api";
+import { supportsUnsandboxed } from "@jungle/shared";
 import { fmtRelative } from "./lib/chat";
 import { ViewShell } from "./components/chat/ViewShell";
 import { SelectMenu } from "./components/chat/panels";
@@ -37,6 +38,14 @@ const ASSIGN_OPTIONS = [
   { id: "workspace_members", label: "Anyone in this workspace" },
 ];
 
+// Whether agents on this device run in an isolated per-agent workspace (sandboxed) or directly in
+// the directory `jungle-agents connect` was run from (unsandboxed — the agent edits your real
+// project files in place).
+const SANDBOX_OPTIONS = [
+  { id: "true", label: "Sandboxed (isolated workspace)" },
+  { id: "false", label: "Not sandboxed (runs in connect directory)" },
+];
+
 function DeviceCard({
   device,
   workspaceId,
@@ -69,6 +78,11 @@ function DeviceCard({
       .finally(() => setBusy(false));
   }
 
+  async function setSandboxed(sandboxed: boolean) {
+    setBusy(true);
+    await updateDevice(device.id, { sandboxed }).then(onChanged).finally(() => setBusy(false));
+  }
+
   async function remove() {
     if (!confirm(`Remove "${device.name}"? Agents running on it will go offline until reassigned.`)) return;
     setBusy(true);
@@ -80,6 +94,13 @@ function DeviceCard({
     device.platform && device.arch ? `${device.platform}/${device.arch}` : device.platform,
     device.last_seen_at ? `seen ${fmtRelative(device.last_seen_at)}` : null,
   ].filter(Boolean);
+
+  // A device whose reported CLI version is known to be too old to honor `sandboxed` can't run
+  // unsandboxed, so don't offer that option (the backend would reject it anyway). An unknown
+  // version (never connected) is allowed through; the provisioner downgrades at run time if it
+  // turns out old, and the warning below surfaces that.
+  const cliTooOld = device.runner_version !== null && !supportsUnsandboxed(device.runner_version);
+  const sandboxOptions = cliTooOld ? SANDBOX_OPTIONS.filter((o) => o.id === "true") : SANDBOX_OPTIONS;
 
   return (
     <div data-testid="device-card" className="rounded-xl border bg-card p-4 shadow-sm">
@@ -124,6 +145,33 @@ function DeviceCard({
             </div>
             {busy && <Loader2 className="size-3.5 animate-spin text-muted-foreground" />}
           </div>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span className="text-xs text-muted-foreground">Sandboxing:</span>
+            <div className="w-64">
+              <SelectMenu
+                value={String(device.sandboxed)}
+                onChange={(v) => setSandboxed(v === "true")}
+                options={sandboxOptions}
+                testId="device-sandboxed"
+              />
+            </div>
+          </div>
+          {!device.sandboxed && (
+            <p className="mt-1.5 flex items-start gap-1.5 text-[11px] leading-snug text-amber-600">
+              <ShieldAlert className="mt-0.5 size-3.5 shrink-0" />
+              Agents run in the directory where <code>jungle-agents connect</code> was run, with your
+              real files and privileges. GitHub repo cloning is disabled (the agent uses the repo
+              already in that directory).
+            </p>
+          )}
+          {!device.sandboxed && !supportsUnsandboxed(device.runner_version) && (
+            <p className="mt-1.5 flex items-start gap-1.5 text-[11px] leading-snug text-amber-600">
+              <ShieldAlert className="mt-0.5 size-3.5 shrink-0" />
+              This device's CLI (version {device.runner_version ?? "unknown"}) is too old to run
+              unsandboxed — agents will run sandboxed until you run{" "}
+              <code>npx jungle-agents@latest up</code> here.
+            </p>
+          )}
         </div>
         <Button variant="ghost" size="icon" className="shrink-0 text-muted-foreground" onClick={remove} disabled={busy}>
           <Trash2 className="size-4" />

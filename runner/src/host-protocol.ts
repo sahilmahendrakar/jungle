@@ -66,6 +66,10 @@ export interface RunAgentFrame {
   runnerToken: string;
   backendWs: string; // wss://…/api/runner base (child appends ?token=)
   llmBaseUrl: string; // https://…/api/llm (child's ANTHROPIC_BASE_URL)
+  // Whether the agent runs in an isolated per-agent workspace (true, the default) or directly in
+  // the directory `jungle-agents connect` was run from (false). Per-agent state stays isolated
+  // either way. Absent = treat as true (back-compat with older backends).
+  sandboxed?: boolean;
 }
 
 // Stop the agent's runner child but KEEP its workspace/state on disk (idle-stop / sleep). The

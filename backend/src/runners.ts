@@ -315,6 +315,9 @@ export function systemPromptAppend(
   agent: db.AgentRow,
   integrationBlocks: string[],
   workspaceName?: string,
+  // For self-hosted agents: whether the device runs the agent sandboxed (isolated workspace) or
+  // unsandboxed (in the user's connect directory). undefined for non-self-hosted / unknown.
+  hostSandboxed?: boolean,
 ): string {
   const ws = workspaceName ? `the "${workspaceName}" workspace` : `a workspace`;
   let s =
@@ -418,6 +421,16 @@ export function systemPromptAppend(
       `directs you to use them for the task at hand. Dev servers and other long-running processes ` +
       `MUST use the Bash tool's run_in_background option — plain \`&\` background jobs are killed ` +
       `when the Bash call returns.`;
+    // Unsandboxed devices root the agent's cwd at the user's connect directory rather than an
+    // isolated workspace, so the agent is editing the person's real project files in place.
+    if (hostSandboxed === false) {
+      s +=
+        ` Your working directory is the folder where \`jungle-agents connect\` was run on this ` +
+        `machine — these are your creator's real project files, not an isolated copy. Do NOT clone ` +
+        `or initialize a repo here; work with what's already present. Your session transcripts, ` +
+        `memory, and git credentials stay isolated to you, but the files in your cwd are shared ` +
+        `with the person — treat every edit as permanent.`;
+    }
   } else {
     s +=
       `You run in a Linux container: no sudo/apt, ~3GB memory (don't run several heavy ` +
@@ -466,7 +479,15 @@ async function buildConfigure(agent: db.AgentRow): Promise<ConfigureFrame> {
     if (block) blocks.push(block);
   }
   const workspace = await db.getWorkspace(agent.workspace_id);
-  frame.systemPromptAppend = systemPromptAppend(agent, blocks, workspace?.name);
+  // For self-hosted agents, the device's sandbox setting decides whether the agent runs in an
+  // isolated workspace (true) or in the user's connect directory (false). The prompt's
+  // "your environment" block depends on it, so resolve it here.
+  let hostSandboxed: boolean | undefined;
+  if (agent.runner_provider === "self_hosted") {
+    const hostId = (agent.runner_meta as db.RunnerMeta | null)?.hostId;
+    if (hostId) hostSandboxed = (await db.getHost(hostId))?.sandboxed;
+  }
+  frame.systemPromptAppend = systemPromptAppend(agent, blocks, workspace?.name, hostSandboxed);
   return frame;
 }
 

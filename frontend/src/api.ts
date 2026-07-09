@@ -220,10 +220,10 @@ export function listDevices(): Promise<RunnerHost[]> {
   });
 }
 
-// Rename a device or change its assign policy / shared workspaces (owner only).
+// Rename a device or change its assign policy / shared workspaces / sandboxing (owner only).
 export function updateDevice(
   id: string,
-  patch: { name?: string; assignPolicy?: string; sharedWorkspaceIds?: string[] },
+  patch: { name?: string; assignPolicy?: string; sharedWorkspaceIds?: string[]; sandboxed?: boolean },
 ): Promise<RunnerHost> {
   return request<RunnerHost>(`/api/devices/${id}`, {
     method: "PATCH",

@@ -6,7 +6,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export const RUNNER_VERSION = process.env.JUNGLE_RUNNER_VERSION ?? "0.1.0";
+export const RUNNER_VERSION = process.env.JUNGLE_RUNNER_VERSION ?? "0.1.1";
 
 export function configRoot(): string {
   return process.env.JUNGLE_AGENTS_HOME ?? path.join(os.homedir(), ".jungle-agents");
