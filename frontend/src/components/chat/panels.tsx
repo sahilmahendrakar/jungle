@@ -136,7 +136,7 @@ export function SelectMenu({
 }: {
   value: string;
   onChange: (v: string) => void;
-  options: { id: string; label: string; hint?: string }[];
+  options: { id: string; label: ReactNode; hint?: string }[];
   testId?: string;
   disabled?: boolean;
 }) {
