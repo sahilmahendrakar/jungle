@@ -118,9 +118,16 @@ export function useLiveTurns(): {
         chip = { agentId, turnId, messageIds: [], events: [], done: false, ok: null, durationMs: null, startedAt: Date.now() };
         turnChipsRef.current.set(key, chip);
       }
-      if (context?.messageId && !chip.messageIds.includes(context.messageId)) {
-        chip.messageIds.push(context.messageId);
-        queuedRef.current.delete(context.messageId); // it's anchored to a real turn now
+      if (context?.messageId) {
+        // Anchor the message to this turn (a spliced-in follow-up joins the same turn). Adding
+        // is idempotent — a later frame for an already-anchored message just no-ops the push.
+        if (!chip.messageIds.includes(context.messageId)) chip.messageIds.push(context.messageId);
+        // A turn anchored to this message is the live indicator — drop any "queued" chip for it.
+        // Unguarded by the includes() check above on purpose: a follow-up that re-anchors to an
+        // already-anchored turn (the common mid-turn-splice case) emits no dedicated join frame,
+        // so this clear has to ride the continuous agent_event stream instead. Map.delete on a
+        // missing key is a cheap no-op, so running it per frame costs nothing.
+        queuedRef.current.delete(context.messageId);
       }
 
       if (event != null) {
@@ -151,6 +158,18 @@ export function useLiveTurns(): {
   const ingestQueued = useCallback(
     (agentId: string, context: TurnContext) => {
       if (!context.messageId || !context.channelId) return;
+      // Invariant: one active chip per (agent, message). A thread reply always anchors to the
+      // thread root R, so a reply that lands while the agent is already mid-turn on R would
+      // otherwise stack a "queued" chip next to the running turn's chip on R — and since the
+      // spliced-in follow-up re-anchors to an already-anchored turn (no new join frame), nothing
+      // would clear it. If this agent already has a RUNNING turn anchored here, that chip IS the
+      // live indicator: don't add a redundant queued one. (A finished turn doesn't count — a new
+      // reply after the agent went idle legitimately queues for a fresh turn.)
+      for (const chip of turnChipsRef.current.values()) {
+        if (chip.agentId === agentId && !chip.done && chip.messageIds.includes(context.messageId)) {
+          return;
+        }
+      }
       queuedRef.current.set(context.messageId, {
         agentId,
         messageId: context.messageId,
@@ -177,12 +196,17 @@ export function useLiveTurns(): {
           startedAt: new Date(t.started_at).getTime(),
         });
       }
-      const alreadyAnchored = new Set<string>();
+      // Mirrors ingestQueued's guard: skip a queued chip only when THAT agent has a RUNNING turn
+      // anchored to the same message. The old check ("anchored to any chip") was too broad — it
+      // hid a legit queued dispatch waiting behind a *finished* turn on the same root.
+      const runningAnchored = new Set<string>(); // `${agentId}:${messageId}` for running chips only
       for (const chip of turnChipsRef.current.values()) {
-        for (const mid of chip.messageIds) alreadyAnchored.add(mid);
+        if (chip.done) continue;
+        for (const mid of chip.messageIds) runningAnchored.add(`${chip.agentId}:${mid}`);
       }
       for (const q of queued) {
-        if (queuedRef.current.has(q.message_id) || alreadyAnchored.has(q.message_id)) continue;
+        if (queuedRef.current.has(q.message_id)) continue;
+        if (runningAnchored.has(`${q.agent_id}:${q.message_id}`)) continue;
         queuedRef.current.set(q.message_id, { agentId: q.agent_id, messageId: q.message_id, channelId });
       }
       bump();
