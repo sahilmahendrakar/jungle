@@ -7,3 +7,4 @@ export * from "./constants.js";
 export * from "./integrations.js";
 export * from "./schedules.js";
 export * from "./deliverables.js";
+export * from "./slack.js";

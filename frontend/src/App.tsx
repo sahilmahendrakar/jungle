@@ -17,6 +17,7 @@ import {
   markThreadRead,
   listUnreadThreads,
   getChannelTurnChips,
+  getChannelSlackLink,
   extractDeliverableLinks,
   type AgentEvent,
   type Channel,
@@ -27,6 +28,7 @@ import {
   type SearchResult,
   type UnreadThread,
   type Membership,
+  type SlackChannelLink,
 } from "./api";
 import {
   mergeById,
@@ -67,6 +69,7 @@ import { Sidebar } from "./components/chat/Sidebar";
 import { ThreadPanel } from "./components/chat/ThreadPanel";
 import { NewChannelDialog } from "./components/chat/NewChannelDialog";
 import { MembersDialog } from "./components/chat/MembersDialog";
+import { SlackLinkDialog } from "./components/chat/SlackLinkDialog";
 import { DeleteChannelDialog } from "./components/chat/DeleteChannelDialog";
 import { InviteDialog } from "./components/chat/InviteDialog";
 import { useChatSocket } from "./ws/useChatSocket";
@@ -142,6 +145,9 @@ export function App({
   // Channel members panel + delete (the dialogs own their transient add-query / busy state)
   const [members, setMembers] = useState<Participant[]>([]);
   const [showMembers, setShowMembers] = useState(false);
+  // Slack mirror binding for the open channel (null = not linked) + its dialog.
+  const [slackLink, setSlackLink] = useState<SlackChannelLink | null>(null);
+  const [showSlackLink, setShowSlackLink] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   // Channel agent roster (right-panel view; the header 🤖 button toggles it).
   const [rosterOpen, setRosterOpen] = useState(false);
@@ -382,6 +388,31 @@ export function App({
     }
     listChannelMembers(selected).then(setMembers).catch(() => setMembers([]));
   }, [selected]);
+
+  // Load the Slack mirror binding for the open channel (powers the header badge + dialog).
+  useEffect(() => {
+    if (!selected) {
+      setSlackLink(null);
+      return;
+    }
+    let cancelled = false;
+    getChannelSlackLink(selected)
+      .then(({ link }) => !cancelled && setSlackLink(link))
+      .catch(() => !cancelled && setSlackLink(null));
+    return () => {
+      cancelled = true;
+    };
+  }, [selected]);
+
+  // Live Slack-link updates (relayed from useChatSocket as a window event) for the open channel.
+  useEffect(() => {
+    const onSlackLink = (e: Event) => {
+      const detail = (e as CustomEvent<{ channelId: string; link: SlackChannelLink | null }>).detail;
+      if (detail.channelId === selectedRef.current) setSlackLink(detail.link);
+    };
+    window.addEventListener("jungle:slack_link", onSlackLink);
+    return () => window.removeEventListener("jungle:slack_link", onSlackLink);
+  }, []);
 
   // Persist the sidebar open/closed preference and support a ⌘\ / Ctrl+\ toggle (like Slack).
   useEffect(() => {
@@ -1140,11 +1171,13 @@ export function App({
           personByHandle={personByHandle}
           dmAgent={dmAgentIsSdk}
           activityOpen={inlineActivityOpen}
+          slackLink={slackLink}
           onOpenDrawer={() => setDrawerOpen(true)}
           onExpandSidebar={() => setSidebarOpen(true)}
           onOpenProfile={openProfilePanel}
           onOpenMembers={() => setShowMembers(true)}
           onOpenRoster={toggleRoster}
+          onOpenSlackLink={() => setShowSlackLink(true)}
           onDeleteChannel={() => setShowDeleteConfirm(true)}
           onToggleActivity={() => dmAgentIsSdk && toggleInlineActivity(dmAgentIsSdk.id)}
         />
@@ -1351,6 +1384,17 @@ export function App({
         participantId={participantId}
         onAdd={addMember}
         onRemove={removeMember}
+      />
+
+      {/* ---------- Slack mirroring ---------- */}
+      <SlackLinkDialog
+        open={showSlackLink}
+        onOpenChange={setShowSlackLink}
+        channelId={selected}
+        channelName={sel?.name}
+        link={slackLink}
+        isAdmin={me?.role === "admin"}
+        onLinkChanged={setSlackLink}
       />
 
       {/* ---------- Delete channel confirm ---------- */}

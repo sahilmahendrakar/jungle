@@ -3,6 +3,7 @@
 // socket, most fanned out to a channel or broadcast to all); the client sends ClientFrame frames.
 
 import type { AgentStatus, Deliverable, Participant, WireMessage } from "./domain.js";
+import type { SlackChannelLink } from "./slack.js";
 
 // ---- Server -> client ----
 
@@ -153,6 +154,15 @@ export interface DeliverableCreatedEvent {
   deliverable: Deliverable;
 }
 
+// A channel's Slack mirror binding changed (linked, unlinked, or moved to the 'error' state).
+// `link` is null when the channel was unlinked. Broadcast workspace-wide so every client's
+// channel header updates. SlackChannelLink comes from ./slack.
+export interface SlackLinkChangedEvent {
+  type: "slack_link_changed";
+  channelId: string;
+  link: SlackChannelLink | null;
+}
+
 export type ServerEvent =
   | ConnectedEvent
   | ErrorEvent
@@ -171,7 +181,8 @@ export type ServerEvent =
   | ToolConfirmationRequestEvent
   | ToolConfirmationResolvedEvent
   | ScheduleChangedEvent
-  | DeliverableCreatedEvent;
+  | DeliverableCreatedEvent
+  | SlackLinkChangedEvent;
 
 // ---- Client -> server ----
 

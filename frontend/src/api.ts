@@ -19,6 +19,9 @@ import type {
   SearchResult,
   ExtractedLink,
   RunnerHost,
+  SlackStatus,
+  SlackChannelInfo,
+  SlackChannelLink,
 } from "@jungle/shared";
 export {
   INTEGRATION_TYPES,
@@ -30,6 +33,7 @@ export {
 } from "@jungle/shared";
 export type { IntegrationType, ConnectionType } from "@jungle/shared";
 export type { ExtractedLink };
+export type { SlackStatus, SlackChannelInfo, SlackChannelLink };
 
 export type { Participant, Attachment, UnreadThread, AgentEvent, AgentStatus, AgentIntegration, RunnerHost };
 export type { Schedule, Deliverable, DeliverableKind, SearchResult };
@@ -335,6 +339,70 @@ export function disconnectIntegration(key: string): Promise<{ ok: boolean }> {
     auth: true,
     devAuth: true,
     errorMessage: "failed to disconnect",
+  });
+}
+
+// --- Slack integration (workspace-scoped install + per-channel mirroring) ---
+
+export function getSlackStatus(): Promise<SlackStatus> {
+  return request<SlackStatus>(`/api/slack/status`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load Slack status",
+  });
+}
+
+export function slackInstallUrl(opts?: { popup?: boolean }): Promise<{ url: string }> {
+  return request(`/api/slack/install-url`, {
+    method: "POST",
+    json: { popup: opts?.popup === true },
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to start Slack install",
+  });
+}
+
+export function disconnectSlack(): Promise<{ ok: boolean }> {
+  return request(`/api/slack/install`, {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to disconnect Slack",
+  });
+}
+
+export function listSlackChannels(): Promise<SlackChannelInfo[]> {
+  return request<SlackChannelInfo[]>(`/api/slack/channels`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to list Slack channels",
+  });
+}
+
+export function getChannelSlackLink(channelId: string): Promise<{ link: SlackChannelLink | null }> {
+  return request(`/api/channels/${channelId}/slack-link`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load Slack link",
+  });
+}
+
+export function linkChannelToSlack(channelId: string, slackChannelId: string): Promise<{ link: SlackChannelLink }> {
+  return request(`/api/channels/${channelId}/slack-link`, {
+    method: "POST",
+    json: { slackChannelId },
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to link channel to Slack",
+  });
+}
+
+export function unlinkChannelFromSlack(channelId: string): Promise<{ ok: boolean }> {
+  return request(`/api/channels/${channelId}/slack-link`, {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to unlink channel from Slack",
   });
 }
 

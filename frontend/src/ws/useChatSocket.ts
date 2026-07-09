@@ -144,6 +144,13 @@ export function useChatSocket(opts: {
           if (evt.channelId === selectedRef.current) setSelected(null);
           return;
         }
+        if (evt.type === "slack_link_changed") {
+          // A channel's Slack mirror binding changed (linked/unlinked/errored). Relayed via a
+          // window event so App updates the header badge for the open channel without threading a
+          // setter through here (same pattern as device_status_changed).
+          window.dispatchEvent(new CustomEvent("jungle:slack_link", { detail: evt }));
+          return;
+        }
         if (evt.type === "participant_updated" && evt.participant) {
           setPeople((ps) =>
             ps.map((p) => (p.id === evt.participant.id ? { ...p, ...evt.participant } : p)),

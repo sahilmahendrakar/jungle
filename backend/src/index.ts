@@ -10,6 +10,7 @@ import { createApp } from "./app";
 import { initAppSocket, broadcastUid } from "./ws/appSocket";
 import { triggerMentionedAgents, buildRunnerHooks } from "./services/orchestrator";
 import { startScheduler } from "./services/scheduler";
+import { startSlackOutbox } from "./services/slackBridge";
 import { registerBuiltinIntegrations } from "./integrations";
 
 // Entry point / boot: wire the HTTP app, both WebSocket subsystems (app + runner), background
@@ -95,6 +96,8 @@ runners.startIdleSweeper();
 // Fire due scheduled turns (recurring/one-shot). Advances next_run_at before dispatch, so a
 // crash mid-fire skips rather than double-fires.
 startScheduler();
+// Drain the Slack mirror outbox (Jungle -> Slack). Enqueued transactionally in persistMessage.
+startSlackOutbox();
 
 const PORT = Number(process.env.PORT ?? 3001);
 server.listen(PORT, () => console.log(`jungle-backend on http://localhost:${PORT}`));

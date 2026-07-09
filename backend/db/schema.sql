@@ -412,3 +412,78 @@ create table if not exists device_auth_requests (
   host_id       uuid references runner_hosts(id) on delete set null,
   claimed_at    timestamptz
 );
+
+-- === Slack integration (migrations/023_slack.sql) ===
+-- Two-way channel mirroring via a single "Jungle" Slack app. See services/slackBridge.ts.
+
+-- One Slack workspace (team) install per Jungle workspace (PK enforces 1:1; team_id unique so an
+-- inbound event routes to exactly one install). Bot token plaintext (MVP, like integration_connections).
+create table if not exists slack_installs (
+  workspace_id  uuid primary key references workspaces(id) on delete cascade,
+  team_id       text not null unique,
+  team_name     text,
+  bot_token     text not null,          -- xoxb-…
+  bot_user_id   text not null,          -- U… bot user id (echo-drop on event.user)
+  bot_id        text,                   -- B… id on our own posted messages (echo-drop)
+  scopes        text,
+  installed_by  uuid references participants(id) on delete set null,
+  status        text not null default 'active' check (status in ('active', 'revoked')),
+  created_at    timestamptz not null default now()
+);
+
+-- One Slack channel <-> one Jungle channel (both sides unique).
+create table if not exists slack_channel_links (
+  id                 uuid primary key default gen_random_uuid(),
+  workspace_id       uuid not null references slack_installs(workspace_id) on delete cascade,
+  jungle_channel_id  uuid not null unique references channels(id) on delete cascade,
+  slack_team_id      text not null,
+  slack_channel_id   text not null,
+  slack_channel_name text,
+  status             text not null default 'active' check (status in ('active', 'error')),
+  last_error         text,
+  created_by         uuid references participants(id) on delete set null,
+  created_at         timestamptz not null default now(),
+  unique (slack_team_id, slack_channel_id)
+);
+
+-- Slack user -> Jungle participant ('shadow' placeholder human, or 'linked' to a real account by email).
+create table if not exists slack_user_links (
+  slack_team_id   text not null,
+  slack_user_id   text not null,
+  participant_id  uuid not null references participants(id) on delete cascade,
+  kind            text not null check (kind in ('shadow', 'linked')),
+  created_at      timestamptz not null default now(),
+  primary key (slack_team_id, slack_user_id)
+);
+
+-- Message identity map both directions. slack_ts is a STRING (never parse as a number).
+create table if not exists slack_message_links (
+  jungle_message_id  uuid primary key references messages(id) on delete cascade,
+  slack_team_id      text not null,
+  slack_channel_id   text not null,
+  slack_ts           text not null,
+  slack_thread_ts    text,
+  origin             text not null check (origin in ('slack', 'jungle'))
+);
+create unique index if not exists slack_message_links_slack_idx
+  on slack_message_links (slack_team_id, slack_channel_id, slack_ts);
+
+-- Events API at-least-once dedupe (pruned >24h by the outbox ticker).
+create table if not exists slack_events (
+  event_id    text primary key,
+  received_at timestamptz not null default now()
+);
+
+-- Transactional outbox for Jungle -> Slack delivery (enqueued inside persistMessage's txn).
+create table if not exists slack_outbox (
+  id                 bigserial primary key,
+  link_id            uuid not null references slack_channel_links(id) on delete cascade,
+  jungle_message_id  uuid not null references messages(id) on delete cascade,
+  status             text not null default 'pending' check (status in ('pending', 'delivered', 'failed')),
+  attempts           int not null default 0,
+  next_attempt_at    timestamptz not null default now(),
+  last_error         text,
+  created_at         timestamptz not null default now()
+);
+create index if not exists slack_outbox_pending_idx
+  on slack_outbox (link_id, id) where status = 'pending';

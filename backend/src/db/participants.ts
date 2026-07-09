@@ -191,6 +191,24 @@ export async function getParticipant(id: string): Promise<Participant | null> {
   return rows[0] ?? null;
 }
 
+// A human in a workspace matching an email (case-insensitive). Used by the Slack bridge to
+// attribute a Slack user's messages to their real Jungle account instead of a shadow. Agents
+// don't have meaningful emails, so restrict to humans. Prefer a real (signed-in) account over a
+// prior shadow if an email somehow collides — real accounts have a firebase_uid.
+export async function getParticipantByEmail(
+  workspaceId: string,
+  email: string,
+): Promise<Participant | null> {
+  const { rows } = await pool.query<Participant>(
+    `select * from participants
+     where workspace_id = $1 and kind = 'human' and lower(email) = lower($2)
+     order by (firebase_uid is null), created_at
+     limit 1`,
+    [workspaceId, email],
+  );
+  return rows[0] ?? null;
+}
+
 export async function getParticipantByHandle(
   workspaceId: string,
   handle: string,
