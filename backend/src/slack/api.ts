@@ -43,17 +43,25 @@ async function slackCall(
   method: string,
   token: string | null,
   params: Record<string, unknown>,
-  form = false,
+  // Form-encoding is the default because it works for EVERY Web API method; some read methods
+  // (e.g. conversations.info) reject a JSON body with invalid_arguments. Opt into JSON only when a
+  // param is a nested object (chat.postMessage's metadata/blocks).
+  asJson = false,
 ): Promise<SlackResponse> {
   const headers: Record<string, string> = {};
   if (token) headers["authorization"] = `Bearer ${token}`;
   let body: string;
-  if (form) {
-    headers["content-type"] = "application/x-www-form-urlencoded";
-    body = new URLSearchParams(params as Record<string, string>).toString();
-  } else {
+  if (asJson) {
     headers["content-type"] = "application/json; charset=utf-8";
     body = JSON.stringify(params);
+  } else {
+    headers["content-type"] = "application/x-www-form-urlencoded";
+    const form = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v === undefined || v === null) continue;
+      form.set(k, typeof v === "string" ? v : String(v));
+    }
+    body = form.toString();
   }
   const resp = await fetch(`${SLACK_API}/${method}`, { method: "POST", headers, body });
   if (resp.status === 429) {
@@ -89,7 +97,6 @@ export async function oauthV2Access(args: {
       code: args.code,
       redirect_uri: args.redirectUri,
     },
-    true,
   );
   return r as unknown as OAuthV2Result;
 }
@@ -121,7 +128,8 @@ export async function chatPostMessage(token: string, args: PostMessageArgs): Pro
   if (args.threadTs) params.thread_ts = args.threadTs;
   if (args.replyBroadcast) params.reply_broadcast = true;
   if (args.metadata) params.metadata = args.metadata;
-  const r = await slackCall("chat.postMessage", token, params);
+  // JSON body: metadata is a nested object that can't be form-encoded.
+  const r = await slackCall("chat.postMessage", token, params, true);
   return { ts: String(r.ts) };
 }
 
