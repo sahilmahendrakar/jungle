@@ -50,6 +50,7 @@ import {
 } from "./send-message-tool.js";
 import { createGmailMcpServer } from "./gmail-tool.js";
 import { createDriveMcpServer } from "./drive-tool.js";
+import { createXMcpServer } from "./x-tool.js";
 import { applyGitCredentials, cloneRepoIfNeeded, getGhToken } from "./git.js";
 import { loadState, saveState } from "./state.js";
 import {
@@ -90,6 +91,9 @@ const SAFE_TOOLS = new Set([
   "mcp__gmail__gmail_search", "mcp__gmail__gmail_read_message",
   // Google Drive read: search/list/get never mutate, so no confirmation.
   "mcp__gdrive__drive_search", "mcp__gdrive__drive_list", "mcp__gdrive__drive_get_file",
+  // X (Twitter) is read-only by design — every x_* tool runs without a confirmation.
+  "mcp__x__x_my_recent_tweets", "mcp__x__x_mentions", "mcp__x__x_replies_to_me",
+  "mcp__x__x_notifications", "mcp__x__x_search", "mcp__x__x_get_user",
   // Schedule tools are bounded jungle-app operations with backend-enforced guardrails (caps,
   // min interval, prompt cap) and full human visibility/undo on the Scheduled page — a confirm
   // card would be noise, not safety.
@@ -109,6 +113,16 @@ const GMAIL_WRITE_TOOLS = new Set([
 // requireApproval toggle in preToolUseHook; reads always run).
 const DRIVE_READ_TOOLS = ["mcp__gdrive__drive_search", "mcp__gdrive__drive_list", "mcp__gdrive__drive_get_file"];
 const DRIVE_WRITE_TOOLS = new Set(["mcp__gdrive__drive_create_file", "mcp__gdrive__drive_update_file"]);
+
+// X (Twitter) tools are all read-only (Basic tier) — auto-allowed in every mode, no write gating.
+const X_READ_TOOLS = [
+  "mcp__x__x_my_recent_tweets",
+  "mcp__x__x_mentions",
+  "mcp__x__x_replies_to_me",
+  "mcp__x__x_notifications",
+  "mcp__x__x_search",
+  "mcp__x__x_get_user",
+];
 
 // Fallback context reading derived from a `result` SDK message when the
 // getContextUsage() control request is unavailable. The turn's final input
@@ -183,6 +197,12 @@ export class Runner {
   // Google Drive integration state (in-process, like Gmail): settings from `configure`; the token
   // lives in integrationTokens under key "google-drive" (refreshed by `integration_credentials`).
   private driveSettings: { email: string; requireApproval: boolean } | null = null;
+
+  // X (Twitter) integration state (in-process, read-only): settings from `configure`; the token
+  // lives in integrationTokens under key "x" (refreshed by `integration_credentials`). null = no
+  // X integration attached. The x MCP server reads the token live per call, so a refresh applies
+  // without rebuilding.
+  private xSettings: { account: string } | null = null;
 
   // Remote-MCP integrations (Linear/Notion/Granola/…) from `configure`: the grants (key, url,
   // safeTools, requireApproval). Access tokens for BOTH the remote-MCP integrations and the
@@ -421,6 +441,14 @@ export class Runner {
     } else {
       this.driveSettings = null;
     }
+    // X (in-process, read-only): hold the @handle + seed its token under "x". Built after the
+    // mcpIntegrations token map is reset above so the seed isn't clobbered.
+    if (frame.x) {
+      this.integrationTokens.set("x", frame.x.accessToken);
+      this.xSettings = { account: frame.x.account };
+    } else {
+      this.xSettings = null;
+    }
     this.configured = true;
     void saveState({ sessionId: this.sessionId, model: this.model });
     this.sendState();
@@ -569,6 +597,9 @@ export class Runner {
       allowedTools.push(...DRIVE_READ_TOOLS);
       if (!this.driveSettings!.requireApproval) allowedTools.push(...DRIVE_WRITE_TOOLS);
     }
+    // X: in-process, read-only server. All tools auto-allowed (nothing to approve).
+    const xServer = this.xSettings ? this.buildXServer() : null;
+    if (xServer) allowedTools.push(...X_READ_TOOLS);
     // Mount each connected remote-MCP integration as a remote HTTP server with a Bearer header
     // built from the current token. Read-only (safe) tools are auto-allowed; when the agent's
     // approval toggle is off, allow all of that server's tools; otherwise non-safe tools route
@@ -576,6 +607,7 @@ export class Runner {
     const mcpServers: Record<string, McpServerConfig> = { jungle: mcpServer };
     if (gmailServer) mcpServers.gmail = gmailServer;
     if (driveServer) mcpServers.gdrive = driveServer;
+    if (xServer) mcpServers.x = xServer;
     for (const grant of this.mcpIntegrations) {
       const token = this.integrationTokens.get(grant.key) ?? grant.accessToken;
       mcpServers[grant.key] = { type: "http", url: grant.url, headers: { Authorization: `Bearer ${token}` } };
@@ -754,6 +786,13 @@ export class Runner {
     return createDriveMcpServer(() => this.integrationTokens.get("google-drive") ?? null);
   }
 
+  // The in-process "x" SDK-MCP server (x_*), reading the current OAuth access token fresh on each
+  // call (integrationTokens["x"]) so a mid-turn `integration_credentials` refresh applies without
+  // a rebuild. Built per turn alongside the jungle/gmail/gdrive servers.
+  private buildXServer() {
+    return createXMcpServer(() => this.integrationTokens.get("x") ?? null);
+  }
+
   // Rebuild the CLI's connection to our in-process "jungle" SDK-MCP server after a mid-turn
   // session re-init (see the reconnect comment in runTurn). reconnectMcpServer() rejects for
   // in-process (sdk) servers, so we cycle setMcpServers instead: removing 'jungle' tears down the
@@ -768,6 +807,7 @@ export class Runner {
       };
       if (this.gmailToken) servers.gmail = this.buildGmailServer();
       if (this.driveSettings) servers.gdrive = this.buildDriveServer();
+      if (this.xSettings) servers.x = this.buildXServer();
       // Re-mount remote-MCP integrations too, with the current token per key.
       for (const grant of this.mcpIntegrations) {
         const token = this.integrationTokens.get(grant.key) ?? grant.accessToken;

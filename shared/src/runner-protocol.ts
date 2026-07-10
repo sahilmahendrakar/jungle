@@ -203,6 +203,10 @@ export interface ConfigureFrame {
   // The agent's attached remote-MCP integrations (Linear/Notion/Granola/…), if any. Each is
   // mounted as a remote MCP server; tokens refreshed via IntegrationCredentialsFrame.
   mcpIntegrations?: McpIntegrationGrant[];
+  // The agent's attached X (Twitter) integration, if any: a fresh OAuth 2.0 User Context access
+  // token for the connected account and its @handle. Read-only in-process MCP server (x_* tools);
+  // the token is refreshed mid-session via IntegrationCredentialsFrame keyed "x".
+  x?: { accessToken: string; account: string };
 }
 
 // A file attached to the message that produced an inbox item. `url` is an origin-relative
