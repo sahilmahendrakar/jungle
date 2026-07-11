@@ -168,11 +168,10 @@ struct HomeView: View {
                             }
                         } label: {
                             HStack(spacing: 8) {
-                                Image(systemName: "plus.bubble")
-                                    .font(.footnote)
-                                Text(p.handle)
+                                SidebarAvatar(person: p)
+                                Text(p.displayName)
+                                    .foregroundStyle(JungleTheme.sidebarForeground.opacity(0.55))
                             }
-                            .foregroundStyle(JungleTheme.sidebarForeground.opacity(0.55))
                         }
                         .buttonStyle(.plain)
                         .listRowBackground(Color.clear)
@@ -182,6 +181,7 @@ struct HomeView: View {
                 }
             }
             .listStyle(.plain)
+            .environment(\.defaultMinListRowHeight, 34)
             .scrollContentBackground(.hidden)
             .background(JungleTheme.sidebar)
             .listRowSeparatorTint(JungleTheme.sidebarBorder)
@@ -295,18 +295,58 @@ struct SidebarSectionHeader: View {
     }
 }
 
+// A person's avatar tile in the sidebar: compact, with a live status dot for agents.
+struct SidebarAvatar: View {
+    let person: Participant?
+    var handle: String?
+
+    var body: some View {
+        AvatarView(
+            name: person?.displayName ?? handle,
+            handle: person?.handle ?? handle ?? "?",
+            size: 24)
+            .overlay(alignment: .bottomTrailing) {
+                if let person, person.kind == .agent {
+                    Circle()
+                        .fill(JungleTheme.statusColor(person.status ?? .offline))
+                        .frame(width: 8, height: 8)
+                        .overlay(Circle().strokeBorder(JungleTheme.sidebar, lineWidth: 1.5))
+                        .offset(x: 2, y: 2)
+                }
+            }
+    }
+}
+
 private struct ChannelRow: View {
     @Environment(AppStore.self) private var store
     let channel: Channel
 
     private var unread: Int { channel.unreadCount ?? 0 }
 
+    // The other side of a DM, resolved so we can show their name + avatar.
+    private var dmPerson: Participant? {
+        guard channel.isDM, let handle = channel.dmWith else { return nil }
+        return store.people.first { $0.handle == handle }
+    }
+
+    private var label: String {
+        if channel.isDM {
+            return dmPerson?.displayName ?? channel.dmWith ?? channel.name
+        }
+        return channel.name
+    }
+
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: channel.isDM ? "at" : "number")
-                .foregroundStyle(JungleTheme.sidebarForeground.opacity(0.5))
-                .font(.footnote)
-            Text(channel.isDM ? (channel.dmWith ?? channel.name) : channel.name)
+            if channel.isDM {
+                SidebarAvatar(person: dmPerson, handle: channel.dmWith)
+            } else {
+                Image(systemName: "number")
+                    .foregroundStyle(JungleTheme.sidebarForeground.opacity(0.5))
+                    .font(.footnote)
+                    .frame(width: 24)
+            }
+            Text(label)
                 .fontWeight(unread > 0 ? .semibold : .regular)
                 .foregroundStyle(unread > 0 ? JungleTheme.sidebarAccentForeground : JungleTheme.sidebarForeground)
             if hasWorkingAgent {
