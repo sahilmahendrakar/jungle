@@ -18,6 +18,7 @@ export * from "./connections";
 export * from "./schedules";
 export * from "./deliverables";
 export * from "./turns";
+export * from "./push";
 export * from "./slack";
 
 // Wire/domain type aliases used across the backend via the db namespace (db.PersistedMessage, …).
