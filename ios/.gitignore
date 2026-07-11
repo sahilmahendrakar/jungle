@@ -1,0 +1,7 @@
+xcuserdata/
+DerivedData/
+build/
+*.xcuserstate
+.DS_Store
+# Firebase config is per-developer until we commit a shared one (M1)
+GoogleService-Info.plist

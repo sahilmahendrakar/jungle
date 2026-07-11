@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<!-- Google sign-in redirect (reversed client id from GoogleService-Info.plist). -->
+		<dict>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.782624295113-io519v2ajpu9d52pahvm3gtbkb159m8c</string>
+			</array>
+		</dict>
+		<!-- OAuth connect callbacks (GitHub/Linear/Notion/Slack) via ASWebAuthenticationSession. -->
+		<dict>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>jungle</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>
