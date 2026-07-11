@@ -4,6 +4,7 @@ import * as db from "../db";
 import type { PersistedMessage } from "../db";
 import * as auth from "../auth";
 import * as att from "../attachments";
+import * as push from "../services/push";
 
 // The app (human/device) WebSocket: realtime message delivery to browsers. Distinct from the
 // runner subsystem (runners.ts), which owns the /api/runner upgrade path. This module owns the
@@ -46,12 +47,90 @@ function removeSocket(pid: string, workspaceId: string, uid: string | null, ws: 
   if (uid) removeFromMap(uidSockets, uid, ws);
 }
 
-// Fan out a payload to every connected device of every member of a channel.
+// Fan out a payload to every connected device of every member of a channel. Channel-scoped
+// events also drive mobile push (fire-and-forget): DMs/mentions on `message`, and
+// tool_confirmation_request to every human member — suppressed for anyone with a live socket
+// (the in-app UI already carries the signal).
 export async function fanOut(channelId: string, payload: unknown): Promise<void> {
   const data = JSON.stringify(payload);
-  for (const pid of await db.channelMemberIds(channelId)) {
+  const memberIds = await db.channelMemberIds(channelId);
+  for (const pid of memberIds) {
     const set = sockets.get(pid);
     if (set) for (const ws of set) if (ws.readyState === WebSocket.OPEN) ws.send(data);
+  }
+  pushForFanOut(channelId, memberIds, payload).catch((e) =>
+    console.error("push fan-out failed:", String((e as Error).message ?? e)),
+  );
+}
+
+// Decide who (if anyone) gets a mobile push for a channel-scoped event.
+async function pushForFanOut(channelId: string, memberIds: string[], payload: unknown): Promise<void> {
+  const evt = payload as {
+    type?: string;
+    message?: PersistedMessage & { mentions?: { id: string }[] };
+    confirmId?: string;
+    agentHandle?: string;
+    tool?: string;
+  };
+  if (evt.type !== "message" && evt.type !== "tool_confirmation_request") return;
+
+  // A recipient with ANY open socket is looking at the app — no push.
+  const offline = (pid: string) => {
+    const set = sockets.get(pid);
+    return !set || ![...set].some((ws) => ws.readyState === WebSocket.OPEN);
+  };
+
+  const channel = await db.getChannel(channelId);
+  if (!channel) return;
+
+  if (evt.type === "message" && evt.message) {
+    const m = evt.message;
+    const mentioned = new Set((m.mentions ?? []).map((x) => x.id));
+    const isDM = channel.kind === "dm";
+    const uids: string[] = [];
+    for (const pid of memberIds) {
+      if (pid === m.sender_id) continue;
+      if (!isDM && !mentioned.has(pid)) continue;
+      if (!offline(pid)) continue;
+      const p = await db.getParticipant(pid);
+      if (p?.kind === "human" && p.firebase_uid) uids.push(p.firebase_uid);
+    }
+    if (!uids.length) return;
+    const title = isDM ? `@${m.sender_handle}` : `@${m.sender_handle} in #${channel.name}`;
+    await push.sendPush(uids, {
+      title,
+      body: push.preview(m.body || "sent an attachment"),
+      threadId: channelId,
+      data: {
+        kind: "message",
+        workspaceId: channel.workspace_id,
+        channelId,
+        ...(m.thread_root_id ? { threadRootId: m.thread_root_id } : {}),
+      },
+    });
+    return;
+  }
+
+  if (evt.type === "tool_confirmation_request" && evt.confirmId) {
+    const uids: string[] = [];
+    for (const pid of memberIds) {
+      if (!offline(pid)) continue;
+      const p = await db.getParticipant(pid);
+      if (p?.kind === "human" && p.firebase_uid) uids.push(p.firebase_uid);
+    }
+    if (!uids.length) return;
+    await push.sendPush(uids, {
+      title: `@${evt.agentHandle ?? "agent"} needs approval`,
+      body: `Wants to run ${evt.tool ?? "a tool"} — allow or deny`,
+      category: "CONFIRM",
+      threadId: channelId,
+      data: {
+        kind: "confirm",
+        workspaceId: channel.workspace_id,
+        channelId,
+        confirmId: evt.confirmId,
+      },
+    });
   }
 }
 

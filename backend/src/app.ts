@@ -14,6 +14,7 @@ import integrationsRouter from "./http/routes/integrations";
 import schedulesRouter from "./http/routes/schedules";
 import workfeedRouter from "./http/routes/workfeed";
 import devicesRouter from "./http/routes/devices";
+import pushRouter from "./http/routes/push";
 import llmRouter from "./http/routes/llm";
 import { slackEventsRouter, slackRouter } from "./http/routes/slack";
 
@@ -62,6 +63,7 @@ export function createApp(): express.Express {
   app.use(schedulesRouter);
   app.use(workfeedRouter);
   app.use(devicesRouter);
+  app.use(pushRouter);
   app.use(slackRouter);
 
   app.use(errorHandler);
