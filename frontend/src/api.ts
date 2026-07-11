@@ -192,6 +192,8 @@ export function createParticipant(p: {
   integrations?: Array<{ key: string; config: Record<string, unknown> }>;
   model?: string;
   mode?: string;
+  // Creator-written instructions/persona injected into the agent's system prompt (optional).
+  persona?: string;
   // Environment: omitted = cloud default; "self_hosted" + hostId runs the agent on a registered
   // device (see listDevices).
   runnerProvider?: string;
@@ -206,6 +208,7 @@ export function createParticipant(p: {
           ...(p.integrations?.length ? { integrations: p.integrations } : {}),
           ...(p.model ? { model: p.model } : {}),
           ...(p.mode ? { mode: p.mode } : {}),
+          ...(p.persona ? { persona: p.persona } : {}),
           ...(p.runnerProvider ? { runnerProvider: p.runnerProvider } : {}),
           ...(p.hostId ? { hostId: p.hostId } : {}),
         }
