@@ -64,6 +64,7 @@ struct ChatView: View {
                     attachmentIds: attachmentIds.isEmpty ? nil : attachmentIds)
             }
         }
+        .background(JungleTheme.background)
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
         .navigationDestination(item: $openThread) { ref in
@@ -165,16 +166,17 @@ struct MessageRow: View {
             if grouped {
                 Spacer().frame(width: 36)
             } else {
-                AvatarView(handle: message.senderHandle, kind: sender?.kind ?? .human)
+                AvatarView(name: sender?.displayName, handle: message.senderHandle)
             }
             VStack(alignment: .leading, spacing: 2) {
                 if !grouped {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text(message.senderHandle)
                             .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(JungleTheme.foreground)
                         Text(Self.timeString(message.createdAt))
                             .font(.caption2)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(JungleTheme.mutedForeground)
                     }
                 }
                 MessageBody(text: message.body)
@@ -227,26 +229,6 @@ struct MessageBody: View {
                 }
                 return .systemAction
             })
-    }
-}
-
-struct AvatarView: View {
-    let handle: String
-    let kind: Kind
-
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(color.opacity(0.2))
-            Text(String(handle.prefix(2)).uppercased())
-                .font(.caption.bold())
-                .foregroundStyle(color)
-        }
-        .frame(width: 36, height: 36)
-    }
-
-    private var color: Color {
-        kind == .agent ? .green : .blue
     }
 }
 

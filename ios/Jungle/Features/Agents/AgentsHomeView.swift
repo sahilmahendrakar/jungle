@@ -80,7 +80,7 @@ struct AgentRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            AvatarView(handle: agent.handle, kind: .agent)
+            AvatarView(name: agent.displayName, handle: agent.handle)
             VStack(alignment: .leading, spacing: 2) {
                 Text(agent.displayName).font(.body.weight(.medium))
                 HStack(spacing: 4) {

@@ -118,13 +118,7 @@ struct AgentStatusBadge: View {
     }
 
     private var color: Color {
-        switch status {
-        case .working: return .green
-        case .idle: return .blue
-        case .waking: return .orange
-        case .sleeping: return .gray
-        case .offline, .unknown: return .gray.opacity(0.5)
-        }
+        JungleTheme.statusColor(status)
     }
 
     private var label: String {

@@ -59,7 +59,7 @@ struct AgentProfileView: View {
     private func header(_ person: Participant) -> some View {
         Section {
             HStack(spacing: 12) {
-                AvatarView(handle: person.handle, kind: person.kind)
+                AvatarView(name: person.displayName, handle: person.handle, size: 48)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(person.displayName).font(.headline)
                     Text("@\(person.handle)")

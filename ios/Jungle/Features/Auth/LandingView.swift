@@ -10,24 +10,26 @@ struct LandingView: View {
     @State private var showDevSignIn = false
 
     var body: some View {
+        // The deep-forest brand surface (matches the web landing + app icon family).
         VStack(spacing: 24) {
             Spacer()
 
             Image(systemName: "leaf.fill")
                 .font(.system(size: 56))
-                .foregroundStyle(.green)
+                .foregroundStyle(JungleTheme.sidebarPrimary)
             Text("Jungle")
                 .font(.largeTitle.bold())
+                .foregroundStyle(JungleTheme.sidebarAccentForeground)
             Text("Chat with agents that do real work")
                 .font(.headline)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(JungleTheme.sidebarForeground.opacity(0.7))
 
             Spacer()
 
             if let errorMessage {
                 Text(errorMessage)
                     .font(.footnote)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(JungleTheme.destructive)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal)
             }
@@ -37,24 +39,25 @@ struct LandingView: View {
             } label: {
                 HStack {
                     if busy {
-                        ProgressView().tint(.white)
+                        ProgressView().tint(JungleTheme.sidebarPrimaryForeground)
                     } else {
                         Image(systemName: "person.badge.key.fill")
                     }
                     Text("Continue with Google")
                         .fontWeight(.semibold)
                 }
+                .foregroundStyle(JungleTheme.sidebarPrimaryForeground)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 14)
+                .background(JungleTheme.sidebarPrimary, in: RoundedRectangle(cornerRadius: 12))
             }
-            .buttonStyle(.borderedProminent)
             .disabled(busy || !sessionStore.firebaseAvailable)
             .padding(.horizontal, 24)
 
             if !sessionStore.firebaseAvailable {
                 Text("Google sign-in needs GoogleService-Info.plist in the app bundle.")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(JungleTheme.sidebarForeground.opacity(0.6))
             }
 
             #if DEBUG
@@ -62,10 +65,13 @@ struct LandingView: View {
                 showDevSignIn = true
             }
             .font(.footnote)
+            .foregroundStyle(JungleTheme.sidebarPrimary)
             #endif
 
             Spacer().frame(height: 32)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(JungleTheme.sidebar.ignoresSafeArea())
         .sheet(isPresented: $showDevSignIn) {
             DevSignInView()
         }

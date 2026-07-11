@@ -24,6 +24,7 @@ struct JungleApp: App {
         WindowGroup {
             RootView()
                 .environment(sessionStore)
+                .tint(JungleTheme.primary)
                 .onOpenURL { url in
                     // Google sign-in redirect (reversed-client-id scheme).
                     GIDSignIn.sharedInstance.handle(url)

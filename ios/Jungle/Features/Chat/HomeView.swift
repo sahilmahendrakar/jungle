@@ -103,42 +103,59 @@ struct HomeView: View {
 
     var body: some View {
         NavigationStack(path: $path) {
+            // The web's signature always-dark forest sidebar: flat rows on deep green.
             List {
+                // Sidebar header: the workspace name (the web's workspace switcher slot).
+                Text(workspaceName)
+                    .font(.title.bold())
+                    .foregroundStyle(JungleTheme.sidebarAccentForeground)
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .padding(.top, 2)
+
                 if let notice = store.notice {
                     Text(notice)
                         .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .listRowBackground(Color.yellow.opacity(0.15))
+                        .foregroundStyle(JungleTheme.sidebarForeground.opacity(0.7))
+                        .listRowBackground(JungleTheme.sidebarAccent)
                 }
 
                 if !store.unreadThreads.isEmpty {
-                    Section("Threads") {
+                    Section {
                         ForEach(store.unreadThreads, id: \.rootId) { thread in
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("#\(thread.channelName)")
                                     .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(JungleTheme.sidebarForeground.opacity(0.55))
                                 Text(thread.rootBody)
                                     .lineLimit(1)
+                                    .foregroundStyle(JungleTheme.sidebarForeground)
                             }
                             .badge(thread.unreadCount)
+                            .listRowBackground(Color.clear)
                         }
+                    } header: {
+                        SidebarSectionHeader("Threads")
                     }
                 }
 
-                Section("Channels") {
+                Section {
                     ForEach(store.channels.filter { !$0.isDM }) { channel in
                         NavigationLink(value: channel.id) {
                             ChannelRow(channel: channel)
                         }
+                        .listRowBackground(Color.clear)
                     }
+                } header: {
+                    SidebarSectionHeader("Channels")
                 }
 
-                Section("DMs") {
+                Section {
                     ForEach(store.channels.filter(\.isDM)) { channel in
                         NavigationLink(value: channel.id) {
                             ChannelRow(channel: channel)
                         }
+                        .listRowBackground(Color.clear)
                     }
                     // People without an open DM yet (tap to start one) — the sidebar People list.
                     ForEach(peopleWithoutDM) { p in
@@ -152,16 +169,27 @@ struct HomeView: View {
                         } label: {
                             HStack(spacing: 8) {
                                 Image(systemName: "plus.bubble")
-                                    .foregroundStyle(.secondary)
                                     .font(.footnote)
-                                Text(p.handle).foregroundStyle(.secondary)
+                                Text(p.handle)
                             }
+                            .foregroundStyle(JungleTheme.sidebarForeground.opacity(0.55))
                         }
                         .buttonStyle(.plain)
+                        .listRowBackground(Color.clear)
                     }
+                } header: {
+                    SidebarSectionHeader("Direct messages")
                 }
             }
-            .navigationTitle("Jungle")
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(JungleTheme.sidebar)
+            .listRowSeparatorTint(JungleTheme.sidebarBorder)
+            .toolbarBackground(JungleTheme.sidebar, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
+            .toolbarColorScheme(.dark, for: .navigationBar)
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
             .searchable(text: $searchQuery, prompt: "Search messages")
             .overlay {
                 if !searchQuery.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -231,6 +259,12 @@ struct HomeView: View {
         }
     }
 
+    private var workspaceName: String {
+        sessionStore.me?.memberships
+            .first { $0.workspace.id == sessionStore.session?.workspaceId }?
+            .workspace.name ?? "Jungle"
+    }
+
     // A notification tap routed here from the shell: open that channel (and thread).
     private func consumePendingLink() {
         guard let link = store.pendingChannelLink else { return }
@@ -245,34 +279,49 @@ struct HomeView: View {
     }
 }
 
+// A section label on the forest sidebar (the web's muted uppercase headers).
+struct SidebarSectionHeader: View {
+    let title: String
+
+    init(_ title: String) {
+        self.title = title
+    }
+
+    var body: some View {
+        Text(title.uppercased())
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(JungleTheme.sidebarForeground.opacity(0.45))
+            .listRowInsets(EdgeInsets(top: 14, leading: 16, bottom: 4, trailing: 16))
+    }
+}
+
 private struct ChannelRow: View {
     @Environment(AppStore.self) private var store
     let channel: Channel
 
+    private var unread: Int { channel.unreadCount ?? 0 }
+
     var body: some View {
         HStack(spacing: 8) {
-            if channel.isDM {
-                Image(systemName: "at")
-                    .foregroundStyle(.secondary)
-                    .font(.footnote)
-            } else {
-                Image(systemName: "number")
-                    .foregroundStyle(.secondary)
-                    .font(.footnote)
-            }
+            Image(systemName: channel.isDM ? "at" : "number")
+                .foregroundStyle(JungleTheme.sidebarForeground.opacity(0.5))
+                .font(.footnote)
             Text(channel.isDM ? (channel.dmWith ?? channel.name) : channel.name)
-                .fontWeight((channel.unreadCount ?? 0) > 0 ? .semibold : .regular)
+                .fontWeight(unread > 0 ? .semibold : .regular)
+                .foregroundStyle(unread > 0 ? JungleTheme.sidebarAccentForeground : JungleTheme.sidebarForeground)
             if hasWorkingAgent {
-                WorkingDots()
+                WorkingDots(color: JungleTheme.sidebarPrimary)
             }
             Spacer()
-            if let unread = channel.unreadCount, unread > 0 {
+            if unread > 0 {
                 Text("\(unread)")
                     .font(.caption2.bold())
-                    .foregroundStyle(.white)
+                    .foregroundStyle((channel.hasMention ?? false) ? .white : JungleTheme.sidebarPrimaryForeground)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 2)
-                    .background((channel.hasMention ?? false) ? Color.red : Color.secondary, in: Capsule())
+                    .background(
+                        (channel.hasMention ?? false) ? JungleTheme.destructive : JungleTheme.sidebarPrimary,
+                        in: Capsule())
             }
         }
     }
@@ -330,15 +379,16 @@ struct MoreView: View {
     }
 }
 
-// The sidebar "agent is working" indicator: three pulsing dots.
+// The sidebar "agent is working" indicator: three pulsing jade dots.
 struct WorkingDots: View {
+    var color: Color = JungleTheme.primary
     @State private var phase = false
 
     var body: some View {
         HStack(spacing: 3) {
             ForEach(0..<3) { i in
                 Circle()
-                    .fill(.green)
+                    .fill(color)
                     .frame(width: 4, height: 4)
                     .opacity(phase ? 1 : 0.3)
                     .animation(

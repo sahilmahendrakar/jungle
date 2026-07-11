@@ -77,7 +77,7 @@ struct ChannelInfoView: View {
                     store.profileParticipantId = member.id
                 } label: {
                     HStack(spacing: 10) {
-                        AvatarView(handle: member.handle, kind: member.kind)
+                        AvatarView(name: member.displayName, handle: member.handle)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(member.displayName)
                             Text("@\(member.handle)").font(.caption).foregroundStyle(.secondary)
@@ -212,7 +212,7 @@ struct NewChannelView: View {
                             }
                         } label: {
                             HStack {
-                                AvatarView(handle: p.handle, kind: p.kind)
+                                AvatarView(name: p.displayName, handle: p.handle, size: 30)
                                 Text("@\(p.handle)")
                                 Spacer()
                                 if selectedHandles.contains(p.handle) {

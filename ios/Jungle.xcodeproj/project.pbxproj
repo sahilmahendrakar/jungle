@@ -6,6 +6,14 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		27A065E13002BA6F009068B4 /* MarkdownUI in Frameworks */ = {isa = PBXBuildFile; productRef = A00000000000000000000201 /* MarkdownUI */; };
+		27A065E23002BA6F009068B4 /* Highlightr in Frameworks */ = {isa = PBXBuildFile; productRef = A00000000000000000000202 /* Highlightr */; };
+		27A065E33002BA6F009068B4 /* FirebaseAuth in Frameworks */ = {isa = PBXBuildFile; productRef = A00000000000000000000203 /* FirebaseAuth */; };
+		27A065E43002BA6F009068B4 /* FirebaseMessaging in Frameworks */ = {isa = PBXBuildFile; productRef = A00000000000000000000204 /* FirebaseMessaging */; };
+		27A065E53002BA6F009068B4 /* GoogleSignIn in Frameworks */ = {isa = PBXBuildFile; productRef = A00000000000000000000205 /* GoogleSignIn */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		A000000000000000000000B1 /* Jungle.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Jungle.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -13,10 +21,6 @@
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		A000000000000000000000A1 /* Jungle */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			explicitFileTypes = {
-			};
-			explicitFolders = (
-			);
 			path = Jungle;
 			sourceTree = "<group>";
 		};
@@ -27,6 +31,11 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				27A065E53002BA6F009068B4 /* GoogleSignIn in Frameworks */,
+				27A065E43002BA6F009068B4 /* FirebaseMessaging in Frameworks */,
+				27A065E33002BA6F009068B4 /* FirebaseAuth in Frameworks */,
+				27A065E23002BA6F009068B4 /* Highlightr in Frameworks */,
+				27A065E13002BA6F009068B4 /* MarkdownUI in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -103,14 +112,14 @@
 			);
 			mainGroup = A000000000000000000000D1;
 			minimizedProjectReferenceProxies = 1;
-			preferredProjectObjectVersion = 77;
-			productRefGroup = A000000000000000000000D2 /* Products */;
 			packageReferences = (
 				A00000000000000000000211 /* XCRemoteSwiftPackageReference "swift-markdown-ui" */,
 				A00000000000000000000212 /* XCRemoteSwiftPackageReference "Highlightr" */,
 				A00000000000000000000213 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */,
 				A00000000000000000000214 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */,
 			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = A000000000000000000000D2 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -118,69 +127,6 @@
 			);
 		};
 /* End PBXProject section */
-
-/* Begin XCRemoteSwiftPackageReference section */
-		A00000000000000000000211 /* XCRemoteSwiftPackageReference "swift-markdown-ui" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/gonzalezreal/swift-markdown-ui";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 2.4.1;
-			};
-		};
-		A00000000000000000000212 /* XCRemoteSwiftPackageReference "Highlightr" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/raspu/Highlightr";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 2.1.0;
-			};
-		};
-		A00000000000000000000213 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/firebase/firebase-ios-sdk";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 11.0.0;
-			};
-		};
-		A00000000000000000000214 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/google/GoogleSignIn-iOS";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 8.0.0;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		A00000000000000000000201 /* MarkdownUI */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = A00000000000000000000211 /* XCRemoteSwiftPackageReference "swift-markdown-ui" */;
-			productName = MarkdownUI;
-		};
-		A00000000000000000000202 /* Highlightr */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = A00000000000000000000212 /* XCRemoteSwiftPackageReference "Highlightr" */;
-			productName = Highlightr;
-		};
-		A00000000000000000000203 /* FirebaseAuth */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = A00000000000000000000213 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
-			productName = FirebaseAuth;
-		};
-		A00000000000000000000204 /* FirebaseMessaging */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = A00000000000000000000213 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
-			productName = FirebaseMessaging;
-		};
-		A00000000000000000000205 /* GoogleSignIn */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = A00000000000000000000214 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */;
-			productName = GoogleSignIn;
-		};
-/* End XCSwiftPackageProductDependency section */
 
 /* Begin PBXResourcesBuildPhase section */
 		A000000000000000000000C3 /* Resources */ = {
@@ -324,9 +270,10 @@
 		A00000000000000000000113 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = "SupportFiles/Jungle.entitlements";
+				CODE_SIGN_ENTITLEMENTS = SupportFiles/Jungle.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = A7GJUMM9W3;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "SupportFiles/Info-Debug.plist";
@@ -352,9 +299,10 @@
 		A00000000000000000000114 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = "SupportFiles/Jungle.entitlements";
+				CODE_SIGN_ENTITLEMENTS = SupportFiles/Jungle.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = A7GJUMM9W3;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "SupportFiles/Info-Release.plist";
@@ -399,6 +347,69 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		A00000000000000000000211 /* XCRemoteSwiftPackageReference "swift-markdown-ui" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/gonzalezreal/swift-markdown-ui";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.4.1;
+			};
+		};
+		A00000000000000000000212 /* XCRemoteSwiftPackageReference "Highlightr" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/raspu/Highlightr";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.1.0;
+			};
+		};
+		A00000000000000000000213 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/firebase/firebase-ios-sdk";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 11.0.0;
+			};
+		};
+		A00000000000000000000214 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/google/GoogleSignIn-iOS";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 8.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A00000000000000000000201 /* MarkdownUI */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A00000000000000000000211 /* XCRemoteSwiftPackageReference "swift-markdown-ui" */;
+			productName = MarkdownUI;
+		};
+		A00000000000000000000202 /* Highlightr */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A00000000000000000000212 /* XCRemoteSwiftPackageReference "Highlightr" */;
+			productName = Highlightr;
+		};
+		A00000000000000000000203 /* FirebaseAuth */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A00000000000000000000213 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseAuth;
+		};
+		A00000000000000000000204 /* FirebaseMessaging */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A00000000000000000000213 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseMessaging;
+		};
+		A00000000000000000000205 /* GoogleSignIn */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A00000000000000000000214 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */;
+			productName = GoogleSignIn;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = A000000000000000000000F1 /* Project object */;
 }

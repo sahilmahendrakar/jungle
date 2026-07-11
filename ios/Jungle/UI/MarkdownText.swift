@@ -82,10 +82,10 @@ extension MarkdownUI.Theme {
         .code {
             FontFamilyVariant(.monospaced)
             FontSize(.em(0.85))
-            BackgroundColor(Color(.secondarySystemFill))
+            BackgroundColor(JungleTheme.secondary)
         }
         .link {
-            ForegroundColor(.accentColor)
+            ForegroundColor(JungleTheme.primary)
         }
         .codeBlock { configuration in
             ScrollView(.horizontal, showsIndicators: false) {
@@ -97,8 +97,9 @@ extension MarkdownUI.Theme {
                     }
                     .padding(10)
             }
-            .background(Color(.secondarySystemBackground))
+            .background(JungleTheme.secondary)
             .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(JungleTheme.border, lineWidth: 1))
             .markdownMargin(top: .em(0.4), bottom: .em(0.4))
         }
         .blockquote { configuration in

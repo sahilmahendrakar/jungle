@@ -53,23 +53,23 @@ private struct TurnChipView: View {
             if turn.done {
                 Image(systemName: turn.ok == false ? "xmark" : "checkmark")
                     .font(.caption2.bold())
-                    .foregroundStyle(turn.ok == false ? Color.red : Color.green)
+                    .foregroundStyle(turn.ok == false ? JungleTheme.destructive : JungleTheme.primary)
             } else {
                 WorkingDots()
             }
-            (Text("@\(agentHandle) ").fontWeight(.medium).foregroundColor(.primary)
-                + Text(statusText).foregroundColor(.secondary))
+            (Text("@\(agentHandle) ").fontWeight(.medium).foregroundColor(JungleTheme.foreground)
+                + Text(statusText).foregroundColor(JungleTheme.mutedForeground))
                 .font(.caption)
                 .lineLimit(1)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
         .background(
-            turn.done ? AnyShapeStyle(.quaternary.opacity(0.5)) : AnyShapeStyle(Color.green.opacity(0.08)),
+            turn.done ? AnyShapeStyle(JungleTheme.muted) : AnyShapeStyle(JungleTheme.primary.opacity(0.05)),
             in: RoundedRectangle(cornerRadius: 8))
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(turn.done ? Color.clear : Color.green.opacity(0.3), lineWidth: 1))
+                .strokeBorder(turn.done ? JungleTheme.border : JungleTheme.primary.opacity(0.3), lineWidth: 1))
     }
 
     private var statusText: String {
