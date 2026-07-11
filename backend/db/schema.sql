@@ -487,3 +487,15 @@ create table if not exists slack_outbox (
 );
 create index if not exists slack_outbox_pending_idx
   on slack_outbox (link_id, id) where status = 'pending';
+
+-- Mobile push tokens (FCM registration tokens; iOS today). Account-scoped like devices — one
+-- account's phone gets pushes from all of its workspaces. Kept in sync with
+-- migrations/024_push_tokens.sql.
+create table if not exists push_tokens (
+  token        text primary key,
+  firebase_uid text not null,
+  platform     text not null default 'ios',
+  created_at   timestamptz not null default now(),
+  last_seen_at timestamptz not null default now()
+);
+create index if not exists push_tokens_uid_idx on push_tokens (firebase_uid);
