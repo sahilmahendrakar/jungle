@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { Bot, Cloud, MonitorSmartphone } from "lucide-react";
-import { createParticipant, listDevices, type RunnerHost } from "../../api";
+import { createParticipant, listDevices, listParticipants, type Participant, type RunnerHost } from "../../api";
 import { MODEL_OPTIONS, SDK_MODE_OPTIONS, DEFAULT_SDK_MODE } from "../../lib/chat";
+import { randomFreePreset, toKebab } from "../../lib/agent-presets";
 import { SelectMenu } from "./panels";
 import { IntegrationsEditor, validateIntegrations, type IntegrationDraft } from "./IntegrationsEditor";
 import { useConnections } from "@/lib/connections";
@@ -30,8 +31,14 @@ export function AddAgentDialog({
   onCreated: () => void;
   onNotice: (msg: string) => void;
 }) {
-  const [agHandle, setAgHandle] = useState("");
-  const [agName, setAgName] = useState("");
+  // Pre-fill with a random playful preset so a user can create an agent in one click; refined to a
+  // free handle (one not already taken in this workspace) when the dialog opens.
+  const [preset0] = useState(() => randomFreePreset(new Set()));
+  const [agHandle, setAgHandle] = useState(preset0.handle);
+  const [agName, setAgName] = useState(preset0.name);
+  // Whether the user has manually edited the handle. Once they have, typing in Name no longer
+  // overwrites it — only auto-derives until first manual touch.
+  const [handleTouched, setHandleTouched] = useState(false);
   const [integrations, setIntegrations] = useState<IntegrationDraft[]>([]);
   const [agModel, setAgModel] = useState(MODEL_OPTIONS[0].id);
   const [agMode, setAgMode] = useState(DEFAULT_SDK_MODE); // new agents are sdk runtime
@@ -46,6 +53,18 @@ export function AddAgentDialog({
   useEffect(() => {
     if (!open) return;
     listDevices().then(setDevices).catch(() => setDevices([]));
+    // Pick a fresh playful preset whose handle isn't already taken in this workspace.
+    listParticipants()
+      .then((ps: Participant[]) => {
+        const taken = new Set(ps.map((p) => p.handle));
+        const preset = randomFreePreset(taken);
+        setAgName(preset.name);
+        setAgHandle(preset.handle);
+        setHandleTouched(false);
+      })
+      .catch(() => {
+        /* can't read participants — leave the existing preset */
+      });
   }, [open]);
 
   const envOptions = [
@@ -101,8 +120,8 @@ export function AddAgentDialog({
         ...(selfHost ? { runnerProvider: "self_hosted", hostId: selfHost } : {}),
       });
       onOpenChange(false);
-      setAgHandle("");
-      setAgName("");
+      // Name/handle are re-preset (to a fresh free animal) the next time the dialog opens.
+      setHandleTouched(false);
       setIntegrations([]);
       setAgModel(MODEL_OPTIONS[0].id);
       setAgMode(DEFAULT_SDK_MODE);
@@ -129,23 +148,32 @@ export function AddAgentDialog({
         </DialogHeader>
         <div className="space-y-4">
           <div className="space-y-1.5">
+            <Label htmlFor="agent-name">Name</Label>
+            <Input
+              id="agent-name"
+              data-testid="agent-name"
+              value={agName}
+              onChange={(e) => {
+                const v = e.target.value;
+                setAgName(v);
+                // Auto-derive the handle from the name (lowercase kebab) until the user edits the
+                // handle themselves.
+                if (!handleTouched) setAgHandle(toKebab(v));
+              }}
+              placeholder="e.g. Deploy Bot"
+            />
+          </div>
+          <div className="space-y-1.5">
             <Label htmlFor="agent-handle">Handle</Label>
             <Input
               id="agent-handle"
               data-testid="agent-handle"
               value={agHandle}
-              onChange={(e) => setAgHandle(e.target.value)}
+              onChange={(e) => {
+                setAgHandle(e.target.value);
+                setHandleTouched(true);
+              }}
               placeholder="e.g. deploy-bot"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="agent-name">Display name</Label>
-            <Input
-              id="agent-name"
-              data-testid="agent-name"
-              value={agName}
-              onChange={(e) => setAgName(e.target.value)}
-              placeholder="e.g. Deploy Bot"
             />
           </div>
           <IntegrationsEditor
