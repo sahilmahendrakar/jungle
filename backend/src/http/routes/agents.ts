@@ -70,6 +70,15 @@ router.post(
     const me = await requireRequester(req);
     const { handle, displayName } = req.body ?? {};
     if (!handle || !displayName) throw new ApiError(400, "handle, displayName required");
+    // Optional creator-written instructions/persona, injected into the agent's system prompt. Same
+    // length cap as the profile-page edit; empty string clears it (stored as null).
+    let persona: string | null = null;
+    if (req.body?.persona !== undefined) {
+      persona = String(req.body.persona ?? "").trim() || null;
+      if (persona && persona.length > PERSONA_MAX_LENGTH) {
+        throw new ApiError(400, `instructions must be at most ${PERSONA_MAX_LENGTH} characters`);
+      }
+    }
     const model = req.body?.model ? String(req.body.model) : null;
     if (model && !isAllowedModel(model)) throw new ApiError(400, `unsupported model: ${model}`);
     if (model && !providerConfigured(model)) {
@@ -101,7 +110,7 @@ router.post(
       if (count >= cap) throw new ApiError(409, `this workspace has reached its agent limit (${cap})`);
       return db.createParticipant({
         kind: "agent", workspaceId: me.workspace_id, handle, displayName, runtime: "sdk", runnerToken,
-        model, mode, runnerProvider,
+        model, mode, runnerProvider, persona,
       }, client);
     });
     // Bind the agent to its device before provisioning reads runner_meta.hostId.
