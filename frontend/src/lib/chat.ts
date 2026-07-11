@@ -10,18 +10,38 @@ export const MODEL_OPTIONS = MODEL_CATALOG.map(({ id, label, hint }) => ({
   label,
   hint,
 }));
-// Agent permission modes (SDK runner). `default` is first (the create-agent default).
-export const SDK_MODE_OPTIONS = [
-  {
-    id: "default",
+// Label + hint for every backend permission mode (SDK runner). Keyed by mode id so an agent
+// already on a mode we no longer surface in the picker still renders correctly in its settings.
+export const SDK_MODE_LABELS: Record<string, { label: string; hint: string }> = {
+  default: {
     label: "Ask on sensitive",
     hint: "Ask before sensitive tools — safe actions run automatically",
   },
-  { id: "acceptEdits", label: "Accept edits", hint: "Auto-accept file edits" },
-  { id: "plan", label: "Plan only", hint: "Proposes, never changes files" },
-  { id: "bypassPermissions", label: "Full autonomy", hint: "Never asks" },
-  { id: "dontAsk", label: "Deny unapproved", hint: "Deny anything not pre-approved" },
-];
+  acceptEdits: { label: "Accept edits", hint: "Auto-accept file edits" },
+  plan: { label: "Plan only", hint: "Proposes, never changes files" },
+  bypassPermissions: { label: "Full autonomy", hint: "Never asks" },
+  dontAsk: { label: "Deny unapproved", hint: "Deny anything not pre-approved" },
+};
+
+// The permission modes offered in the picker — a trimmed progressive spectrum (least → most
+// autonomy). The backend still accepts the full SDK_MODES set, so agents already on acceptEdits/
+// dontAsk keep working; those two are simply no longer offered to new/edited agents here.
+export const SDK_MODE_OPTIONS = (["plan", "default", "bypassPermissions"] as const).map((id) => ({
+  id: id as string,
+  ...SDK_MODE_LABELS[id],
+}));
+
+// New agents default to "Ask on sensitive". Decoupled from picker order so it can be reordered.
+export const DEFAULT_SDK_MODE = "default";
+
+// Options for editing an EXISTING agent: the trimmed picker plus its current mode if that's no
+// longer offered (e.g. a legacy acceptEdits/dontAsk agent) — so we never misrepresent it or
+// silently overwrite the setting on save.
+export function sdkModeOptionsFor(current: string) {
+  if (SDK_MODE_OPTIONS.some((o) => o.id === current)) return SDK_MODE_OPTIONS;
+  const extra = SDK_MODE_LABELS[current] ?? { label: current, hint: "" };
+  return [...SDK_MODE_OPTIONS, { id: current, ...extra }];
+}
 // Reasoning effort (SDK `effort`). Ids must match the backend's EFFORT_LEVELS; `medium` is the
 // default. Lower = cheaper/faster (fewer thinking tokens + tool-call round-trips); bump repo/
 // coding agents up. Haiku ignores effort. Ordered low→high so the default sits mid-list.

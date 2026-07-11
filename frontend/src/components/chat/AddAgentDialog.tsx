@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Bot, Cloud, MonitorSmartphone } from "lucide-react";
 import { createParticipant, listDevices, type RunnerHost } from "../../api";
-import { MODEL_OPTIONS, SDK_MODE_OPTIONS } from "../../lib/chat";
+import { MODEL_OPTIONS, SDK_MODE_OPTIONS, DEFAULT_SDK_MODE } from "../../lib/chat";
 import { SelectMenu } from "./panels";
 import { IntegrationsEditor, validateIntegrations, type IntegrationDraft } from "./IntegrationsEditor";
 import { useConnections } from "@/lib/connections";
@@ -34,7 +34,7 @@ export function AddAgentDialog({
   const [agName, setAgName] = useState("");
   const [integrations, setIntegrations] = useState<IntegrationDraft[]>([]);
   const [agModel, setAgModel] = useState(MODEL_OPTIONS[0].id);
-  const [agMode, setAgMode] = useState(SDK_MODE_OPTIONS[0].id); // new agents are sdk runtime
+  const [agMode, setAgMode] = useState(DEFAULT_SDK_MODE); // new agents are sdk runtime
   const [addingAgent, setAddingAgent] = useState(false);
   // Environment: "cloud" (default) or `self:<hostId>` for one of the account's registered devices.
   const [env, setEnv] = useState("cloud");
@@ -105,7 +105,7 @@ export function AddAgentDialog({
       setAgName("");
       setIntegrations([]);
       setAgModel(MODEL_OPTIONS[0].id);
-      setAgMode(SDK_MODE_OPTIONS[0].id);
+      setAgMode(DEFAULT_SDK_MODE);
       setEnv("cloud");
       onCreated();
     } catch (e) {

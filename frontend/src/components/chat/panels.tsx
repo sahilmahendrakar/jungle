@@ -43,7 +43,7 @@ import {
   fmtTokens,
   INLINE_IMAGE_MIMES,
   MODEL_OPTIONS,
-  SDK_MODE_OPTIONS,
+  sdkModeOptionsFor,
   STATUS_DOT,
   STATUS_LABEL,
   type ToolConfirm,
@@ -156,9 +156,9 @@ export function SelectMenu({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
-        portal={false}
         align="start"
-        className="w-[var(--radix-dropdown-menu-trigger-width)]"
+        collisionPadding={8}
+        className="w-[var(--radix-dropdown-menu-trigger-width)] max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto"
       >
         {options.map((o) => (
           <DropdownMenuItem
@@ -392,7 +392,7 @@ export function ParticipantProfilePanel({
               <SelectMenu
                 value={mode}
                 onChange={setMode}
-                options={SDK_MODE_OPTIONS}
+                options={sdkModeOptionsFor(mode)}
                 testId="agent-mode-select"
               />
             </div>
