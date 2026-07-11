@@ -27,19 +27,20 @@ export async function createParticipant(p: {
   runtime?: string | null;
   runnerToken?: string | null;
   runnerProvider?: string | null;
+  persona?: string | null; // creator-written role/personality, injected into the system prompt
 }, client?: pg.PoolClient): Promise<Participant> {
   const { rows } = await (client ?? pool).query<Participant>(
     `insert into participants
        (kind, workspace_id, handle, display_name, role, repo, firebase_uid, email, avatar_url,
-        model, mode, runtime, runner_token, runner_provider)
+        model, mode, runtime, runner_token, runner_provider, persona)
      values ($1, $2, $3, $4, coalesce($5, 'member'), $6, $7, $8, $9, $10, coalesce($11, 'default'),
-             coalesce($12, 'sdk'), $13, coalesce($14, 'docker'))
+             coalesce($12, 'sdk'), $13, coalesce($14, 'docker'), $15)
      returning *`,
     [
       p.kind, p.workspaceId, p.handle, p.displayName, p.role ?? null, p.repo ?? null,
       p.firebaseUid ?? null, p.email ?? null, p.avatarUrl ?? null,
       p.model ?? null, p.mode ?? null, p.runtime ?? null, p.runnerToken ?? null,
-      p.runnerProvider ?? null,
+      p.runnerProvider ?? null, p.persona ?? null,
     ],
   );
   return rows[0];
