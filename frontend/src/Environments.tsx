@@ -1,5 +1,5 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { Check, Copy, Loader2, MonitorSmartphone, Plus, ShieldAlert, Trash2, Wifi, WifiOff } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Check, Copy, Loader2, MonitorSmartphone, Plus, Trash2, Wifi, WifiOff } from "lucide-react";
 import { listDevices, updateDevice, removeDevice, type RunnerHost } from "./api";
 import { supportsUnsandboxed } from "@jungle/shared";
 import { fmtRelative } from "./lib/chat";
@@ -107,18 +107,6 @@ function DeviceCard({
   const cliTooOld = device.runner_version !== null && !supportsUnsandboxed(device.runner_version);
   const sandboxOptions = cliTooOld ? SANDBOX_OPTIONS.filter((o) => o.id === "true") : SANDBOX_OPTIONS;
 
-  // One concise note about the sandbox state — never two stacked blocks. When the CLI is too old,
-  // unsandboxed is forced off, so the "runs in your directory" note is moot and we surface only
-  // the actionable update prompt instead.
-  const sandboxNote: ReactNode = !device.sandboxed
-    ? cliTooOld
-      ? (<>This device's CLI (v{device.runner_version ?? "unknown"}) is too old for unsandboxed
-          mode — agents run sandboxed until you run{" "}
-          <code>npx jungle-agents@latest up</code> here.</>)
-      : (<>Agents run in this device's <code>jungle-agents connect</code> directory with your real
-          files. GitHub repo cloning is disabled.</>)
-    : null;
-
   return (
     <div data-testid="device-card" className="rounded-xl border bg-card p-4 shadow-sm">
       <div className="flex items-start gap-3">
@@ -177,12 +165,6 @@ function DeviceCard({
               />
             </div>
           </div>
-          {sandboxNote && (
-            <p className="mt-2 flex items-start gap-1.5 text-[11px] leading-snug text-amber-600">
-              <ShieldAlert className="mt-0.5 size-3.5 shrink-0" />
-              {sandboxNote}
-            </p>
-          )}
         </div>
         <Button variant="ghost" size="icon" className="shrink-0 text-muted-foreground" onClick={remove} disabled={busy}>
           <Trash2 className="size-4" />
