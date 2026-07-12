@@ -183,6 +183,15 @@ export function useChatSocket(opts: {
           );
           return;
         }
+        if (evt.type === "agent_services_changed") {
+          // Same refetch pattern as memory, for the profile's Services section.
+          setPeople((ps) =>
+            ps.map((p) =>
+              p.id === evt.agentId ? { ...p, services_changed_at: new Date().toISOString() } : p,
+            ),
+          );
+          return;
+        }
         if (evt.type === "participant_deleted") {
           // Resolve the deleted agent's handle so we can drop its DM channel (DMs are keyed
           // by the other member's handle via dm_with), then remove the participant itself.

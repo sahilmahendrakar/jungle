@@ -52,7 +52,8 @@ import {
 import { createGmailMcpServer } from "./gmail-tool.js";
 import { createDriveMcpServer } from "./drive-tool.js";
 import { applyGitCredentials, cloneRepoIfNeeded, getGhToken } from "./git.js";
-import { loadState, saveState } from "./state.js";
+import { loadState, saveState, stateDir } from "./state.js";
+import { ServiceManager } from "./services.js";
 import {
   downloadAttachments,
   httpBaseFromWsUrl,
@@ -92,6 +93,10 @@ const SAFE_TOOLS = new Set([
   "ToolSearch", "Read", "Glob", "Grep", "WebSearch", "WebFetch",
   "TodoWrite", "Task", "NotebookRead", "BashOutput", "TaskOutput",
   "ListMcpResources", "ReadMcpResource", "mcp__jungle__read_history",
+  // Managed-service reads: status/log inspection never changes anything. service_start/stop
+  // are deliberately NOT here (and not in allowedTools): they run arbitrary commands / kill
+  // processes, so default mode routes them through the confirmation card like Bash.
+  "mcp__jungle__service_status", "mcp__jungle__service_logs",
   // Gmail read/search: never mutate the mailbox, so no confirmation.
   "mcp__gmail__gmail_search", "mcp__gmail__gmail_read_message",
   // Google Drive read: search/list/get never mutate, so no confirmation.
@@ -163,6 +168,18 @@ function messageHasStreamClosed(message: unknown): boolean {
       typeof c?.content === "string" &&
       c.content.includes("Stream closed"),
   );
+}
+
+// True for a `result` stream message that does NOT conclude one of the user messages we
+// yielded — e.g. the CLI's bookkeeping result for an orphaned background task delivered on
+// session resume (`origin: { kind: "task-notification" }`, 0 tokens, emitted at init time).
+// Counting such a result in the close rule closes stdin at TURN START (turnResults >=
+// turnYields with the real turn still running), which kills hook/MCP control wiring for the
+// rest of the query — the same dead-wiring failure the close rule exists to prevent. Results
+// for our own yielded messages carry no origin (or "human"); anything else is not ours.
+function isNonTurnResult(message: unknown): boolean {
+  const origin = (message as { origin?: { kind?: string } }).origin;
+  return origin != null && origin.kind !== "human";
 }
 
 export class Runner {
@@ -269,6 +286,12 @@ export class Runner {
   // Backend HTTP origin for attachment transfer, derived from the WS URL.
   private readonly httpBase: string;
 
+  // Long-lived processes the agent asked for (service_* tools). Owned by THIS process, not
+  // the per-turn CLI subprocess, so they survive turn boundaries; see services.ts.
+  private readonly servicesMgr = new ServiceManager(this.workspace, stateDir(), () =>
+    this.reportServices(),
+  );
+
   constructor(private readonly env: RunnerEnv) {
     this.httpBase = httpBaseFromWsUrl(env.wsUrl);
     this.conn = new Connection(env.wsUrl, env.token, {
@@ -282,12 +305,20 @@ export class Runner {
     const persisted = await loadState();
     this.sessionId = persisted.sessionId;
     this.model = persisted.model;
+    // Re-adopt services a previous runner process left running (registry + pid probe) before
+    // connecting, so the post-configure services report reflects reality.
+    await this.servicesMgr.init();
     log.info("runner starting", {
       agentId: this.env.agentId,
       sessionId: this.sessionId,
       model: this.model,
     });
     this.conn.start();
+  }
+
+  // Intentional stop (SIGTERM/SIGINT): the agent is being shut down, take its services along.
+  shutdown(): void {
+    this.servicesMgr.stopAll();
   }
 
   // ---- connection lifecycle ----
@@ -429,6 +460,12 @@ export class Runner {
         // refreshes before each drain so every turn starts fresh either way.
         this.integrationTokens.set(frame.key, frame.accessToken);
         break;
+      case "service_stop":
+        // Human pressed stop in the profile panel. The manager's onChange reports the new list.
+        void this.servicesMgr.stop(frame.name).catch((err) => {
+          log.warn("service_stop frame failed", { name: frame.name, err: String(err) });
+        });
+        break;
       default:
         log.warn("unknown frame from backend", { type: (frame as any).type });
     }
@@ -475,6 +512,9 @@ export class Runner {
     // Report the current MEMORY.md once per (re)configure so the backend's mirror heals any
     // drift (e.g. rows migrated before memory existed, or a report lost across a disconnect).
     void this.reportMemoryIfChanged();
+    // Same for services: heal the backend's snapshot (covers re-adopted services after a
+    // runner restart and reports lost across a disconnect).
+    this.reportServices();
     this.maybeStartTurn();
   }
 
@@ -643,6 +683,10 @@ export class Runner {
       "mcp__jungle__schedule_create",
       "mcp__jungle__schedule_list",
       "mcp__jungle__schedule_cancel",
+      // Read-only service tools are auto-allowed; service_start/stop are NOT (they run
+      // arbitrary commands / kill processes, so default mode shows a confirmation card).
+      "mcp__jungle__service_status",
+      "mcp__jungle__service_logs",
     ];
     if (gmailServer) {
       allowedTools.push(...GMAIL_READ_TOOLS);
@@ -767,9 +811,27 @@ export class Runner {
           await reconnectJungle();
         } else if ((message as any).type === "user" && messageHasStreamClosed(message)) {
           await reconnectJungle();
+        } else if ((message as any).type === "system" && (message as any).subtype === "init") {
+          // Init-time verify + heal: every init reports the CLI's mounted MCP servers. If the
+          // jungle server is missing or unhealthy, the model has NO send_message in its catalog
+          // for the whole turn — the reactive "Stream closed" reconnect can never fire (it keys
+          // on a tool_result, which requires the tool to be callable at all). Observed cause:
+          // resuming a session that has an orphaned background task makes the CLI come up with
+          // mcp_servers:[] entirely (CLI 2.1.198), silencing the agent for whole turns. Healing
+          // here covers that and any future cause of a dropped mount.
+          const mounted = (message as any).mcp_servers;
+          if (
+            Array.isArray(mounted) &&
+            !mounted.some((s: any) => s?.name === "jungle" && s?.status === "connected")
+          ) {
+            log.warn("jungle MCP server missing/unhealthy at init; remounting", {
+              mcp_servers: mounted,
+            });
+            await reconnectJungle();
+          }
         }
 
-        if ((message as any).type === "result") {
+        if ((message as any).type === "result" && !isNonTurnResult(message)) {
           this.turnResults++;
           const sid = (message as any).session_id;
           if (typeof sid === "string" && sid.length > 0 && sid !== this.sessionId) {
@@ -848,7 +910,15 @@ export class Runner {
       scheduleCreate: (id, input) => this.bridgeScheduleCreate(id, input),
       scheduleList: (id) => this.bridgeScheduleList(id),
       scheduleCancel: (id, input) => this.bridgeScheduleCancel(id, input),
+      services: this.servicesMgr,
     });
+  }
+
+  // Snapshot the managed-services list to the backend (persisted on the participant row and
+  // broadcast to open profile panels). Fired by the manager on any change and once after
+  // configure; cheap and idempotent, so no hash-compare like memory needs.
+  private reportServices(): void {
+    this.conn.send({ type: "services", services: this.servicesMgr.list() });
   }
 
   // The in-process "gmail" SDK-MCP server (gmail_search/read/send/draft/modify), reading the

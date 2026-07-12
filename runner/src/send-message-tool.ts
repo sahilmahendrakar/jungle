@@ -9,6 +9,7 @@ import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { log } from "./log.js";
 import { MAX_FILES_PER_MESSAGE, type UploadedAttachment } from "./files.js";
+import { createServiceTools, type ServiceOps } from "./service-tools.js";
 
 export interface SendMessageResult {
   ok: boolean;
@@ -84,7 +85,8 @@ export type FileUploader = (filePath: string) => Promise<UploadedAttachment>;
 
 const SEND_TIMEOUT_MS = 60_000;
 
-// All the backend round-trips the jungle tools need, injected by the runner.
+// All the backend round-trips the jungle tools need, injected by the runner. `services` is the
+// one purely-local member: the runner's ServiceManager (no backend round-trip involved).
 export interface JungleBridges {
   sendMessage: SendMessageBridge;
   uploadFile: FileUploader;
@@ -92,6 +94,7 @@ export interface JungleBridges {
   scheduleCreate: ScheduleCreateBridge;
   scheduleList: ScheduleListBridge;
   scheduleCancel: ScheduleCancelBridge;
+  services: ServiceOps;
 }
 
 export function createJungleMcpServer(bridges: JungleBridges) {
@@ -398,7 +401,14 @@ export function createJungleMcpServer(bridges: JungleBridges) {
     // stale transport surfaces as a "Stream closed" tool_result that re-arms the reconnect. Cost is
     // trivial (5 tools) and worth it for the agent's sole communication path.
     alwaysLoad: true,
-    tools: [sendMessage, readHistoryTool, scheduleCreateTool, scheduleListTool, scheduleCancelTool],
+    tools: [
+      sendMessage,
+      readHistoryTool,
+      scheduleCreateTool,
+      scheduleListTool,
+      scheduleCancelTool,
+      ...createServiceTools(bridges.services),
+    ],
   });
 }
 

@@ -11,6 +11,7 @@ import {
   FoldVertical,
   MonitorSmartphone,
   Plus,
+  Server,
   ShieldQuestion,
   Sparkles,
   Trash2,
@@ -24,11 +25,13 @@ import {
   clearAgentContext,
   attachmentUrl,
   getAgentMemory,
+  getAgentServices,
+  stopAgentService,
   listAgentIntegrations,
   setAgentIntegration,
   removeAgentIntegration,
 } from "../../api";
-import type { Attachment, Participant, AgentStatus } from "../../api";
+import type { Attachment, Participant, AgentStatus, AgentServiceInfo } from "../../api";
 import {
   IntegrationsEditor,
   integrationFingerprint,
@@ -425,6 +428,7 @@ export function ParticipantProfilePanel({
             </div>
             <IntegrationsEditor value={integrations} onChange={setIntegrations} connections={connections} />
             <EnvironmentCard person={person} />
+            <ServicesCard person={person} />
             <MemoryCard person={person} />
             <ContextUsageCard person={person} />
             <Button
@@ -803,6 +807,123 @@ export function MemoryCard({ person }: { person: Participant }) {
             <p className="text-[11px] leading-tight text-muted-foreground">
               No memories yet — the agent writes down durable facts (preferences, decisions,
               gotchas) as it works with you.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The agent's managed services (service_* tools: dev servers, watchers, tunnels), with a stop
+// button per running service. Collapsed by default; fetched on expand and refetched when an
+// agent_services_changed broadcast stamps person.services_changed_at (same pattern as Memory).
+export function ServicesCard({ person }: { person: Participant }) {
+  const [open, setOpen] = useState(false);
+  const [services, setServices] = useState<AgentServiceInfo[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [err, setErr] = useState("");
+  const [stopping, setStopping] = useState<string | null>(null);
+
+  const changedAt = person.services_changed_at ?? null;
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    getAgentServices(person.id)
+      .then((r) => {
+        if (cancelled) return;
+        setServices(r.services);
+        setLoaded(true);
+        setErr("");
+        setStopping(null); // the post-stop refetch — clear the spinner state
+      })
+      .catch((e) => !cancelled && setErr(String((e as Error).message ?? e)));
+    return () => {
+      cancelled = true;
+    };
+  }, [open, person.id, changedAt]);
+
+  const stop = async (name: string) => {
+    setStopping(name);
+    try {
+      await stopAgentService(person.id, name);
+      // The fresh list arrives via the agent_services_changed broadcast (changedAt bump).
+    } catch (e) {
+      setErr(String((e as Error).message ?? e));
+      setStopping(null);
+    }
+  };
+
+  const running = services.filter((s) => s.status === "running").length;
+  return (
+    <div data-testid="agent-services" className="rounded-lg border bg-muted/30">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        data-testid="agent-services-toggle"
+        className="flex w-full items-center gap-2 p-3 text-left"
+      >
+        <Server className="size-4 shrink-0 text-muted-foreground" />
+        <span className="flex-1 text-xs font-medium text-muted-foreground">Services</span>
+        {running > 0 && (
+          <span className="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+            {running} running
+          </span>
+        )}
+        <ChevronDown
+          className={cn("size-4 shrink-0 text-muted-foreground transition-transform", open && "rotate-180")}
+        />
+      </button>
+      {open && (
+        <div className="space-y-2 border-t px-3 pb-3 pt-2">
+          {err && <p className="text-[11px] text-destructive">{err}</p>}
+          {!loaded && !err ? (
+            <p className="text-[11px] text-muted-foreground">Loading…</p>
+          ) : services.length ? (
+            services.map((s) => (
+              <div
+                key={s.name}
+                data-testid={`agent-service-${s.name}`}
+                className="rounded-md border bg-background/70 p-2"
+              >
+                <div className="flex items-center gap-2">
+                  <span
+                    className={cn(
+                      "size-1.5 shrink-0 rounded-full",
+                      s.status === "running" ? "bg-emerald-500" : "bg-muted-foreground/40",
+                    )}
+                  />
+                  <span className="min-w-0 flex-1 truncate font-mono text-xs">{s.name}</span>
+                  {s.status === "running" ? (
+                    <button
+                      onClick={() => stop(s.name)}
+                      disabled={stopping === s.name}
+                      data-testid={`agent-service-stop-${s.name}`}
+                      className="rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-muted disabled:opacity-50"
+                    >
+                      {stopping === s.name ? "Stopping…" : "Stop"}
+                    </button>
+                  ) : (
+                    <span className="text-[10px] text-muted-foreground">
+                      exited{s.exitCode != null ? ` (${s.exitCode})` : ""}
+                    </span>
+                  )}
+                </div>
+                <p className="mt-1 truncate font-mono text-[10px] text-muted-foreground" title={s.command}>
+                  $ {s.command}
+                </p>
+                <p className="text-[10px] text-muted-foreground">
+                  {s.status === "running"
+                    ? `up since ${new Date(s.startedAt).toLocaleString()}`
+                    : s.exitedAt
+                      ? `exited ${new Date(s.exitedAt).toLocaleString()}`
+                      : ""}
+                </p>
+              </div>
+            ))
+          ) : (
+            <p className="text-[11px] leading-tight text-muted-foreground">
+              No services — long-running processes the agent starts (dev servers, watchers)
+              appear here.
             </p>
           )}
         </div>

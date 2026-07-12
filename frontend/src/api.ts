@@ -22,6 +22,7 @@ import type {
   SlackStatus,
   SlackChannelInfo,
   SlackChannelLink,
+  AgentServiceInfo,
 } from "@jungle/shared";
 export {
   INTEGRATION_TYPES,
@@ -36,6 +37,7 @@ export type { ExtractedLink };
 export type { SlackStatus, SlackChannelInfo, SlackChannelLink };
 
 export type { Participant, Attachment, UnreadThread, AgentEvent, AgentStatus, AgentIntegration, RunnerHost };
+export type { AgentServiceInfo };
 export type { Schedule, Deliverable, DeliverableKind, SearchResult };
 export type { Me, GoogleProfile, Workspace, Membership, InviteInfo };
 // A message as delivered to the client (attachments carry signed download urls).
@@ -418,6 +420,29 @@ export function getAgentMemory(
     auth: true,
     devAuth: true,
     errorMessage: "failed to load memory",
+  });
+}
+
+// The agent's managed services (service_* tools: dev servers, watchers), as last reported by
+// its runner. Fetched on demand like memory.
+export function getAgentServices(
+  id: string,
+): Promise<{ services: AgentServiceInfo[]; updatedAt: string | null }> {
+  return request(`/api/agents/${id}/services`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load services",
+  });
+}
+
+// Stop one of an agent's managed services. The fresh list arrives via an
+// agent_services_changed broadcast once the runner has killed the process group.
+export function stopAgentService(id: string, name: string): Promise<{ ok: boolean }> {
+  return request(`/api/agents/${id}/services/${encodeURIComponent(name)}/stop`, {
+    method: "POST",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to stop service",
   });
 }
 

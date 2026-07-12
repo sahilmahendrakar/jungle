@@ -7,6 +7,13 @@ import { log } from "./log.js";
 const STATE_DIR = process.env.JUNGLE_STATE_DIR ?? "/workspace/.jungle";
 const STATE_FILE = path.join(STATE_DIR, "state.json");
 
+// The runner's private state directory (session/model state, services registry + logs).
+// Cloud runners default to the workspace volume; the self-hosted daemon points this at the
+// agent's per-agent state dir via JUNGLE_STATE_DIR.
+export function stateDir(): string {
+  return STATE_DIR;
+}
+
 export interface PersistedState {
   sessionId: string | null;
   model: string | null;

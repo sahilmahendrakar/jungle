@@ -8,6 +8,7 @@ import type {
   ConfigureFrame,
   AgentStatus,
   PermissionMode,
+  AgentServiceInfo,
 } from "@jungle/shared";
 import { isSdkMode, catalogEntry } from "@jungle/shared";
 import { resolveProvider } from "./providers";
@@ -141,6 +142,9 @@ export interface RunnerHooks {
   // The agent's /workspace/MEMORY.md changed (reported after the turn that changed it, and once
   // after configure). Persist the mirror + broadcast so an open profile panel live-updates.
   onMemoryUpdated: (agentId: string, content: string) => void;
+  // The agent's managed-services list changed (service_* tools: started/stopped/exited), or a
+  // post-configure heal. Snapshot semantics: persist as-is + broadcast so profiles live-update.
+  onServicesUpdated: (agentId: string, services: AgentServiceInfo[]) => void;
   // A turn died (SDK crash, OOM kill, API error). Tell the humans who were waiting —
   // otherwise the agent just goes silent mid-task.
   onTurnFailed: (agent: { id: string; handle: string }, error: string) => void;
@@ -403,7 +407,17 @@ export function systemPromptAppend(
     `silently when there isn't. Review with schedule_list, remove with schedule_cancel. Limits: ` +
     `10 schedules per agent, recurring at most every 15 minutes. When someone asks you to ` +
     `"remind me", "check every morning", or "do X weekly", use these tools — never just promise ` +
-    `to remember. (Schedules are for future ACTIONS; MEMORY.md is for durable FACTS.)`;
+    `to remember. (Schedules are for future ACTIONS; MEMORY.md is for durable FACTS.)\n\n` +
+    `— Long-running processes: services —\n` +
+    `For anything that must keep running after your current work ends — dev servers, file ` +
+    `watchers, tunnels — use your service tools: service_start (also restarts), service_stop, ` +
+    `service_status, service_logs. Services run under your always-on supervisor, so they ` +
+    `survive between turns and conversations; their output goes to a per-service log you read ` +
+    `with service_logs. NEVER start a server with the Bash tool's run_in_background option or ` +
+    `nohup/& — those die (or leak) when your turn's sandbox exits, and people can't see or stop ` +
+    `them. run_in_background remains fine for bounded work you'll collect within the same turn ` +
+    `(builds, test runs, installs). Stop services you no longer need; humans can also see and ` +
+    `stop your services from your profile.`;
   for (const block of integrationBlocks) s += block;
   s += `\n\n— Your environment —\n`;
   if (agent.runner_provider === "self_hosted") {
@@ -418,9 +432,9 @@ export function systemPromptAppend(
       `prefer reversible steps, explain what you're about to do before anything destructive, and ` +
       `never delete or overwrite files outside your workspace without asking. Treat credentials, ` +
       `keys, and personal data on the machine as strictly off-limits unless the person explicitly ` +
-      `directs you to use them for the task at hand. Dev servers and other long-running processes ` +
-      `MUST use the Bash tool's run_in_background option — plain \`&\` background jobs are killed ` +
-      `when the Bash call returns.`;
+      `directs you to use them for the task at hand. Dev servers and other long-running ` +
+      `processes MUST use your service_start tool (see the services section above) — Bash ` +
+      `run_in_background and \`&\` jobs die with your turn.`;
     // Unsandboxed devices root the agent's cwd at the user's connect directory rather than an
     // isolated workspace, so the agent is editing the person's real project files in place.
     if (hostSandboxed === false) {
@@ -435,8 +449,8 @@ export function systemPromptAppend(
     s +=
       `You run in a Linux container: no sudo/apt, ~3GB memory (don't run several heavy ` +
       `processes at once), Chromium preinstalled for Playwright (PLAYWRIGHT_BROWSERS_PATH is set). ` +
-      `Dev servers and other long-running processes MUST use the Bash tool's run_in_background ` +
-      `option — plain \`&\` background jobs are killed when the Bash call returns.`;
+      `Dev servers and other long-running processes MUST use your service_start tool (see the ` +
+      `services section above) — Bash run_in_background and \`&\` jobs die with your turn.`;
   }
   // Non-Anthropic models don't have Claude's native memory convention trained in, so spell the
   // mechanic out explicitly (the section above assumes the "base instructions" memory system).
@@ -669,6 +683,17 @@ export function compact(agentId: string): boolean {
   const conn = conns.get(agentId);
   if (!conn) return false;
   send(conn, { type: "compact" });
+  return true;
+}
+
+// Ask the agent's runner to stop one of its managed services (the profile panel's stop
+// button). Returns false if no runner is connected — the UI surfaces that as "agent offline"
+// (a sleeping cloud agent has no running services to stop; a disconnected self-hosted one
+// can't be reached anyway).
+export function stopService(agentId: string, name: string): boolean {
+  const conn = conns.get(agentId);
+  if (!conn) return false;
+  send(conn, { type: "service_stop", name });
   return true;
 }
 
@@ -948,6 +973,27 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         // into the prompt; this guards the DB against a runaway file).
         const content = String(frame.content ?? "").slice(0, 65_536);
         hooks?.onMemoryUpdated(agentId, content);
+        break;
+      }
+      case "services": {
+        // Managed-services snapshot. Sanitize/bound each entry — this goes straight into a
+        // jsonb column and back out to clients, so never trust runner-supplied shapes.
+        const services: AgentServiceInfo[] = (Array.isArray(frame.services) ? frame.services : [])
+          .slice(0, 32)
+          .filter((s) => s && typeof s.name === "string" && typeof s.command === "string")
+          .map((s) => ({
+            name: s.name.slice(0, 64),
+            command: s.command.slice(0, 2_000),
+            ...(typeof s.cwd === "string" ? { cwd: s.cwd.slice(0, 512) } : {}),
+            status: s.status === "running" ? "running" : "exited",
+            ...(typeof s.pid === "number" ? { pid: s.pid } : {}),
+            startedAt: typeof s.startedAt === "string" ? s.startedAt.slice(0, 40) : "",
+            ...(typeof s.exitedAt === "string" ? { exitedAt: s.exitedAt.slice(0, 40) } : {}),
+            ...(typeof s.exitCode === "number" || s.exitCode === null
+              ? { exitCode: s.exitCode }
+              : {}),
+          }));
+        hooks?.onServicesUpdated(agentId, services);
         break;
       }
       case "send_message": {

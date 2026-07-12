@@ -510,6 +510,14 @@ export function buildRunnerHooks(): runners.RunnerHooks {
         .catch((e) => console.error("updateAgentMemory:", e));
       broadcastAgentWorkspace(agentId, { type: "agent_memory_changed", agentId });
     },
+    // The agent's managed services changed -> persist the snapshot + broadcast so an open
+    // profile panel's Services section live-updates (same refetch pattern as memory).
+    onServicesUpdated: (agentId, services) => {
+      void db
+        .updateAgentServices(agentId, services)
+        .catch((e) => console.error("updateAgentServices:", e));
+      broadcastAgentWorkspace(agentId, { type: "agent_services_changed", agentId });
+    },
     // A turn crashed -> post a notice from the agent into the channel that triggered it so the
     // humans waiting aren't ghosted. cascadeBudget 0: a crash notice must never trigger others.
     onTurnFailed: (agent, error) => {

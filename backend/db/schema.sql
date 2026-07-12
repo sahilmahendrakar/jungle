@@ -64,6 +64,11 @@ alter table participants add column if not exists memory             text;
 alter table participants add column if not exists memory_updated_at  timestamptz;
 alter table participants add column if not exists persona            text;
 
+-- Managed services (the runner's service_* tools): snapshot of the agent's service list as
+-- last reported via the `services` runner frame. See migrations/025_runner_services.sql.
+alter table participants add column if not exists runner_services            jsonb;
+alter table participants add column if not exists runner_services_updated_at timestamptz;
+
 -- Per-agent runner provider (gradual Docker -> Fly rollout). 'docker' keeps today's behavior;
 -- 'fly' routes provisioner calls to FlyProvisioner. runner_meta holds provider handles
 -- (Fly: {machineId, volumeId}); null for docker. See migrations/007_fly_provisioner.sql.

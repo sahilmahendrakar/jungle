@@ -68,6 +68,11 @@ export class DockerProvisioner implements Provisioner {
       "create",
       "--name", containerName(agent.id),
       "--restart=unless-stopped",
+      // Real PID-1 init (tini): reaps orphaned grandchildren. Without it the runner is PID 1
+      // and never reaps zombies of exited managed services, which keeps their process GROUP
+      // probe-alive forever (kill(-pgid, 0) succeeds on a group holding only zombies) — see
+      // runner/src/services.ts isAlive.
+      "--init",
       // 3g: a web-dev turn realistically runs the SDK process + `next dev` + headless
       // Chromium at once; 1g OOM-killed the SDK mid-turn (2026-07-02, selenite-agent).
       // Caps are not reservations — idle agents cost nothing.

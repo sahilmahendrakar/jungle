@@ -49,12 +49,13 @@ export interface ParticipantBase {
 }
 
 // A participant as sent to clients: the public row plus a live `status` (agents only, computed
-// from the runner connection at serialization time — not persisted). `memory_changed_at` is
-// client-side only: stamped when an agent_memory_changed broadcast lands, so an open profile's
-// Memory section knows to refetch.
+// from the runner connection at serialization time — not persisted). `memory_changed_at` /
+// `services_changed_at` are client-side only: stamped when the matching agent_*_changed
+// broadcast lands, so an open profile's Memory/Services section knows to refetch.
 export interface Participant extends ParticipantBase {
   status?: AgentStatus;
   memory_changed_at?: string;
+  services_changed_at?: string;
 }
 
 // --- Self-hosted devices (a registered machine that can run agents) ---

@@ -275,6 +275,33 @@ router.get(
   }),
 );
 
+// The agent's managed services (service_* tools: dev servers, watchers), as last reported by
+// its runner — the profile panel's Services section. On-demand like memory; live updates are
+// signalled by agent_services_changed broadcasts.
+router.get(
+  "/api/agents/:id/services",
+  wrap(async (req, res) => {
+    const { agent } = await requireAgent(req);
+    const { services, updatedAt } = await db.getAgentServices(agent.id);
+    res.json({ services, updatedAt });
+  }),
+);
+
+// Stop one of the agent's managed services (the profile panel's stop button). Forwards a
+// service_stop frame to the connected runner; the runner kills the process group and reports
+// the fresh list (which lands as an agent_services_changed broadcast).
+router.post(
+  "/api/agents/:id/services/:name/stop",
+  wrap(async (req, res) => {
+    const { agent } = await requireAgent(req);
+    const name = String(req.params.name ?? "");
+    if (!runners.stopService(agent.id, name)) {
+      throw new ApiError(409, "agent is not connected — nothing to stop right now");
+    }
+    res.json({ ok: true });
+  }),
+);
+
 // Activity feed history for an sdk agent: persisted SDK stream events, oldest-first within the
 // returned page. Live updates ride the app WS as `agent_event` broadcasts.
 router.get(

@@ -118,6 +118,14 @@ export interface AgentMemoryChangedEvent {
   agentId: string;
 }
 
+// An agent's managed services (service_* tools: dev servers, watchers) changed. Like memory,
+// content doesn't ride in the broadcast: an open profile panel refetches
+// GET /api/agents/:id/services.
+export interface AgentServicesChangedEvent {
+  type: "agent_services_changed";
+  agentId: string;
+}
+
 // An always-ask agent is requesting confirmation for a sensitive tool call.
 export interface ToolConfirmationRequestEvent {
   type: "tool_confirmation_request";
@@ -178,6 +186,7 @@ export type ServerEvent =
   | AgentQueuedEvent
   | AgentContextEvent
   | AgentMemoryChangedEvent
+  | AgentServicesChangedEvent
   | ToolConfirmationRequestEvent
   | ToolConfirmationResolvedEvent
   | ScheduleChangedEvent

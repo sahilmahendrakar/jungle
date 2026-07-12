@@ -1,5 +1,5 @@
 import type pg from "pg";
-import type { ParticipantBase, Kind } from "@jungle/shared";
+import type { ParticipantBase, Kind, AgentServiceInfo } from "@jungle/shared";
 import { pool } from "./pool";
 
 // A participant row as stored: the public shape (in @jungle/shared) plus the server-only runner
@@ -120,6 +120,38 @@ export async function getAgentMemory(
     [id],
   );
   return rows[0] ?? null;
+}
+
+// Persist the managed-services snapshot an agent's runner reported (`services` frame).
+// Empty list -> null, so "never had services" and "all gone" look the same.
+export async function updateAgentServices(
+  id: string,
+  services: AgentServiceInfo[],
+): Promise<void> {
+  await pool.query(
+    `update participants set runner_services = $1, runner_services_updated_at = now()
+      where id = $2 and kind = 'agent'`,
+    [services.length ? JSON.stringify(services) : null, id],
+  );
+}
+
+// The agent's stored services snapshot, for GET /api/agents/:id/services (on-demand like
+// memory — kept out of participant list payloads).
+export async function getAgentServices(
+  id: string,
+): Promise<{ services: AgentServiceInfo[]; updatedAt: string | null }> {
+  const { rows } = await pool.query<{
+    runner_services: AgentServiceInfo[] | null;
+    runner_services_updated_at: string | null;
+  }>(
+    `select runner_services, runner_services_updated_at
+       from participants where id = $1 and kind = 'agent'`,
+    [id],
+  );
+  return {
+    services: rows[0]?.runner_services ?? [],
+    updatedAt: rows[0]?.runner_services_updated_at ?? null,
+  };
 }
 
 // Every workspace membership for a Firebase Auth uid (one participant row per workspace joined),

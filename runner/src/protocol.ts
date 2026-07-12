@@ -151,6 +151,29 @@ export interface MemoryFrame {
   content: string;
 }
 
+// A long-lived process the RUNNER manages on the agent's machine (the service_* agent tools):
+// dev servers, file watchers, tunnels. Owned by the always-on runner process — NOT the per-turn
+// CLI subprocess — so it survives turn boundaries (a Bash run_in_background task dies when the
+// turn's CLI exits, and its orphaned record breaks the next session's MCP mount; services exist
+// to make that pattern unnecessary). Registry + logs live in the runner's state dir.
+export interface AgentServiceInfo {
+  name: string; // unique per agent, kebab-case
+  command: string; // the shell command line the service runs
+  cwd?: string; // working directory (defaults to the agent workspace)
+  status: "running" | "exited";
+  pid?: number; // process-group leader while running
+  startedAt: string; // ISO
+  exitedAt?: string; // ISO, exited only
+  exitCode?: number | null; // exited only; null = killed by signal
+}
+
+// Runner -> backend: the full service list, sent after configure and on every change
+// (start/stop/exit). Snapshot semantics — the backend replaces, never merges.
+export interface ServicesFrame {
+  type: "services";
+  services: AgentServiceInfo[];
+}
+
 export interface FatalFrame {
   type: "fatal";
   error: string;
@@ -171,6 +194,7 @@ export type RunnerToBackend =
   | TurnDoneFrame
   | ContextUsageFrame
   | MemoryFrame
+  | ServicesFrame
   | FatalFrame;
 
 // ---- Backend -> runner ----
@@ -344,6 +368,14 @@ export interface IntegrationCredentialsFrame {
   accessToken: string;
 }
 
+// Backend -> runner: stop one of the agent's managed services by name (the profile panel's
+// stop button). The runner kills the service's process group and reports the new list via a
+// ServicesFrame. Unknown names are a no-op (the frame is advisory, not correlated).
+export interface ServiceStopFrame {
+  type: "service_stop";
+  name: string;
+}
+
 export type BackendToRunner =
   | ConfigureFrame
   | EnqueueFrame
@@ -361,4 +393,5 @@ export type BackendToRunner =
   | ConfirmResultFrame
   | GitCredentialsFrame
   | GmailCredentialsFrame
-  | IntegrationCredentialsFrame;
+  | IntegrationCredentialsFrame
+  | ServiceStopFrame;
