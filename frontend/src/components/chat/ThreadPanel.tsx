@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, Hash, MessagesSquare, SendHorizonal, X } from "lucide-react";
 import type { Channel, Message, Participant, UnreadThread } from "../../api";
 import { fmtTime } from "../../lib/chat";
 import { Markdown } from "../../Markdown";
 import { AgentBadge, AttachmentList, EmptyState, PersonAvatar } from "./panels";
+import { useMentionAutocomplete, MentionPopup } from "./mentionAutocomplete";
 import { DeliverableChips } from "./deliverableCards";
 import { MessageTurnChips } from "./TurnChips";
 import type { QueuedTurn, TurnChipData } from "../../ws/useLiveTurns";
@@ -99,6 +100,9 @@ export function ThreadPanel({
   rootQueued,
   personById,
   onOpenTurn,
+  people,
+  members,
+  participantId,
 }: {
   threadRootId: string | null;
   threadRoot: Message | null;
@@ -117,15 +121,24 @@ export function ThreadPanel({
   rootQueued: QueuedTurn[];
   personById: (id: string) => Participant | undefined;
   onOpenTurn: (turn: TurnChipData) => void;
+  // @-mention autocomplete candidates (same set the main composer uses).
+  people: Participant[];
+  members: Participant[];
+  participantId: string | null;
 }) {
   const [threadDraft, setThreadDraft] = useState("");
   const [alsoToChannel, setAlsoToChannel] = useState(false);
+  const taRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const { mention, candidates, index, setIndex, syncMention, acceptMention, clearMention, handleKey } =
+    useMentionAutocomplete({ people, members, participantId, draft: threadDraft, setDraft: setThreadDraft, taRef });
 
   // Reset the composer whenever the open thread changes (or the panel switches to the list).
   useEffect(() => {
     setThreadDraft("");
     setAlsoToChannel(false);
-  }, [threadRootId]);
+    clearMention();
+  }, [threadRootId, clearMention]);
 
   function send() {
     const body = threadDraft.trim();
@@ -133,6 +146,7 @@ export function ThreadPanel({
     if (!onSendReply(body, alsoToChannel)) return;
     setThreadDraft("");
     setAlsoToChannel(false);
+    clearMention();
   }
 
   return (
@@ -250,13 +264,31 @@ export function ThreadPanel({
 
           {/* Thread composer */}
           <div className="shrink-0 px-3 pb-3 pt-1">
-            <div className="rounded-xl border bg-card p-2 shadow-sm focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/20">
+            <div className="relative rounded-xl border bg-card p-2 shadow-sm focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/20">
+              {/* @-mention autocomplete */}
+              {mention && candidates.length > 0 && (
+                <MentionPopup
+                  candidates={candidates}
+                  index={index}
+                  onSelect={acceptMention}
+                  onHover={setIndex}
+                />
+              )}
               <div className="flex items-end gap-2">
                 <Textarea
+                  ref={taRef}
                   data-testid="thread-composer-input"
                   value={threadDraft}
-                  onChange={(e) => setThreadDraft(e.target.value)}
+                  onChange={(e) => {
+                    setThreadDraft(e.target.value);
+                    syncMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
+                  }}
+                  onSelect={(e) => {
+                    const t = e.target as HTMLTextAreaElement;
+                    syncMention(t.value, t.selectionStart ?? 0);
+                  }}
                   onKeyDown={(e) => {
+                    if (handleKey(e)) return;
                     if (e.key === "Enter" && !e.shiftKey) {
                       e.preventDefault();
                       send();
