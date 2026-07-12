@@ -1341,6 +1341,9 @@ export function App({
               rootQueued={(threadRootId && queuedByMessage.get(threadRootId)) || []}
               personById={(id) => peopleById.get(id)}
               onOpenTurn={openLiveTurn}
+              people={people}
+              members={members}
+              participantId={participantId}
             />
           )}
 
