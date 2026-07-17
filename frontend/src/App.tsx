@@ -1251,6 +1251,7 @@ export function App({
           participantId={participantId}
           onSend={postMessage}
           onNotice={setNotice}
+          onOpenProfile={openProfilePanel}
         />
       </main>
       )}

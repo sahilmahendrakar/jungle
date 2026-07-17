@@ -8,12 +8,13 @@ import {
   type PendingAttachment,
 } from "../../lib/chat";
 import { useMentionAutocomplete, MentionPopup } from "./mentionAutocomplete";
+import { ComposerInput } from "./ComposerInput";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
-// The main channel composer: @-mention autocomplete, upload-first attachments, and an auto-growing
-// textarea. Owns its own draft / pending-attachments state; mention autocomplete lives in the shared
+// The main channel composer: @-mention autocomplete, mention badges in the input (same component
+// as chat history via ComposerInput), upload-first attachments, and an auto-growing textarea.
+// Owns its own draft / pending-attachments state; mention autocomplete lives in the shared
 // useMentionAutocomplete hook (shared with the thread composer). The parent only supplies the data
 // needed for mention candidates and an `onSend(body, attachmentIds)` that performs the actual WS
 // post and returns whether it was accepted (so the composer clears only on success).
@@ -25,6 +26,7 @@ export function Composer({
   participantId,
   onSend,
   onNotice,
+  onOpenProfile,
 }: {
   headerTitle: string | null;
   isDm: boolean;
@@ -33,6 +35,7 @@ export function Composer({
   participantId: string | null;
   onSend: (body: string, attachmentIds: string[]) => boolean;
   onNotice: (msg: string) => void;
+  onOpenProfile?: (id: string) => void;
 }) {
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState<PendingAttachment[]>([]);
@@ -203,8 +206,10 @@ export function Composer({
           >
             <Paperclip className="size-4" />
           </Button>
-          <Textarea
-            ref={taRef}
+          <ComposerInput
+            taRef={taRef}
+            people={people}
+            onOpenProfile={onOpenProfile}
             data-testid="composer-input"
             value={draft}
             onChange={(e) => {
@@ -234,7 +239,6 @@ export function Composer({
                 ? `Message ${isDm ? headerTitle : "#" + headerTitle}`
                 : "Select or create a channel"
             }
-            className="max-h-40 min-h-9 resize-none overflow-y-auto border-0 bg-transparent px-2 py-1.5 shadow-none focus-visible:ring-0"
           />
           <Button
             data-testid="send-button"
