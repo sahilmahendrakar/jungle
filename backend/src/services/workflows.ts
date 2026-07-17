@@ -423,6 +423,241 @@ export async function workflowPromptBlocks(agentId: string): Promise<string[]> {
   return blocks;
 }
 
+// --- Architect: the builder agent + the workflow_* tool hooks (runner protocol) ---
+
+const ARCHITECT_HANDLE = "architect";
+
+const ARCHITECT_PERSONA =
+  `You are the workspace's workflow Architect. Your job: turn what someone describes in plain ` +
+  `words into a small, dead-simple team of agents — a WORKFLOW — using your workflow_* tools. ` +
+  `Principles: fewest agents that can do the job (1 is great, 2–4 typical); a short prose ` +
+  `playbook (who does what, who reports, how a run ends); prefer templates as starting points ` +
+  `(workflow_list_templates). Flow: create or reuse a draft (workflow_draft_create), shape it ` +
+  `with workflow_draft_set after each answer the user gives you — they can literally watch the ` +
+  `draft update on the Workflows page — and only call workflow_finalize when the user clearly ` +
+  `says go. Finalize creates real agents and a home channel, so never do it unasked. You can ` +
+  `bind the user's EXISTING agents to seats via participant_handle. Ask at most one or two ` +
+  `crisp questions at a time; propose defaults instead of interrogating. After finalizing, tell ` +
+  `them how it starts (trigger), where runs happen (the home channel), and that they can hit ` +
+  `Run now to try it immediately.`;
+
+// Find-or-create the workspace's Architect agent (a normal runner-backed agent; lazily
+// provisioned the first time someone opens the builder).
+export async function ensureArchitect(workspaceId: string): Promise<db.Participant> {
+  const existing = await db.getParticipantByHandle(workspaceId, ARCHITECT_HANDLE);
+  if (existing) return existing;
+  const runnerToken = randomBytes(32).toString("hex");
+  const participant = await db.withTransaction(async (client) => {
+    const { count, cap } = await db.agentCountAndCap(client, workspaceId);
+    if (count >= cap) throw new ApiError(409, `this workspace has reached its agent limit (${cap})`);
+    return db.createParticipant(
+      {
+        kind: "agent",
+        workspaceId,
+        handle: ARCHITECT_HANDLE,
+        displayName: "Architect",
+        runtime: "sdk",
+        runnerToken,
+        model: null,
+        mode: "default",
+        runnerProvider: "fly",
+        persona: ARCHITECT_PERSONA,
+      },
+      client,
+    );
+  });
+  void (async () => {
+    try {
+      await provisionerFor(participant).create({ id: participant.id, handle: ARCHITECT_HANDLE, runnerToken });
+      await provisionerFor(participant).start(participant.id);
+      runners.noteProvisionerStart(participant.id);
+    } catch (e) {
+      console.error("provision architect:", e);
+    }
+  })();
+  return participant;
+}
+
+// Kick the Architect when someone opens the builder: a self-contained turn telling it which
+// draft to shape and to greet the user in their DM. Same dispatch tail as every other turn.
+export async function kickoffArchitect(
+  architect: db.Participant,
+  user: db.Participant,
+  draft: db.WorkflowRow,
+  dmChannelId: string,
+): Promise<void> {
+  const now = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  const input =
+    `[Jungle turn] BUILDER opened by @${user.handle} · now: ${now}\n` +
+    `They want to build a workflow. Work with draft ${draft.id}` +
+    (draft.template_id
+      ? ` (pre-filled from the "${draft.template_id}" template — confirm the plan and tailor it rather than starting from scratch).`
+      : ` (blank).`) +
+    ` Greet them in this DM: one short message — what the draft is set up to do (workflow_draft_get ` +
+    `to see it) and the one or two questions that matter most (repo? which inbox? bind existing ` +
+    `agents?). Shape the draft with workflow_draft_set as they answer — they can watch it update ` +
+    `on the Workflows page — and call workflow_finalize only when they say go.`;
+  const agent = await db.getAgentRow(architect.id);
+  if (!agent) return;
+  await db.enqueueInboxItem(agent.id, input, undefined, {
+    budget: DEFAULT_CASCADE_BUDGET,
+    channelId: dmChannelId,
+    threadRootId: null,
+  });
+  await runners.drain(agent.id);
+  if (!runners.isConnected(agent.id)) {
+    try {
+      await provisionerFor(agent).start(agent.id);
+      runners.noteProvisionerStart(agent.id);
+    } catch (e) {
+      console.error("wake architect:", e);
+    }
+  }
+}
+
+// Rendered draft for tool results — what the agent reads back after each edit.
+function renderDraft(wf: db.WorkflowRow, handlesById: Map<string, string>): string {
+  const trig = wf.trigger;
+  const trigText =
+    trig.type === "schedule"
+      ? `schedule (cron ${trig.cron} in ${trig.timezone})`
+      : trig.type === "channel_message"
+        ? "channel message (@mention the first seat in the home channel)"
+        : "manual (Run now)";
+  const roster = wf.roster
+    .map((r, i) => {
+      const bound = r.participant_id ? ` -> @${handlesById.get(r.participant_id) ?? "?"}` : ` (new @${r.handle_seed})`;
+      return `  ${i + 1}. ${r.role}${i === 0 ? " [intake — goes first]" : ""}${bound}: ${r.duties || "(no duties yet)"}${r.integrations.length ? ` [wants: ${r.integrations.join(", ")}]` : ""}`;
+    })
+    .join("\n");
+  return (
+    `Draft ${wf.id} — “${wf.name}” (${wf.status})\n` +
+    `Trigger: ${trigText}\n` +
+    `Team:\n${roster || "  (empty)"}\n` +
+    `Playbook: ${wf.playbook || "(empty)"}`
+  );
+}
+
+async function draftHandles(wf: db.WorkflowRow): Promise<Map<string, string>> {
+  const m = new Map<string, string>();
+  for (const r of wf.roster) {
+    if (!r.participant_id) continue;
+    const p = await db.getParticipant(r.participant_id);
+    if (p) m.set(p.id, p.handle);
+  }
+  return m;
+}
+
+type WorkflowToolResult = { ok: boolean; error?: string; text?: string; draftId?: string; workflowId?: string };
+
+export async function toolListTemplates(): Promise<WorkflowToolResult> {
+  const { WORKFLOW_TEMPLATES } = await import("@jungle/shared");
+  const text = WORKFLOW_TEMPLATES.map(
+    (t) =>
+      `${t.id}: ${t.name} — ${t.description} (${t.roster.length} agent${t.roster.length === 1 ? "" : "s"}; trigger: ${t.trigger.type})`,
+  ).join("\n");
+  return { ok: true, text };
+}
+
+export async function toolDraftCreate(
+  agent: db.AgentRow,
+  input: { templateId?: string; name?: string },
+): Promise<WorkflowToolResult> {
+  try {
+    const row = await createDraft({
+      workspaceId: agent.workspace_id,
+      createdBy: agent.id,
+      templateId: input.templateId,
+      name: input.name,
+    });
+    return { ok: true, draftId: row.id, text: renderDraft(row, await draftHandles(row)) };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+async function requireDraftInWorkspace(agent: db.AgentRow, draftId: string): Promise<db.WorkflowRow> {
+  const wf = await db.getWorkflow(String(draftId ?? ""));
+  if (!wf || wf.workspace_id !== agent.workspace_id) throw new ApiError(404, "no such workflow in this workspace");
+  return wf;
+}
+
+export async function toolDraftGet(agent: db.AgentRow, input: { draftId: string }): Promise<WorkflowToolResult> {
+  try {
+    const wf = await requireDraftInWorkspace(agent, input.draftId);
+    return { ok: true, draftId: wf.id, text: renderDraft(wf, await draftHandles(wf)) };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+export async function toolDraftSet(
+  agent: db.AgentRow,
+  input: { draftId: string } & import("@jungle/shared").WorkflowDraftInput,
+): Promise<WorkflowToolResult> {
+  try {
+    const wf = await requireDraftInWorkspace(agent, input.draftId);
+    if (wf.status !== "draft") return { ok: false, error: "that workflow is already live — only drafts can be reshaped (playbook edits: the human can do those from the workflow page)" };
+    const patch: Parameters<typeof db.updateWorkflow>[1] = {};
+    if (input.name !== undefined) patch.name = validateName(input.name);
+    if (input.description !== undefined) patch.description = String(input.description).slice(0, 500);
+    if (input.emoji !== undefined) patch.emoji = input.emoji ? String(input.emoji).slice(0, 8) : null;
+    if (input.playbook !== undefined) patch.playbook = validatePlaybook(input.playbook);
+    if (input.trigger !== undefined) patch.trigger = validateTrigger(input.trigger);
+    if (input.roster !== undefined) {
+      // Resolve participant_handle -> participant_id (agents think in handles).
+      const roster: WorkflowRole[] = [];
+      for (const raw of input.roster) {
+        let participantId: string | undefined;
+        if (raw.participant_handle) {
+          const p = await db.getParticipantByHandle(agent.workspace_id, raw.participant_handle.replace(/^@/, ""));
+          if (!p || p.kind !== "agent") throw new ApiError(400, `no agent named @${raw.participant_handle} in this workspace`);
+          participantId = p.id;
+        }
+        roster.push({
+          role: String(raw.role ?? ""),
+          handle_seed: String(raw.handle_seed ?? ""),
+          duties: String(raw.duties ?? ""),
+          integrations: raw.integrations ?? [],
+          ...(participantId ? { participant_id: participantId } : {}),
+        });
+      }
+      patch.roster = validateRoster(roster);
+    }
+    const updated = (await db.updateWorkflow(wf.id, patch)) ?? wf;
+    broadcastWorkspace(wf.workspace_id, { type: "workflow_changed", workflowId: wf.id, action: "updated" });
+    return { ok: true, draftId: wf.id, text: renderDraft(updated, await draftHandles(updated)) };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
+export async function toolFinalize(
+  agent: db.AgentRow,
+  input: { draftId: string; homeChannel?: string },
+): Promise<WorkflowToolResult> {
+  try {
+    const wf = await requireDraftInWorkspace(agent, input.draftId);
+    let homeChannelId: string | undefined;
+    if (input.homeChannel) {
+      const ch = await db.getChannelByNameForMember(input.homeChannel.replace(/^#/, ""), agent.id);
+      if (!ch) return { ok: false, error: `you are not a member of channel ${input.homeChannel} (or it doesn't exist)` };
+      homeChannelId = ch.id;
+    }
+    // Actor for channel membership: the human who owns the draft when there is one (builder
+    // flow sets created_by to the human), else the workflow's creator agent.
+    const creator = wf.created_by ? await db.getParticipant(wf.created_by) : null;
+    const finalized = await finalizeWorkflow(wf, creator ?? (agent as unknown as db.Participant), { homeChannelId });
+    return {
+      ok: true,
+      workflowId: finalized.id,
+      text: renderDraft(finalized, await draftHandles(finalized)),
+    };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+}
+
 // --- Stall / quiescence sweep ---
 //
 // One rule each, run by a 60s ticker over live runs:

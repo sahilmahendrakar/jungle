@@ -233,17 +233,21 @@ export function Sidebar({
               icon={<Users className="size-4 opacity-70" />}
               label="Team"
             />
-            {/* Threads: my followed threads with unread replies (participation-gated). */}
-            <NavItem
-              testId="threads-nav"
-              active={threadsListOpen}
-              onClick={onOpenThreads}
-              icon={<MessagesSquare className="size-4 opacity-70" />}
-              label="Threads"
-              unread={totalThreadUnread > 0}
-              badgeCount={totalThreadUnread}
-              badgeMention={totalThreadUnread > 0}
-            />
+            {/* Threads moved out of the nav (2026-07-17): unread thread replies surface on Home
+                instead — one attention surface, not two. The Threads view itself still exists
+                (opened from Home's row); these props stay wired for it. */}
+            {threadsListOpen && (
+              <NavItem
+                testId="threads-nav"
+                active
+                onClick={onOpenThreads}
+                icon={<MessagesSquare className="size-4 opacity-70" />}
+                label="Threads"
+                unread={totalThreadUnread > 0}
+                badgeCount={totalThreadUnread}
+                badgeMention={totalThreadUnread > 0}
+              />
+            )}
 
             <div className="h-3" />
             {/* Channels */}

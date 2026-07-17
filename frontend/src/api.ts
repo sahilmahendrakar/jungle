@@ -873,6 +873,19 @@ export function updateWorkflow(
   });
 }
 
+export function openWorkflowBuilder(body: { templateId?: string } = {}): Promise<{
+  architectId: string;
+  dmChannelId: string;
+  draftId: string;
+}> {
+  return request(`/api/workflows/builder`, {
+    json: body,
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to open the builder",
+  });
+}
+
 export function finalizeWorkflow(id: string, body: { homeChannelId?: string } = {}): Promise<Workflow> {
   return request<Workflow>(`/api/workflows/${id}/finalize`, {
     json: body,

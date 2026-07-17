@@ -68,6 +68,27 @@ router.post(
   }),
 );
 
+// Open the conversational builder: ensure the workspace's Architect agent exists, create a
+// draft owned by the requester (blank or from a template), open their DM, and kick the
+// Architect so it speaks first. The "builder UI" is deliberately just that DM — the draft's
+// detail page (and the Workflows list) live-update as the Architect shapes it.
+router.post(
+  "/api/workflows/builder",
+  wrap(async (req, res) => {
+    const me = await requireRequester(req);
+    const architect = await workflows.ensureArchitect(me.workspace_id);
+    const draft = await workflows.createDraft({
+      workspaceId: me.workspace_id,
+      createdBy: me.id,
+      templateId: req.body?.templateId ? String(req.body.templateId) : undefined,
+      name: req.body?.name ? String(req.body.name) : undefined,
+    });
+    const dmId = await db.findOrCreateDm(me.id, architect.id);
+    await workflows.kickoffArchitect(architect, me, draft, dmId);
+    res.status(201).json({ architectId: architect.id, dmChannelId: dmId, draftId: draft.id });
+  }),
+);
+
 // Finalize a draft: bind/create the roster agents, create/adopt the home channel, create the
 // backing schedule for cron triggers, set active. Body: { homeChannelId? } to adopt an existing
 // channel; roster binding (participant_id per role) is edited via PATCH before finalizing.

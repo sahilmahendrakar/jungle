@@ -57,7 +57,7 @@ async function seed() {
   return { ws, human };
 }
 
-function startFakeRunner(token, onEnqueue) {
+function startFakeRunner(token, onEnqueue, onFrame) {
   const url = `ws://localhost:${PORT}/api/runner?token=${encodeURIComponent(token)}`;
   const sock = new WebSocket(url);
   const sessionId = `fake-${Date.now().toString(36)}`;
@@ -66,6 +66,7 @@ function startFakeRunner(token, onEnqueue) {
   sock.on("open", () => send({ type: "hello", agentId: "x", sessionId, protocol: 1 }));
   sock.on("message", (raw) => {
     const f = JSON.parse(raw.toString());
+    onFrame?.(f);
     if (f.type === "configure") {
       send({ type: "state", state: "idle", sessionId, model: f.model, permissionMode: f.permissionMode });
     }
@@ -77,7 +78,7 @@ function startFakeRunner(token, onEnqueue) {
       onEnqueue?.({ items: f.items, inboxIds, turnId, send });
     }
   });
-  return { sock, close: () => sock.close() };
+  return { sock, send, close: () => sock.close() };
 }
 
 async function req(method, path, body) {
@@ -293,6 +294,45 @@ async function main() {
   });
   ok("channel-triggered run completed", done2.summary === "brief sent to the creator.", done2.summary);
 
+  // ---- 6. workflow_* tool round-trip (the Architect's draft/finalize protocol) ----
+  console.log("\nworkflow tools:");
+  const toolResults = new Map();
+  const runner3 = startFakeRunner(
+    agentRow.runner_token,
+    null,
+    (f) => f.type === "workflow_tool_result" && toolResults.set(f.id, f.result),
+  );
+  await sleep(800);
+  const toolCall = async (type, id, input) => {
+    runner3.send({ type, id, input });
+    return waitFor(`${type} result`, async () => toolResults.get(id));
+  };
+
+  const tmpl = await toolCall("workflow_list_templates", "t1", {});
+  ok("templates listed via tool", tmpl.ok && /support-triage/.test(tmpl.text ?? ""));
+
+  const created = await toolCall("workflow_draft_create", "t2", { name: "Tool draft" });
+  ok("draft created via tool", created.ok && !!created.draftId, JSON.stringify(created));
+
+  const set = await toolCall("workflow_draft_set", "t3", {
+    draftId: created.draftId,
+    trigger: { type: "manual" },
+    roster: [
+      { role: "Solo", handle_seed: "solo", duties: "Do the thing." },
+      { role: "Helper", handle_seed: "helper", duties: "Help.", participant_handle: `@${agentRow.handle}` },
+    ],
+    playbook: "Do the thing, then post Run complete.",
+  });
+  ok("draft shaped via tool (incl. binding existing agent by handle)", set.ok && /@daily/.test(set.text ?? ""), set.error ?? set.text);
+
+  const finTool = await toolCall("workflow_finalize", "t4", { draftId: created.draftId });
+  ok("finalized via tool", finTool.ok && !!finTool.workflowId, JSON.stringify(finTool));
+  const toolWf = (
+    await pool.query(`select status, home_channel_id from workflows where id = $1`, [created.draftId])
+  ).rows[0];
+  ok("tool-finalized workflow is active with a home channel", toolWf?.status === "active" && !!toolWf?.home_channel_id);
+
+  runner3.close();
   appWs.close();
   runner2.close();
   runner.close();

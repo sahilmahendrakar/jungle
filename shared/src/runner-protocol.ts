@@ -112,6 +112,65 @@ export interface ScheduleCancelFrame {
   input: { scheduleId: string };
 }
 
+// Workflow-builder tools (workflow_* on the jungle MCP server): how the Architect agent (and
+// any agent, though only the Architect is prompted to) creates and shapes workflow DRAFTS and
+// finalizes them into live teams. Same request/result correlation as the schedule_* family.
+// Roster entries use participant_handle (agents think in handles); the backend resolves ids.
+
+export interface WorkflowRoleInput {
+  role: string;
+  handle_seed: string;
+  duties: string;
+  integrations?: string[];
+  participant_handle?: string; // bind an EXISTING agent to this seat
+}
+
+export interface WorkflowDraftInput {
+  name?: string;
+  description?: string;
+  emoji?: string;
+  trigger?: { type: "schedule"; cron: string; timezone: string } | { type: "manual" } | { type: "channel_message" };
+  roster?: WorkflowRoleInput[];
+  playbook?: string;
+}
+
+export interface WorkflowListTemplatesFrame {
+  type: "workflow_list_templates";
+  id: string;
+  input: Record<string, never>;
+}
+
+export interface WorkflowDraftCreateFrame {
+  type: "workflow_draft_create";
+  id: string;
+  input: { templateId?: string; name?: string };
+}
+
+export interface WorkflowDraftGetFrame {
+  type: "workflow_draft_get";
+  id: string;
+  input: { draftId: string };
+}
+
+export interface WorkflowDraftSetFrame {
+  type: "workflow_draft_set";
+  id: string;
+  input: { draftId: string } & WorkflowDraftInput;
+}
+
+export interface WorkflowFinalizeFrame {
+  type: "workflow_finalize";
+  id: string;
+  input: { draftId: string; homeChannel?: string }; // homeChannel "#name" adopts an existing channel
+}
+
+export interface WorkflowToolResultFrame {
+  type: "workflow_tool_result";
+  id: string;
+  // text = a rendered view of the draft/templates/result the agent can read back verbatim.
+  result: { ok: boolean; error?: string; text?: string; draftId?: string; workflowId?: string };
+}
+
 export interface ConfirmRequestFrame {
   type: "confirm_request";
   id: string;
@@ -187,6 +246,11 @@ export type RunnerToBackend =
   | ScheduleCreateFrame
   | ScheduleListFrame
   | ScheduleCancelFrame
+  | WorkflowListTemplatesFrame
+  | WorkflowDraftCreateFrame
+  | WorkflowDraftGetFrame
+  | WorkflowDraftSetFrame
+  | WorkflowFinalizeFrame
   | ConfirmRequestFrame
   | TurnDoneFrame
   | ContextUsageFrame
@@ -387,6 +451,7 @@ export type BackendToRunner =
   | ScheduleCreateResultFrame
   | ScheduleListResultFrame
   | ScheduleCancelResultFrame
+  | WorkflowToolResultFrame
   | ConfirmResultFrame
   | GitCredentialsFrame
   | GmailCredentialsFrame

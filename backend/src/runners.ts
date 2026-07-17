@@ -115,6 +115,12 @@ export interface RunnerHooks {
     agent: { id: string; handle: string; workspace_id: string },
     input: { scheduleId?: string },
   ) => Promise<ScheduleCancelResult>;
+  // The workflow_* builder tools (drafts + finalize). Implemented by services/workflows.ts via
+  // the orchestrator's buildRunnerHooks, like the schedule_* family.
+  workflowTool: (
+    agent: db.AgentRow,
+    frame: { type: string; input: Record<string, unknown> },
+  ) => Promise<{ ok: boolean; error?: string; text?: string; draftId?: string; workflowId?: string }>;
   // Surface a tool-confirmation to humans and resolve when one decides. `agentId`+`id`
   // let the decision endpoint route the result back to the right runner.
   requestConfirm: (
@@ -1096,6 +1102,28 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
           }
         }
         send(conn, { type: "schedule_cancel_result", id: frame.id, result });
+        break;
+      }
+      case "workflow_list_templates":
+      case "workflow_draft_create":
+      case "workflow_draft_get":
+      case "workflow_draft_set":
+      case "workflow_finalize": {
+        const agent = await db.getAgentRow(agentId);
+        let result: { ok: boolean; error?: string; text?: string; draftId?: string; workflowId?: string };
+        if (!hooks || !agent) {
+          result = { ok: false, error: "backend not ready" };
+        } else {
+          try {
+            result = await hooks.workflowTool(agent, {
+              type: frame.type,
+              input: (frame.input ?? {}) as Record<string, unknown>,
+            });
+          } catch (e) {
+            result = { ok: false, error: String((e as Error).message ?? e) };
+          }
+        }
+        send(conn, { type: "workflow_tool_result", id: frame.id, result });
         break;
       }
       case "confirm_request": {

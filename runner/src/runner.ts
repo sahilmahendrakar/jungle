@@ -105,6 +105,12 @@ const SAFE_TOOLS = new Set([
   // min interval, prompt cap) and full human visibility/undo on the Scheduled page — a confirm
   // card would be noise, not safety.
   "mcp__jungle__schedule_create", "mcp__jungle__schedule_list", "mcp__jungle__schedule_cancel",
+  // Workflow builder tools: bounded jungle-app operations (drafts are inert; finalize is the
+  // Architect's explicit job, done on the user's say-so in conversation) with full visibility
+  // on the Workflows page. Same reasoning as the schedule tools.
+  "mcp__jungle__workflow_list_templates", "mcp__jungle__workflow_draft_create",
+  "mcp__jungle__workflow_draft_get", "mcp__jungle__workflow_draft_set",
+  "mcp__jungle__workflow_finalize",
 ]);
 
 // Gmail write tools: gated through the human confirmation card when the integration's
@@ -278,6 +284,10 @@ export class Runner {
   private pendingScheduleCreate = new Map<string, (r: ScheduleCreateResult) => void>();
   private pendingScheduleList = new Map<string, (r: ScheduleListResult) => void>();
   private pendingScheduleCancel = new Map<string, (r: ScheduleCancelResult) => void>();
+  private pendingWorkflowTool = new Map<
+    string,
+    (r: { ok: boolean; error?: string; text?: string; draftId?: string; workflowId?: string }) => void
+  >();
   private pendingConfirms = new Map<
     string,
     (r: { allow: boolean; message?: string; updatedInput?: Record<string, unknown> }) => void
@@ -430,6 +440,14 @@ export class Runner {
         const resolve = this.pendingScheduleCancel.get(frame.id);
         if (resolve) {
           this.pendingScheduleCancel.delete(frame.id);
+          resolve(frame.result);
+        }
+        break;
+      }
+      case "workflow_tool_result": {
+        const resolve = this.pendingWorkflowTool.get(frame.id);
+        if (resolve) {
+          this.pendingWorkflowTool.delete(frame.id);
           resolve(frame.result);
         }
         break;
@@ -683,6 +701,11 @@ export class Runner {
       "mcp__jungle__schedule_create",
       "mcp__jungle__schedule_list",
       "mcp__jungle__schedule_cancel",
+      "mcp__jungle__workflow_list_templates",
+      "mcp__jungle__workflow_draft_create",
+      "mcp__jungle__workflow_draft_get",
+      "mcp__jungle__workflow_draft_set",
+      "mcp__jungle__workflow_finalize",
       // Read-only service tools are auto-allowed; service_start/stop are NOT (they run
       // arbitrary commands / kill processes, so default mode shows a confirmation card).
       "mcp__jungle__service_status",
@@ -910,7 +933,30 @@ export class Runner {
       scheduleCreate: (id, input) => this.bridgeScheduleCreate(id, input),
       scheduleList: (id) => this.bridgeScheduleList(id),
       scheduleCancel: (id, input) => this.bridgeScheduleCancel(id, input),
+      workflowTool: (frameType, id, input) => this.bridgeWorkflowTool(frameType, id, input),
       services: this.servicesMgr,
+    });
+  }
+
+  // One bridge for the whole workflow_* family: the frame type varies, the correlation and
+  // result shape don't (all replies arrive as workflow_tool_result).
+  private bridgeWorkflowTool(
+    frameType: string,
+    id: string,
+    input: Record<string, unknown>,
+  ): Promise<{ ok: boolean; error?: string; text?: string; draftId?: string; workflowId?: string }> {
+    return new Promise((resolve) => {
+      this.pendingWorkflowTool.set(id, resolve);
+      const sent = this.conn.send({ type: frameType, id, input } as never);
+      if (!sent) {
+        this.pendingWorkflowTool.delete(id);
+        resolve({ ok: false, error: "backend unreachable" });
+      }
+      setTimeout(() => {
+        if (this.pendingWorkflowTool.delete(id)) {
+          resolve({ ok: false, error: "timed out waiting for backend" });
+        }
+      }, 60_000).unref?.();
     });
   }
 
