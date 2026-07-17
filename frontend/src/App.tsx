@@ -48,6 +48,7 @@ import { SearchDialog } from "./SearchDialog";
 import { navigate, usePath } from "./route";
 import { Home } from "./Home";
 import { Workflows } from "./Workflows";
+import { WorkflowDetail } from "./WorkflowDetail";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { DmActivityView } from "./components/chat/DmActivityView";
@@ -179,6 +180,7 @@ export function App({
   // Scheduled survive as deep links (their content is absorbed into Home and Workflows).
   const homeOpen = path === "/home";
   const workflowsOpen = path === "/workflows";
+  const workflowDetailId = path.startsWith("/workflows/") ? path.slice("/workflows/".length) : null;
   const approvalsOpen = path === "/approvals";
   const deliverablesOpen = path === "/deliverables";
   const agentsOpen = path === "/agents" || path === "/team";
@@ -187,6 +189,7 @@ export function App({
   const overlayViewOpen =
     homeOpen ||
     workflowsOpen ||
+    !!workflowDetailId ||
     scheduledOpen ||
     approvalsOpen ||
     deliverablesOpen ||
@@ -1052,7 +1055,7 @@ export function App({
         homeActive={homeOpen}
         homeBadge={confirms.length}
         onOpenWorkflows={() => navigate("/workflows")}
-        workflowsActive={workflowsOpen || scheduledOpen}
+        workflowsActive={workflowsOpen || scheduledOpen || !!workflowDetailId}
         onOpenTeam={() => navigate("/team")}
         teamActive={agentsOpen}
         onOpenEnvironments={() => navigate("/environments")}
@@ -1128,14 +1131,20 @@ export function App({
           sidebarOpen={sidebarOpen}
           onOpenDrawer={() => setDrawerOpen(true)}
           onExpandSidebar={() => setSidebarOpen(true)}
-          onOpenWorkflow={(w) => {
-            // Until the detail/builder pages land, a workflow's most useful "open" is its home
-            // channel (drafts don't have one yet — stay here).
-            if (w.home_channel_id) {
-              goToChat();
-              selectAndClose(w.home_channel_id);
-            }
+          onOpenWorkflow={(w) => navigate(`/workflows/${w.id}`)}
+        />
+      ) : workflowDetailId ? (
+        <WorkflowDetail
+          workflowId={workflowDetailId}
+          participants={others}
+          sidebarOpen={sidebarOpen}
+          onOpenDrawer={() => setDrawerOpen(true)}
+          onExpandSidebar={() => setSidebarOpen(true)}
+          onOpenAgent={(id) => {
+            goToChat();
+            openProfilePanel(id);
           }}
+          onOpenRunThread={(channelId, rootMessageId) => jumpToMessage(channelId, rootMessageId)}
         />
       ) : scheduledOpen ? (
         <Scheduled
