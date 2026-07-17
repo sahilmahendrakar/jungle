@@ -16,6 +16,7 @@ export * from "./google";
 export * from "./integrations";
 export * from "./connections";
 export * from "./schedules";
+export * from "./workflows";
 export * from "./deliverables";
 export * from "./turns";
 export * from "./push";

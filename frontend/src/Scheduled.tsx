@@ -110,11 +110,15 @@ export function Scheduled({
   sidebarOpen,
   onOpenDrawer,
   onExpandSidebar,
+  embedded = false,
 }: {
   workspaceId: string;
-  sidebarOpen: boolean;
-  onOpenDrawer: () => void;
-  onExpandSidebar: () => void;
+  sidebarOpen?: boolean;
+  onOpenDrawer?: () => void;
+  onExpandSidebar?: () => void;
+  // Render just the schedule list/filters/dialogs (no page chrome) — used by the Workflows page,
+  // which absorbed the old /scheduled destination.
+  embedded?: boolean;
 }) {
   const { getToken } = useAuth();
   const [schedules, setSchedules] = useState<Schedule[]>([]);
@@ -205,48 +209,61 @@ export function Scheduled({
     }
   }
 
+  const Tag: "div" | "main" = embedded ? "div" : "main";
   return (
-    <main className="flex min-w-0 flex-1 flex-col bg-background">
-      <header className="flex h-14 shrink-0 items-center gap-2.5 border-b px-3 md:px-5">
-        {/* Mobile hamburger: opens the off-canvas drawer. Hidden on md+. */}
-        <Button
-          variant="ghost"
-          size="icon"
-          data-testid="sidebar-toggle"
-          aria-label="Open menu"
-          onClick={onOpenDrawer}
-          className="-ml-1 size-9 shrink-0 text-muted-foreground md:hidden"
-        >
-          <PanelLeft className="size-5" />
-        </Button>
-        {!sidebarOpen && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                data-testid="sidebar-expand"
-                onClick={onExpandSidebar}
-                className="-ml-2 hidden size-8 shrink-0 text-muted-foreground md:inline-flex"
-              >
-                <PanelLeft className="size-4" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Open sidebar (⌘\)</TooltipContent>
-          </Tooltip>
-        )}
-        <CalendarClock className="size-5 text-muted-foreground" />
-        <h1 className="truncate text-base font-semibold">Scheduled</h1>
-        <div className="ml-auto">
-          <Button size="sm" data-testid="new-schedule" onClick={() => setEditing("new")}>
+    <Tag className={embedded ? undefined : "flex min-w-0 flex-1 flex-col bg-background"}>
+      {!embedded && (
+        <header className="flex h-14 shrink-0 items-center gap-2.5 border-b px-3 md:px-5">
+          {/* Mobile hamburger: opens the off-canvas drawer. Hidden on md+. */}
+          <Button
+            variant="ghost"
+            size="icon"
+            data-testid="sidebar-toggle"
+            aria-label="Open menu"
+            onClick={onOpenDrawer}
+            className="-ml-1 size-9 shrink-0 text-muted-foreground md:hidden"
+          >
+            <PanelLeft className="size-5" />
+          </Button>
+          {!sidebarOpen && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  data-testid="sidebar-expand"
+                  onClick={onExpandSidebar}
+                  className="-ml-2 hidden size-8 shrink-0 text-muted-foreground md:inline-flex"
+                >
+                  <PanelLeft className="size-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Open sidebar (⌘\)</TooltipContent>
+            </Tooltip>
+          )}
+          <CalendarClock className="size-5 text-muted-foreground" />
+          <h1 className="truncate text-base font-semibold">Scheduled</h1>
+          <div className="ml-auto">
+            <Button size="sm" data-testid="new-schedule" onClick={() => setEditing("new")}>
+              <Plus className="size-4" /> New schedule
+            </Button>
+          </div>
+        </header>
+      )}
+
+      <div className={embedded ? undefined : "min-h-0 flex-1 overflow-y-auto"}>
+        <div className={embedded ? undefined : "mx-auto w-full max-w-3xl px-4 py-6"}>
+        <div className="mb-4 flex flex-wrap items-center gap-1.5" data-testid="schedule-filter-bar">
+        {embedded && (
+          <Button
+            size="sm"
+            data-testid="new-schedule"
+            onClick={() => setEditing("new")}
+            className="order-last ml-auto h-7"
+          >
             <Plus className="size-4" /> New schedule
           </Button>
-        </div>
-      </header>
-
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto w-full max-w-3xl px-4 py-6">
-        <div className="mb-4 flex flex-wrap gap-1.5" data-testid="schedule-filter-bar">
+        )}
           {FILTERS.map(({ key, label }) => (
             <Button
               key={key}
@@ -392,7 +409,7 @@ export function Scheduled({
           await reload();
         }}
       />
-    </main>
+    </Tag>
   );
 }
 

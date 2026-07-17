@@ -144,6 +144,18 @@ export function useChatSocket(opts: {
           if (evt.channelId === selectedRef.current) setSelected(null);
           return;
         }
+        if (evt.type === "schedule_changed") {
+          // Coarse refetch signal for pages that render schedule lists (Home "Coming up", the
+          // Workflows page's embedded schedules). Same relay pattern as device_status_changed.
+          window.dispatchEvent(new CustomEvent("jungle:schedule-changed", { detail: evt }));
+          return;
+        }
+        if (evt.type === "workflow_changed" || evt.type === "workflow_run_changed") {
+          // Coarse refetch signal for the Workflows/Home pages (and later the builder's live
+          // draft preview — the Architect edits a draft, this event makes the preview refetch).
+          window.dispatchEvent(new CustomEvent("jungle:workflow-changed", { detail: evt }));
+          return;
+        }
         if (evt.type === "slack_link_changed") {
           // A channel's Slack mirror binding changed (linked/unlinked/errored). Relayed via a
           // window event so App updates the header badge for the open channel without threading a

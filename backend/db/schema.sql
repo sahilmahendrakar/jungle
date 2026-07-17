@@ -504,3 +504,45 @@ create table if not exists push_tokens (
   last_seen_at timestamptz not null default now()
 );
 create index if not exists push_tokens_uid_idx on push_tokens (firebase_uid);
+
+-- Workflows: a team of agents + a trigger + a prose playbook, observable as runs. Roster is
+-- jsonb (no members table); a run's transcript is derived (the thread under root_message_id +
+-- member turns whose agent_inbox.context carries workflowRunId). Cron triggers reuse the
+-- schedules ticker via schedules.workflow_id (added below). Kept in sync with
+-- migrations/026_workflows.sql.
+create table if not exists workflows (
+  id              uuid primary key default gen_random_uuid(),
+  workspace_id    uuid not null references workspaces(id) on delete cascade,
+  name            text not null,
+  description     text not null default '',
+  emoji           text,
+  status          text not null default 'draft' check (status in ('draft','active','paused')),
+  template_id     text,
+  home_channel_id uuid references channels(id) on delete set null,
+  trigger         jsonb not null default '{"type":"manual"}'::jsonb,
+  roster          jsonb not null default '[]'::jsonb,
+  playbook        text not null default '',
+  created_by      uuid references participants(id) on delete set null,
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now()
+);
+create index if not exists workflows_ws_idx on workflows (workspace_id);
+
+create table if not exists workflow_runs (
+  id              uuid primary key default gen_random_uuid(),
+  workflow_id     uuid not null references workflows(id) on delete cascade,
+  workspace_id    uuid not null references workspaces(id) on delete cascade,
+  trigger         text not null check (trigger in ('schedule','manual','channel_message')),
+  status          text not null default 'running' check (status in ('running','done','stalled','stopped')),
+  root_message_id uuid references messages(id) on delete set null,
+  summary         text,
+  started_at      timestamptz not null default now(),
+  ended_at        timestamptz
+);
+create index if not exists workflow_runs_wf_idx on workflow_runs (workflow_id, started_at desc);
+create index if not exists workflow_runs_live_idx on workflow_runs (status)
+  where status in ('running','stalled');
+
+-- Backing rows for workflow schedule triggers (hidden from schedule lists/caps; the ticker
+-- fires workflow dispatch instead of a normal agent turn).
+alter table schedules add column if not exists workflow_id uuid references workflows(id) on delete cascade;

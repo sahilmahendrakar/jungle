@@ -27,7 +27,7 @@ function dayLabel(iso: string): string {
   return d.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" });
 }
 
-function DeliverableRow({
+export function DeliverableRow({
   d,
   onJumpToMessage,
 }: {

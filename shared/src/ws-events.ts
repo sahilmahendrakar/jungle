@@ -155,6 +155,23 @@ export interface ScheduleChangedEvent {
   action: "created" | "updated" | "deleted";
 }
 
+// A workflow in the recipient's workspace changed (created/updated/deleted — including draft
+// edits by the Architect, which is what makes the builder's live preview work). Coarse by
+// design, like schedule_changed: clients refetch the workflow.
+export interface WorkflowChangedEvent {
+  type: "workflow_changed";
+  workflowId: string;
+  action: "created" | "updated" | "deleted";
+}
+
+// A workflow run started or changed status (done/stalled/stopped). Clients refetch the run
+// (or the workflow's run list).
+export interface WorkflowRunChangedEvent {
+  type: "workflow_run_changed";
+  workflowId: string;
+  runId: string;
+}
+
 // An agent shipped a work artifact (a PR opened, a doc written, …) — extracted from the links in
 // its message at send time. Carries the full row so the Deliverables feed appends without a refetch.
 export interface DeliverableCreatedEvent {
@@ -190,6 +207,8 @@ export type ServerEvent =
   | ToolConfirmationRequestEvent
   | ToolConfirmationResolvedEvent
   | ScheduleChangedEvent
+  | WorkflowChangedEvent
+  | WorkflowRunChangedEvent
   | DeliverableCreatedEvent
   | SlackLinkChangedEvent;
 

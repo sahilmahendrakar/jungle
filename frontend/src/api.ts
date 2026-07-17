@@ -23,6 +23,11 @@ import type {
   SlackChannelInfo,
   SlackChannelLink,
   AgentServiceInfo,
+  Workflow,
+  WorkflowRole,
+  WorkflowRun,
+  WorkflowTrigger,
+  WorkflowTemplate,
 } from "@jungle/shared";
 export {
   INTEGRATION_TYPES,
@@ -39,6 +44,7 @@ export type { SlackStatus, SlackChannelInfo, SlackChannelLink };
 export type { Participant, Attachment, UnreadThread, AgentEvent, AgentStatus, AgentIntegration, RunnerHost };
 export type { AgentServiceInfo };
 export type { Schedule, Deliverable, DeliverableKind, SearchResult };
+export type { Workflow, WorkflowRole, WorkflowRun, WorkflowTrigger, WorkflowTemplate };
 export type { Me, GoogleProfile, Workspace, Membership, InviteInfo };
 // A message as delivered to the client (attachments carry signed download urls).
 export type Message = WireMessage;
@@ -800,6 +806,79 @@ export function deleteSchedule(id: string): Promise<{ ok: boolean }> {
     auth: true,
     devAuth: true,
     errorMessage: "failed to delete schedule",
+  });
+}
+
+// --- Workflows (teams of agents on a trigger; see shared/src/workflows.ts) ---
+
+export function listWorkflows(): Promise<Workflow[]> {
+  return request<{ workflows: Workflow[] }>(`/api/workflows`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load workflows",
+  }).then((r) => r.workflows);
+}
+
+export function getWorkflow(id: string): Promise<Workflow> {
+  return request<Workflow>(`/api/workflows/${id}`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load workflow",
+  });
+}
+
+export function listWorkflowRuns(id: string): Promise<WorkflowRun[]> {
+  return request<{ runs: WorkflowRun[] }>(`/api/workflows/${id}/runs`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load runs",
+  }).then((r) => r.runs);
+}
+
+export function listWorkflowTemplates(): Promise<WorkflowTemplate[]> {
+  return request<{ templates: WorkflowTemplate[] }>(`/api/workflow-templates`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load templates",
+  }).then((r) => r.templates);
+}
+
+export function createWorkflowDraft(body: { templateId?: string; name?: string }): Promise<Workflow> {
+  return request<Workflow>(`/api/workflows`, {
+    json: body,
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to create workflow",
+  });
+}
+
+export function updateWorkflow(
+  id: string,
+  patch: {
+    name?: string;
+    description?: string;
+    emoji?: string | null;
+    playbook?: string;
+    roster?: WorkflowRole[];
+    trigger?: WorkflowTrigger;
+    paused?: boolean;
+  },
+): Promise<Workflow> {
+  return request<Workflow>(`/api/workflows/${id}`, {
+    method: "PATCH",
+    json: patch,
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to update workflow",
+  });
+}
+
+export function deleteWorkflow(id: string): Promise<{ ok: boolean }> {
+  return request(`/api/workflows/${id}`, {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to delete workflow",
   });
 }
 
