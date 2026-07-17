@@ -15,6 +15,15 @@ export function publicParticipant<T extends { runner_token?: unknown }>(
   return pub;
 }
 
+// The stable account identity behind a participant, used to scope self-hosted devices (which
+// belong to an ACCOUNT, not a workspace — one person's device is usable across all their
+// workspaces). Real auth: the Firebase uid. Dev bypass (no Firebase uid): a per-participant
+// sentinel so devices stay isolated to the dev participant that registered them. Every device
+// path — approve, list, assign — must derive ownership through this one helper so they agree.
+export function accountUid(p: db.Participant): string {
+  return p.firebase_uid ?? `dev:${p.id}`;
+}
+
 // Resolve the requester's participant within the active workspace: from a verified Firebase token
 // scoped by the X-Workspace-Id header, or (only under dev bypass) a ?participantId= / body
 // participantId (which already names a specific workspace's participant). Returns null when we

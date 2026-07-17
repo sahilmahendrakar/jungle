@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Activity, Check, Copy, MessageSquare, MessagesSquare } from "lucide-react";
-import type { Message, Participant } from "../../api";
+import type { Message, Participant, ExtractedLink } from "../../api";
+import { extractDeliverableLinks } from "../../api";
 import { fmtTime } from "../../lib/chat";
 import { Markdown } from "../../Markdown";
 import { AgentBadge, AttachmentList, EmptyState, PersonAvatar } from "./panels";
-import { DeliverableChips } from "./deliverableCards";
+import { DeliverableLinkChips } from "./deliverableCards";
 import { MessageTurnChips } from "./TurnChips";
 import { AgentHoverCard } from "./AgentHoverCard";
-import type { LiveTurn } from "../../ws/useLiveTurns";
+import type { QueuedTurn, TurnChipData } from "../../ws/useLiveTurns";
 import {
   Tooltip,
   TooltipContent,
@@ -18,7 +19,8 @@ import { cn } from "@/lib/utils";
 // The per-message thread affordance that RESERVES layout space: a persistent "N replies" chip on
 // a root that has replies (bold + "N new" when I follow it and have unread), or a "View thread"
 // link on an also-to-channel reply shown in the timeline. The on-hover "reply in thread" action
-// lives in the HoverActions bar instead.
+// lives in the HoverActions bar instead. Rendered as one item in the shared footer row (see
+// MessageBody) alongside any turn chips, so it carries no margin of its own.
 function ThreadFooter({
   m,
   replyCounts,
@@ -40,7 +42,7 @@ function ThreadFooter({
         data-testid="thread-replies"
         onClick={() => onOpenThread(rootId)}
         className={cn(
-          "mt-1 inline-flex items-center gap-1.5 rounded-md border border-transparent px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:border-border hover:bg-accent",
+          "inline-flex items-center gap-1.5 rounded-md border border-transparent px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:border-border hover:bg-accent",
           unread > 0 && "font-semibold text-primary",
         )}
       >
@@ -59,7 +61,7 @@ function ThreadFooter({
       <button
         data-testid="view-thread"
         onClick={() => onOpenThread(rootId)}
-        className="mt-0.5 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent"
+        className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-accent"
       >
         <MessageSquare className="size-3.5" /> In thread
       </button>
@@ -161,6 +163,8 @@ function MessageBody({
   onOpenThread,
   onOpenTurn,
   anchoredTurns,
+  anchoredQueued,
+  anchoredDeliverables,
   personById,
   onOpenLiveTurn,
 }: {
@@ -173,13 +177,33 @@ function MessageBody({
   unreadByRoot: Map<string, number>;
   onOpenThread: (rootId: string) => void;
   onOpenTurn: (m: Message) => void;
-  anchoredTurns: LiveTurn[];
+  anchoredTurns: TurnChipData[];
+  anchoredQueued: QueuedTurn[];
+  // Deliverable links rolled up from this thread (root body + all its replies) — empty for a
+  // reply row, which shows only its own body's links instead (see below).
+  anchoredDeliverables: ExtractedLink[];
   personById: (id: string) => Participant | undefined;
-  onOpenLiveTurn: (turn: LiveTurn) => void;
+  onOpenLiveTurn: (turn: TurnChipData) => void;
 }) {
   const isRoot = !m.thread_root_id;
   const hasReplies = isRoot && (replyCounts.get(m.id) ?? 0) > 0;
   const isAgent = personByHandle(m.sender_handle)?.kind === "agent";
+  // A root shows everything the thread produced (its own body + all replies, rolled up); an
+  // echoed reply row shows just its own body — it's already visible as its own message.
+  const deliverableLinks = isRoot
+    ? anchoredDeliverables
+    : isAgent && m.body
+      ? extractDeliverableLinks(m.body)
+      : [];
+  // The thread affordance always shows for a reply row (isRoot false) or a root with replies;
+  // the row only reserves space when it or a turn/queued/deliverable chip actually has something
+  // to show.
+  const showFooterRow =
+    !isRoot ||
+    hasReplies ||
+    anchoredTurns.length > 0 ||
+    anchoredQueued.length > 0 ||
+    deliverableLinks.length > 0;
   return (
     <div
       data-testid="message"
@@ -192,17 +216,24 @@ function MessageBody({
         </Markdown>
       )}
       {(m.attachments?.length ?? 0) > 0 && <AttachmentList attachments={m.attachments!} />}
-      {/* Artifact cards for the work links agents post (PRs, docs, …) — agent messages only,
-          so a human pasting a PR link doesn't read as a "deliverable". */}
-      {isAgent && m.body && <DeliverableChips body={m.body} />}
-      {/* Live work anchored under the message that triggered it (one chip per agent). */}
-      <MessageTurnChips turns={anchoredTurns} personById={personById} onOpenTurn={onOpenLiveTurn} />
-      <ThreadFooter
-        m={m}
-        replyCounts={replyCounts}
-        unreadByRoot={unreadByRoot}
-        onOpenThread={onOpenThread}
-      />
+      {/* Reply count, then live work chips, then deliverable (artifact) chips — all on one line. */}
+      {showFooterRow && (
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          <ThreadFooter
+            m={m}
+            replyCounts={replyCounts}
+            unreadByRoot={unreadByRoot}
+            onOpenThread={onOpenThread}
+          />
+          <MessageTurnChips
+            turns={anchoredTurns}
+            queued={anchoredQueued}
+            personById={personById}
+            onOpenTurn={onOpenLiveTurn}
+          />
+          <DeliverableLinkChips links={deliverableLinks} />
+        </div>
+      )}
       <HoverActions
         m={m}
         showReply={isRoot && !hasReplies}
@@ -230,6 +261,8 @@ export function MessageList({
   onOpenThread,
   onOpenTurn,
   turnsByMessage,
+  queuedByMessage,
+  deliverablesByRoot,
   personById,
   onOpenLiveTurn,
   jumpToId,
@@ -246,11 +279,16 @@ export function MessageList({
   onOpenThread: (rootId: string) => void;
   // Open the agent Activity view focused on the turn that produced this message.
   onOpenTurn: (m: Message) => void;
-  // Live turns anchored to messages in this channel (the trigger-message chips), keyed by the
-  // triggering message's id, plus the lookups/actions the chips need.
-  turnsByMessage: Map<string, LiveTurn[]>;
+  // Turns anchored to messages in this channel (the trigger-message chips), keyed by the
+  // triggering message's id, plus the lookups/actions the chips need. Durable across reload.
+  turnsByMessage: Map<string, TurnChipData[]>;
+  // Dispatches still queued behind a busy turn, keyed by triggering message id.
+  queuedByMessage: Map<string, QueuedTurn[]>;
+  // Deliverable links a thread produced (root body + all its replies), keyed by the root
+  // message's id.
+  deliverablesByRoot: Map<string, ExtractedLink[]>;
   personById: (id: string) => Participant | undefined;
-  onOpenLiveTurn: (turn: LiveTurn) => void;
+  onOpenLiveTurn: (turn: TurnChipData) => void;
   // Jump target (from search / the deliverables feed): once this message renders, scroll it into
   // view with a flash highlight, then report done so the parent clears the target.
   jumpToId: string | null;
@@ -368,6 +406,8 @@ export function MessageList({
                   onOpenThread={onOpenThread}
                   onOpenTurn={onOpenTurn}
                   anchoredTurns={turnsByMessage.get(lead.id) ?? []}
+                  anchoredQueued={queuedByMessage.get(lead.id) ?? []}
+                  anchoredDeliverables={deliverablesByRoot.get(lead.id) ?? []}
                   personById={personById}
                   onOpenLiveTurn={onOpenLiveTurn}
                 />
@@ -384,6 +424,8 @@ export function MessageList({
                     onOpenThread={onOpenThread}
                     onOpenTurn={onOpenTurn}
                     anchoredTurns={turnsByMessage.get(m.id) ?? []}
+                    anchoredQueued={queuedByMessage.get(m.id) ?? []}
+                    anchoredDeliverables={deliverablesByRoot.get(m.id) ?? []}
                     personById={personById}
                     onOpenLiveTurn={onOpenLiveTurn}
                   />

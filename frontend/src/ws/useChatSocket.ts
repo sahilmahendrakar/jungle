@@ -52,6 +52,9 @@ export function useChatSocket(opts: {
     event: unknown,
     context?: TurnContext | null,
   ) => void;
+  // A dispatch landed in the agent's inbox behind a turn already in progress (agent_queued) —
+  // feeds the "queued" chip until the real turn starts (or splices in) and takes over.
+  ingestQueued: (agentId: string, context: TurnContext) => void;
   // Desktop-notification decisions live in App (it knows channels, mentions, prefs); the
   // dispatch just reports what happened.
   onNotifiableMessage: (m: Message, isOpen: boolean) => void;
@@ -81,6 +84,7 @@ export function useChatSocket(opts: {
     refreshThreads,
     reloadChannels,
     ingestLiveEvent,
+    ingestQueued,
     onNotifiableMessage,
     onConfirmRequested,
     onConnected,
@@ -121,6 +125,12 @@ export function useChatSocket(opts: {
           setPeople((ps) => ps.map((p) => (p.id === evt.agentId ? { ...p, status: evt.status } : p)));
           return;
         }
+        if (evt.type === "device_status_changed") {
+          // Account-scoped device up/down. The Environments page (not part of the chat store)
+          // listens for this to flip its online dot without a refetch.
+          window.dispatchEvent(new CustomEvent("jungle:device_status", { detail: evt }));
+          return;
+        }
         if (evt.type === "members_changed") {
           if (evt.channelId === selectedRef.current)
             listChannelMembers(evt.channelId).then(setMembers).catch(() => {});
@@ -132,6 +142,13 @@ export function useChatSocket(opts: {
         if (evt.type === "channel_deleted") {
           setChannels((cs) => cs.filter((c) => c.id !== evt.channelId));
           if (evt.channelId === selectedRef.current) setSelected(null);
+          return;
+        }
+        if (evt.type === "slack_link_changed") {
+          // A channel's Slack mirror binding changed (linked/unlinked/errored). Relayed via a
+          // window event so App updates the header badge for the open channel without threading a
+          // setter through here (same pattern as device_status_changed).
+          window.dispatchEvent(new CustomEvent("jungle:slack_link", { detail: evt }));
           return;
         }
         if (evt.type === "participant_updated" && evt.participant) {
@@ -166,6 +183,15 @@ export function useChatSocket(opts: {
           );
           return;
         }
+        if (evt.type === "agent_services_changed") {
+          // Same refetch pattern as memory, for the profile's Services section.
+          setPeople((ps) =>
+            ps.map((p) =>
+              p.id === evt.agentId ? { ...p, services_changed_at: new Date().toISOString() } : p,
+            ),
+          );
+          return;
+        }
         if (evt.type === "participant_deleted") {
           // Resolve the deleted agent's handle so we can drop its DM channel (DMs are keyed
           // by the other member's handle via dm_with), then remove the participant itself.
@@ -185,8 +211,13 @@ export function useChatSocket(opts: {
           return;
         }
         if (evt.type === "agent_turn") {
-          // A turn began: record its home (channel/thread/message) in the live-turn buffer.
+          // A turn began (or a splice added another message to one already running): record its
+          // home (channel/thread/message) in the live-turn buffer.
           ingestLiveEvent(evt.agentId, evt.turnId, null, evt.context);
+          return;
+        }
+        if (evt.type === "agent_queued") {
+          ingestQueued(evt.agentId, evt.context);
           return;
         }
         if (evt.type === "agent_event") {

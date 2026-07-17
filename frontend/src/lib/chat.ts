@@ -1,25 +1,47 @@
 // Pure helpers, constants, and view types shared across the chat UI (extracted from App.tsx).
+import { MODEL_CATALOG } from "@jungle/shared";
 import type { AgentStatus, Attachment, Message } from "../api";
 
-// Agent model + permission-mode choices for the create-agent dialog. Model ids must match
-// the backend's ALLOWED_MODELS; the first entry is the default.
-export const MODEL_OPTIONS = [
-  { id: "claude-opus-4-8", label: "Opus 4.8", hint: "Most capable" },
-  { id: "claude-sonnet-5", label: "Sonnet 5", hint: "Balanced" },
-  { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5", hint: "Fastest" },
-];
-// Agent permission modes (SDK runner). `default` is first (the create-agent default).
-export const SDK_MODE_OPTIONS = [
-  {
-    id: "default",
+// Agent model choices for the create-agent dialog + settings panel, derived from the shared
+// catalog (single source of truth) so the picker never drifts from backend validation. Catalog
+// order defines UI order; the first entry is the default for new agents.
+export const MODEL_OPTIONS = MODEL_CATALOG.map(({ id, label, hint }) => ({
+  id: id as string,
+  label,
+  hint,
+}));
+// Label + hint for every backend permission mode (SDK runner). Keyed by mode id so an agent
+// already on a mode we no longer surface in the picker still renders correctly in its settings.
+export const SDK_MODE_LABELS: Record<string, { label: string; hint: string }> = {
+  default: {
     label: "Ask on sensitive",
     hint: "Ask before sensitive tools — safe actions run automatically",
   },
-  { id: "acceptEdits", label: "Accept edits", hint: "Auto-accept file edits" },
-  { id: "plan", label: "Plan only", hint: "Proposes, never changes files" },
-  { id: "bypassPermissions", label: "Full autonomy", hint: "Never asks" },
-  { id: "dontAsk", label: "Deny unapproved", hint: "Deny anything not pre-approved" },
-];
+  acceptEdits: { label: "Accept edits", hint: "Auto-accept file edits" },
+  plan: { label: "Plan only", hint: "Proposes, never changes files" },
+  bypassPermissions: { label: "Full autonomy", hint: "Never asks" },
+  dontAsk: { label: "Deny unapproved", hint: "Deny anything not pre-approved" },
+};
+
+// The permission modes offered in the picker — a trimmed progressive spectrum (least → most
+// autonomy). The backend still accepts the full SDK_MODES set, so agents already on acceptEdits/
+// dontAsk keep working; those two are simply no longer offered to new/edited agents here.
+export const SDK_MODE_OPTIONS = (["plan", "default", "bypassPermissions"] as const).map((id) => ({
+  id: id as string,
+  ...SDK_MODE_LABELS[id],
+}));
+
+// New agents default to "Ask on sensitive". Decoupled from picker order so it can be reordered.
+export const DEFAULT_SDK_MODE = "default";
+
+// Options for editing an EXISTING agent: the trimmed picker plus its current mode if that's no
+// longer offered (e.g. a legacy acceptEdits/dontAsk agent) — so we never misrepresent it or
+// silently overwrite the setting on save.
+export function sdkModeOptionsFor(current: string) {
+  if (SDK_MODE_OPTIONS.some((o) => o.id === current)) return SDK_MODE_OPTIONS;
+  const extra = SDK_MODE_LABELS[current] ?? { label: current, hint: "" };
+  return [...SDK_MODE_OPTIONS, { id: current, ...extra }];
+}
 // Reasoning effort (SDK `effort`). Ids must match the backend's EFFORT_LEVELS; `medium` is the
 // default. Lower = cheaper/faster (fewer thinking tokens + tool-call round-trips); bump repo/
 // coding agents up. Haiku ignores effort. Ordered low→high so the default sits mid-list.
@@ -131,15 +153,17 @@ export const fmtRelative = (iso: string | null | undefined): string => {
 };
 
 // Status priority for a channel row with several agent members: the most noteworthy wins.
-export const STATUS_RANK: Record<AgentStatus, number> = { working: 0, waking: 1, idle: 2, sleeping: 3 };
+export const STATUS_RANK: Record<AgentStatus, number> = { working: 0, waking: 1, idle: 2, sleeping: 3, offline: 4 };
 
-// Tailwind classes for an agent's status dot. sleeping is slate (deliberately distinct from
-// the muted gray we'd use for a truly-offline participant).
+// Tailwind classes for an agent's status dot. sleeping is slate (a cloud machine we can wake);
+// offline is a dimmer gray ring for a self-hosted agent whose device is disconnected — the backend
+// can't wake it, so it reads as truly "not here right now".
 export const STATUS_DOT: Record<AgentStatus, string> = {
   working: "animate-pulse bg-emerald-400",
   idle: "bg-emerald-500/60",
   waking: "animate-pulse bg-amber-400",
   sleeping: "bg-slate-400/70",
+  offline: "bg-slate-500/40 ring-1 ring-inset ring-slate-500/30",
 };
 
 export const STATUS_LABEL: Record<AgentStatus, string> = {
@@ -147,4 +171,5 @@ export const STATUS_LABEL: Record<AgentStatus, string> = {
   idle: "Idle",
   waking: "Waking up",
   sleeping: "Sleeping",
+  offline: "Offline",
 };

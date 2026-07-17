@@ -64,6 +64,11 @@ alter table participants add column if not exists memory             text;
 alter table participants add column if not exists memory_updated_at  timestamptz;
 alter table participants add column if not exists persona            text;
 
+-- Managed services (the runner's service_* tools): snapshot of the agent's service list as
+-- last reported via the `services` runner frame. See migrations/025_runner_services.sql.
+alter table participants add column if not exists runner_services            jsonb;
+alter table participants add column if not exists runner_services_updated_at timestamptz;
+
 -- Per-agent runner provider (gradual Docker -> Fly rollout). 'docker' keeps today's behavior;
 -- 'fly' routes provisioner calls to FlyProvisioner. runner_meta holds provider handles
 -- (Fly: {machineId, volumeId}); null for docker. See migrations/007_fly_provisioner.sql.
@@ -353,3 +358,149 @@ create index if not exists deliverables_agent_idx on deliverables (agent_id, id 
 -- Full-text search over message bodies (see migrations/019_message_search.sql).
 create index if not exists messages_body_fts_idx
   on messages using gin (to_tsvector('english', body));
+
+-- Durable turn chips — the trigger-message activity chip needs to survive a page reload, and one
+-- turn can be anchored to more than one message (a follow-up spliced into a turn already in
+-- progress joins the SAME turn, not a new one). See migrations/020_turn_chips.sql and
+-- backend/src/db/turns.ts.
+create table if not exists agent_turns (
+  agent_id       uuid not null references participants(id) on delete cascade,
+  turn_id        text not null,
+  channel_id     uuid references channels(id) on delete cascade,
+  thread_root_id uuid,
+  started_at     timestamptz not null default now(),
+  done_at        timestamptz,
+  ok             boolean,
+  primary key (agent_id, turn_id)
+);
+create index if not exists agent_turns_channel_idx on agent_turns (channel_id);
+
+create table if not exists agent_turn_messages (
+  agent_id    uuid not null,
+  turn_id     text not null,
+  message_id  uuid not null references messages(id) on delete cascade,
+  joined_at   timestamptz not null default now(),
+  primary key (agent_id, turn_id, message_id),
+  foreign key (agent_id, turn_id) references agent_turns (agent_id, turn_id) on delete cascade
+);
+create index if not exists agent_turn_messages_message_idx on agent_turn_messages (message_id);
+
+-- Self-hosted devices (see migrations/021_runner_hosts.sql). A device is an account-scoped machine
+-- registered via `jungle-runner connect` that runs agents (runner_provider='self_hosted'). Its
+-- daemon dials the host-control channel (/api/host, shared/src/host-protocol.ts).
+create table if not exists runner_hosts (
+  id                   uuid primary key default gen_random_uuid(),
+  owner_uid            text not null,
+  name                 text not null,
+  hostname             text,
+  platform             text,
+  arch                 text,
+  runner_version       text,
+  device_token_hash    text not null unique,
+  assign_policy        text not null default 'owner_only',  -- owner_only | workspace_members
+  shared_workspace_ids uuid[] not null default '{}',
+  sandboxed            boolean not null default true,       -- isolated per-agent workspace (true) vs the connect cwd (false)
+  created_at           timestamptz not null default now(),
+  last_seen_at         timestamptz,
+  revoked_at           timestamptz
+);
+create index if not exists runner_hosts_owner_idx on runner_hosts (owner_uid) where revoked_at is null;
+
+-- OAuth-device-grant-style backing for `jungle-runner connect` (short-lived, single-use).
+create table if not exists device_auth_requests (
+  device_code   text primary key,
+  user_code     text not null unique,
+  created_at    timestamptz not null default now(),
+  expires_at    timestamptz not null,
+  approved_uid  text,
+  approved_at   timestamptz,
+  host_id       uuid references runner_hosts(id) on delete set null,
+  claimed_at    timestamptz
+);
+
+-- === Slack integration (migrations/023_slack.sql) ===
+-- Two-way channel mirroring via a single "Jungle" Slack app. See services/slackBridge.ts.
+
+-- One Slack workspace (team) install per Jungle workspace (PK enforces 1:1; team_id unique so an
+-- inbound event routes to exactly one install). Bot token plaintext (MVP, like integration_connections).
+create table if not exists slack_installs (
+  workspace_id  uuid primary key references workspaces(id) on delete cascade,
+  team_id       text not null unique,
+  team_name     text,
+  bot_token     text not null,          -- xoxb-…
+  bot_user_id   text not null,          -- U… bot user id (echo-drop on event.user)
+  bot_id        text,                   -- B… id on our own posted messages (echo-drop)
+  scopes        text,
+  installed_by  uuid references participants(id) on delete set null,
+  status        text not null default 'active' check (status in ('active', 'revoked')),
+  created_at    timestamptz not null default now()
+);
+
+-- One Slack channel <-> one Jungle channel (both sides unique).
+create table if not exists slack_channel_links (
+  id                 uuid primary key default gen_random_uuid(),
+  workspace_id       uuid not null references slack_installs(workspace_id) on delete cascade,
+  jungle_channel_id  uuid not null unique references channels(id) on delete cascade,
+  slack_team_id      text not null,
+  slack_channel_id   text not null,
+  slack_channel_name text,
+  status             text not null default 'active' check (status in ('active', 'error')),
+  last_error         text,
+  created_by         uuid references participants(id) on delete set null,
+  created_at         timestamptz not null default now(),
+  unique (slack_team_id, slack_channel_id)
+);
+
+-- Slack user -> Jungle participant ('shadow' placeholder human, or 'linked' to a real account by email).
+create table if not exists slack_user_links (
+  slack_team_id   text not null,
+  slack_user_id   text not null,
+  participant_id  uuid not null references participants(id) on delete cascade,
+  kind            text not null check (kind in ('shadow', 'linked')),
+  created_at      timestamptz not null default now(),
+  primary key (slack_team_id, slack_user_id)
+);
+
+-- Message identity map both directions. slack_ts is a STRING (never parse as a number).
+create table if not exists slack_message_links (
+  jungle_message_id  uuid primary key references messages(id) on delete cascade,
+  slack_team_id      text not null,
+  slack_channel_id   text not null,
+  slack_ts           text not null,
+  slack_thread_ts    text,
+  origin             text not null check (origin in ('slack', 'jungle'))
+);
+create unique index if not exists slack_message_links_slack_idx
+  on slack_message_links (slack_team_id, slack_channel_id, slack_ts);
+
+-- Events API at-least-once dedupe (pruned >24h by the outbox ticker).
+create table if not exists slack_events (
+  event_id    text primary key,
+  received_at timestamptz not null default now()
+);
+
+-- Transactional outbox for Jungle -> Slack delivery (enqueued inside persistMessage's txn).
+create table if not exists slack_outbox (
+  id                 bigserial primary key,
+  link_id            uuid not null references slack_channel_links(id) on delete cascade,
+  jungle_message_id  uuid not null references messages(id) on delete cascade,
+  status             text not null default 'pending' check (status in ('pending', 'delivered', 'failed')),
+  attempts           int not null default 0,
+  next_attempt_at    timestamptz not null default now(),
+  last_error         text,
+  created_at         timestamptz not null default now()
+);
+create index if not exists slack_outbox_pending_idx
+  on slack_outbox (link_id, id) where status = 'pending';
+
+-- Mobile push tokens (FCM registration tokens; iOS today). Account-scoped like devices — one
+-- account's phone gets pushes from all of its workspaces. Kept in sync with
+-- migrations/024_push_tokens.sql.
+create table if not exists push_tokens (
+  token        text primary key,
+  firebase_uid text not null,
+  platform     text not null default 'ios',
+  created_at   timestamptz not null default now(),
+  last_seen_at timestamptz not null default now()
+);
+create index if not exists push_tokens_uid_idx on push_tokens (firebase_uid);

@@ -72,11 +72,17 @@ export async function listSdkAgents(): Promise<AgentRow[]> {
 }
 
 export interface RunnerMeta {
+  // Fly handles.
   machineId?: string;
   volumeId?: string;
+  // Self-hosted: which device the agent runs on, and (reported via the runner's `hello`) that
+  // device's details, used to tailor the "your environment" system-prompt block + profile UI.
+  hostId?: string;
+  host?: { hostname: string; platform: string; arch: string; runnerVersion: string };
 }
 
-// Provider handle for an agent's runner (Fly: {machineId, volumeId}; null for docker/unprovisioned).
+// Provider handle for an agent's runner (Fly: {machineId, volumeId}; self_hosted: {hostId, host};
+// null for docker/unprovisioned).
 export async function getRunnerMeta(agentId: string): Promise<RunnerMeta | null> {
   const { rows } = await pool.query<{ runner_meta: RunnerMeta | null }>(
     `select runner_meta from participants where id = $1`,

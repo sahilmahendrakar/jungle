@@ -3,6 +3,7 @@
 // socket, most fanned out to a channel or broadcast to all); the client sends ClientFrame frames.
 
 import type { AgentStatus, Deliverable, Participant, WireMessage } from "./domain.js";
+import type { SlackChannelLink } from "./slack.js";
 
 // ---- Server -> client ----
 
@@ -29,6 +30,16 @@ export interface AgentStatusChangedEvent {
   type: "agent_status_changed";
   agentId: string;
   status: AgentStatus;
+}
+
+// A self-hosted device's control connection came up or went down. Fanned out to the sockets of
+// the device's OWNER account (a device is account-scoped, not workspace-scoped), so an open
+// Environments page flips the online dot without a refetch. The agents running on that device
+// emit their own agent_status_changed (offline/idle) separately.
+export interface DeviceStatusChangedEvent {
+  type: "device_status_changed";
+  deviceId: string;
+  online: boolean;
 }
 
 // A channel's membership changed (added/removed member); clients refetch members.
@@ -83,6 +94,15 @@ export interface AgentEventEvent {
   context?: TurnContext | null;
 }
 
+// A dispatch landed in the agent's inbox behind a turn already in progress — no turn_id yet
+// (that only exists once the runner actually starts or splices it in). Lets the triggering
+// message show a "queued — waiting for @agent" chip immediately instead of nothing.
+export interface AgentQueuedEvent {
+  type: "agent_queued";
+  agentId: string;
+  context: TurnContext;
+}
+
 // An agent's context-window occupancy after a turn (drives the profile usage meter).
 export interface AgentContextEvent {
   type: "agent_context";
@@ -95,6 +115,14 @@ export interface AgentContextEvent {
 // (it can be ~12KB): an open profile panel refetches GET /api/agents/:id/memory.
 export interface AgentMemoryChangedEvent {
   type: "agent_memory_changed";
+  agentId: string;
+}
+
+// An agent's managed services (service_* tools: dev servers, watchers) changed. Like memory,
+// content doesn't ride in the broadcast: an open profile panel refetches
+// GET /api/agents/:id/services.
+export interface AgentServicesChangedEvent {
+  type: "agent_services_changed";
   agentId: string;
 }
 
@@ -134,23 +162,36 @@ export interface DeliverableCreatedEvent {
   deliverable: Deliverable;
 }
 
+// A channel's Slack mirror binding changed (linked, unlinked, or moved to the 'error' state).
+// `link` is null when the channel was unlinked. Broadcast workspace-wide so every client's
+// channel header updates. SlackChannelLink comes from ./slack.
+export interface SlackLinkChangedEvent {
+  type: "slack_link_changed";
+  channelId: string;
+  link: SlackChannelLink | null;
+}
+
 export type ServerEvent =
   | ConnectedEvent
   | ErrorEvent
   | MessageEvent
   | AgentStatusChangedEvent
+  | DeviceStatusChangedEvent
   | MembersChangedEvent
   | ChannelDeletedEvent
   | ParticipantUpdatedEvent
   | ParticipantDeletedEvent
   | AgentTurnEvent
   | AgentEventEvent
+  | AgentQueuedEvent
   | AgentContextEvent
   | AgentMemoryChangedEvent
+  | AgentServicesChangedEvent
   | ToolConfirmationRequestEvent
   | ToolConfirmationResolvedEvent
   | ScheduleChangedEvent
-  | DeliverableCreatedEvent;
+  | DeliverableCreatedEvent
+  | SlackLinkChangedEvent;
 
 // ---- Client -> server ----
 

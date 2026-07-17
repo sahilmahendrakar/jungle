@@ -48,6 +48,7 @@ of the request; responses echo them.
 | `turn_done` | `turnId`, `ok: boolean`, `error?` | turn finished; backend may immediately `enqueue` more. On `ok: false` the backend posts a crash notice from the agent into its last dispatch channel |
 | `context_usage` | `tokens`, `maxTokens`, `percent` | context-window occupancy after a turn (SDK `getContextUsage()`, falling back to the result message's usage). Backend persists it on the participant row and broadcasts `agent_context` to app sockets |
 | `memory` | `content` | mirror of the agent's long-term memory: its MEMORY.md index + each memory file from the native Claude Code memory directory (on the workspace volume; `""` = none yet). Sent after any turn that changed it (hash-compared) and once after each `configure`. Backend persists it on the participant row (served by `GET /api/agents/:id/memory`) and broadcasts `agent_memory_changed` |
+| `services` | `services: [{name, command, cwd?, status, pid?, startedAt, exitedAt?, exitCode?}]` | snapshot of the runner's managed services (the `service_*` agent tools: dev servers, watchers — processes owned by the runner so they survive turn boundaries). Sent on every change (start/stop/exit) and once after each `configure`. Backend replaces its stored copy (served by `GET /api/agents/:id/services`) and broadcasts `agent_services_changed` |
 | `fatal` | `error` | unrecoverable runner error. Backend notifies the triggering channel, then restarts the machine (provisioner `stop` + `start`), bounded by a loop guard (max 3 restarts / 10min per agent — past that it logs and leaves the machine stopped rather than crash-loop). A crash with **no** `fatal` frame (bare socket drop — OOM kill, host reclaim) isn't restarted directly here; it's recovered by the idle-stop sweeper's reverse path (disconnected + non-empty pending inbox → start) or the next wake-on-message, whichever comes first |
 
 ## Backend → runner frames
@@ -65,6 +66,7 @@ of the request; responses echo them.
 | `git_credentials` | `token`, `login` | refreshed GitHub installation token (~1h TTL); runner rewrites its git credential store / `GH_TOKEN` |
 | `gmail_credentials` | `accessToken` | refreshed Gmail OAuth access token (~1h TTL); the in-process gmail server reads it live |
 | `integration_credentials` | `key`, `accessToken` | refreshed OAuth token for a remote-MCP integration or the in-process Google Drive server (keyed by integration key); applied to the next turn's mounted server |
+| `service_stop` | `name` | stop one managed service (the profile panel's stop button). Runner kills the service's process group and reports the fresh list via a `services` frame. Unknown names are a no-op |
 
 ## Permission modes
 

@@ -5,6 +5,7 @@ import { withTransaction } from "./tx";
 import { resolveMentions, getParticipant } from "./participants";
 import { attachmentsForMessages } from "./attachments";
 import { formatContextLines, oldestSeqOf, type ContextRow } from "./context";
+import { enqueueOutboxIfLinked } from "./slack";
 
 // Resolve a thread reply's root. Returns the id to store in thread_root_id, or throws if the
 // target doesn't exist / is in another channel. Guarantees replies never nest: if the target
@@ -83,6 +84,10 @@ export async function persistMessage(args: {
   alsoToChannel?: boolean;
   // Agent sends only: the runner turn that produced this message (see RunnerHooks).
   turnId?: string | null;
+  // Slack bridge: set to "slack" for a message INGESTED from Slack, so it isn't mirrored back out
+  // (echo suppression at the source). Any other value (incl. undefined) enqueues a Slack-mirror
+  // job if the channel is linked — see db/slack.ts enqueueOutboxIfLinked / services/slackBridge.ts.
+  origin?: "slack" | null;
 }): Promise<PersistedMessage> {
   const mentions = await resolveMentions(args.channelId, args.body);
   const { msg, attachments } = await withTransaction(async (client) => {
@@ -130,6 +135,12 @@ export async function persistMessage(args: {
           [row.id, args.attachmentIds, args.senderId],
         );
         attachments = linked.rows;
+      }
+      // Transactional outbox: if this channel mirrors to Slack and the message didn't come FROM
+      // Slack, enqueue a mirror job in the same txn (message + intent commit atomically). Covers
+      // every persist call site — human posts, agent sends, schedule announces — for free.
+      if (args.origin !== "slack") {
+        await enqueueOutboxIfLinked(client, args.channelId, row.id);
       }
     } else {
       // conflict (duplicate client_msg_id) — return the existing row

@@ -5,9 +5,18 @@
 
 export type Kind = "human" | "agent";
 
-// One of an agent's four live statuses. Working = actively running a turn; Idle = connected,
-// waiting; Sleeping = machine stopped to save cost; Waking = machine starting, not yet connected.
-export type AgentStatus = "working" | "idle" | "sleeping" | "waking";
+// One of an agent's live statuses. Working = actively running a turn; Idle = connected,
+// waiting; Sleeping = machine stopped to save cost; Waking = machine starting, not yet connected;
+// Offline = a self-hosted agent whose device/daemon is not connected (the backend cannot wake it —
+// queued work waits until the device comes back online). Offline is distinct from Sleeping, which
+// the platform CAN wake on demand.
+export type AgentStatus = "working" | "idle" | "sleeping" | "waking" | "offline";
+
+// The provisioners an agent's runner can run under. 'docker'/'fly' are cloud sandboxes the backend
+// owns; 'self_hosted' runs on a user's own registered device (see RunnerHost) via a daemon that
+// dials the host-control channel (shared/src/host-protocol.ts).
+export const RUNNER_PROVIDERS = ["docker", "fly", "self_hosted"] as const;
+export type RunnerProvider = (typeof RUNNER_PROVIDERS)[number];
 
 // The public shape of a participant row (everything persisted except server-only secrets like
 // runner_token). This is what the backend serializes; the DB row type extends it server-side.
@@ -30,8 +39,9 @@ export interface ParticipantBase {
   context_tokens: number | null;
   context_max_tokens: number | null;
   context_updated_at: string | null;
-  runner_provider: string; // 'docker' | 'fly' — which Provisioner impl owns this agent's runner
-  runner_meta: Record<string, unknown> | null; // provider handles (Fly: {machineId, volumeId})
+  runner_provider: string; // RunnerProvider — which Provisioner impl owns this agent's runner
+  // Provider handles (Fly: {machineId, volumeId}; self_hosted: {hostId, host?: {hostname,…}}).
+  runner_meta: Record<string, unknown> | null;
   // Creator-written role/personality injected into the agent's system prompt (agents; null = none).
   // The agent's MEMORY.md mirror is NOT here — it can be large, so clients fetch it on demand
   // via GET /api/agents/:id/memory.
@@ -39,12 +49,69 @@ export interface ParticipantBase {
 }
 
 // A participant as sent to clients: the public row plus a live `status` (agents only, computed
-// from the runner connection at serialization time — not persisted). `memory_changed_at` is
-// client-side only: stamped when an agent_memory_changed broadcast lands, so an open profile's
-// Memory section knows to refetch.
+// from the runner connection at serialization time — not persisted). `memory_changed_at` /
+// `services_changed_at` are client-side only: stamped when the matching agent_*_changed
+// broadcast lands, so an open profile's Memory/Services section knows to refetch.
 export interface Participant extends ParticipantBase {
   status?: AgentStatus;
   memory_changed_at?: string;
+  services_changed_at?: string;
+}
+
+// --- Self-hosted devices (a registered machine that can run agents) ---
+
+// Who, besides the owner, may assign an agent to run on a device. 'owner_only' (default) = only
+// the account that registered it; 'workspace_members' = any member of a workspace the owner has
+// shared the device into (shared_workspace_ids). Running an agent on a device is code execution
+// with the owner's OS privileges, so this defaults closed.
+export type DeviceAssignPolicy = "owner_only" | "workspace_members";
+
+// A machine a user registered with `jungle-agents connect`. Account-scoped (owned by a Google
+// account, selectable across that account's workspaces). `online` is derived at serialization
+// time from whether the device's control connection is live; `running_agents` counts agents
+// currently executing on it. Server-only fields (the device token hash) never appear here.
+export interface RunnerHost {
+  id: string;
+  name: string; // user-editable; defaults to the hostname
+  hostname: string | null;
+  platform: string | null; // process.platform, e.g. 'darwin' | 'linux'
+  arch: string | null; // process.arch, e.g. 'arm64' | 'x64'
+  runner_version: string | null;
+  assign_policy: DeviceAssignPolicy;
+  shared_workspace_ids: string[]; // workspaces the device is shared into (workspace_members policy)
+  // Whether agents on this device run in an isolated per-agent workspace (true, the default) or
+  // directly in the directory `jungle-agents connect` was run from (false). False = the agent has
+  // the user's real files in its cwd; per-agent state (memory/session/git-creds) stays isolated.
+  sandboxed: boolean;
+  created_at: string;
+  last_seen_at: string | null;
+  online: boolean; // derived: control channel currently connected
+  running_agents: number; // derived: agents with a live runner on this device
+}
+
+// The minimum `jungle-agents` CLI (runner) version that honors the `sandboxed` flag on the
+// run_agent frame. Older daemons ignore it and always run agents in the isolated per-agent
+// workspace, so the backend downgrades to sandboxed for them and the UI warns. Bump this (and the
+// runner package version) when the unsandboxed wire contract changes again.
+export const UNSANDBOXED_MIN_RUNNER_VERSION = "0.1.1";
+
+// Compare two dotted numeric version strings ("0.1.1" vs "0.2.0"). Returns <0 if a<b, 0 if equal,
+// >0 if a>b. Missing/shorter parts count as 0; non-numeric parts count as 0.
+export function compareVersions(a: string, b: string): number {
+  const pa = a.split(".").map((n) => parseInt(n, 10) || 0);
+  const pb = b.split(".").map((n) => parseInt(n, 10) || 0);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
+// True if `version` is new enough to run agents unsandboxed. null/unknown versions are treated as
+// "not known to be new enough" — callers decide whether to block or just warn.
+export function supportsUnsandboxed(version: string | null | undefined): boolean {
+  return !!version && compareVersions(version, UNSANDBOXED_MIN_RUNNER_VERSION) >= 0;
 }
 
 // --- Workspaces (Slack-style multi-tenancy) ---

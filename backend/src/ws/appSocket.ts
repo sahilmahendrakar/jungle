@@ -4,6 +4,7 @@ import * as db from "../db";
 import type { PersistedMessage } from "../db";
 import * as auth from "../auth";
 import * as att from "../attachments";
+import * as push from "../services/push";
 
 // The app (human/device) WebSocket: realtime message delivery to browsers. Distinct from the
 // runner subsystem (runners.ts), which owns the /api/runner upgrade path. This module owns the
@@ -18,6 +19,9 @@ const sockets = new Map<string, Set<WebSocket>>();
 // workspaceId -> open sockets in that workspace (for workspace-scoped broadcasts). A socket lives
 // in exactly one workspace (the participant it authenticated as belongs to one workspace).
 const workspaceSockets = new Map<string, Set<WebSocket>>();
+// firebaseUid -> open sockets across ALL that account's workspaces (for account-scoped events like
+// self-hosted device status, since a device belongs to an account, not a single workspace).
+const uidSockets = new Map<string, Set<WebSocket>>();
 
 function addToMap(map: Map<string, Set<WebSocket>>, key: string, ws: WebSocket): void {
   let set = map.get(key);
@@ -32,21 +36,101 @@ function removeFromMap(map: Map<string, Set<WebSocket>>, key: string, ws: WebSoc
   }
 }
 
-function addSocket(pid: string, workspaceId: string, ws: WebSocket): void {
+function addSocket(pid: string, workspaceId: string, uid: string | null, ws: WebSocket): void {
   addToMap(sockets, pid, ws);
   addToMap(workspaceSockets, workspaceId, ws);
+  if (uid) addToMap(uidSockets, uid, ws);
 }
-function removeSocket(pid: string, workspaceId: string, ws: WebSocket): void {
+function removeSocket(pid: string, workspaceId: string, uid: string | null, ws: WebSocket): void {
   removeFromMap(sockets, pid, ws);
   removeFromMap(workspaceSockets, workspaceId, ws);
+  if (uid) removeFromMap(uidSockets, uid, ws);
 }
 
-// Fan out a payload to every connected device of every member of a channel.
+// Fan out a payload to every connected device of every member of a channel. Channel-scoped
+// events also drive mobile push (fire-and-forget): DMs/mentions on `message`, and
+// tool_confirmation_request to every human member — suppressed for anyone with a live socket
+// (the in-app UI already carries the signal).
 export async function fanOut(channelId: string, payload: unknown): Promise<void> {
   const data = JSON.stringify(payload);
-  for (const pid of await db.channelMemberIds(channelId)) {
+  const memberIds = await db.channelMemberIds(channelId);
+  for (const pid of memberIds) {
     const set = sockets.get(pid);
     if (set) for (const ws of set) if (ws.readyState === WebSocket.OPEN) ws.send(data);
+  }
+  pushForFanOut(channelId, memberIds, payload).catch((e) =>
+    console.error("push fan-out failed:", String((e as Error).message ?? e)),
+  );
+}
+
+// Decide who (if anyone) gets a mobile push for a channel-scoped event.
+async function pushForFanOut(channelId: string, memberIds: string[], payload: unknown): Promise<void> {
+  const evt = payload as {
+    type?: string;
+    message?: PersistedMessage & { mentions?: { id: string }[] };
+    confirmId?: string;
+    agentHandle?: string;
+    tool?: string;
+  };
+  if (evt.type !== "message" && evt.type !== "tool_confirmation_request") return;
+
+  // A recipient with ANY open socket is looking at the app — no push.
+  const offline = (pid: string) => {
+    const set = sockets.get(pid);
+    return !set || ![...set].some((ws) => ws.readyState === WebSocket.OPEN);
+  };
+
+  const channel = await db.getChannel(channelId);
+  if (!channel) return;
+
+  if (evt.type === "message" && evt.message) {
+    const m = evt.message;
+    const mentioned = new Set((m.mentions ?? []).map((x) => x.id));
+    const isDM = channel.kind === "dm";
+    const uids: string[] = [];
+    for (const pid of memberIds) {
+      if (pid === m.sender_id) continue;
+      if (!isDM && !mentioned.has(pid)) continue;
+      if (!offline(pid)) continue;
+      const p = await db.getParticipant(pid);
+      if (p?.kind === "human" && p.firebase_uid) uids.push(p.firebase_uid);
+    }
+    if (!uids.length) return;
+    const title = isDM ? `@${m.sender_handle}` : `@${m.sender_handle} in #${channel.name}`;
+    await push.sendPush(uids, {
+      title,
+      body: push.preview(m.body || "sent an attachment"),
+      threadId: channelId,
+      data: {
+        kind: "message",
+        workspaceId: channel.workspace_id,
+        channelId,
+        ...(m.thread_root_id ? { threadRootId: m.thread_root_id } : {}),
+      },
+    });
+    return;
+  }
+
+  if (evt.type === "tool_confirmation_request" && evt.confirmId) {
+    const uids: string[] = [];
+    for (const pid of memberIds) {
+      if (!offline(pid)) continue;
+      const p = await db.getParticipant(pid);
+      if (p?.kind === "human" && p.firebase_uid) uids.push(p.firebase_uid);
+    }
+    if (!uids.length) return;
+    await push.sendPush(uids, {
+      title: `@${evt.agentHandle ?? "agent"} needs approval`,
+      body: `Wants to run ${evt.tool ?? "a tool"} — allow or deny`,
+      category: "CONFIRM",
+      threadId: channelId,
+      data: {
+        kind: "confirm",
+        workspaceId: channel.workspace_id,
+        channelId,
+        confirmId: evt.confirmId,
+      },
+    });
   }
 }
 
@@ -55,6 +139,15 @@ export async function fanOut(channelId: string, payload: unknown): Promise<void>
 // should see it, and NO ONE outside it). Replaces the old broadcast-to-all-tenants primitive.
 export function broadcastWorkspace(workspaceId: string, payload: unknown): void {
   const set = workspaceSockets.get(workspaceId);
+  if (!set) return;
+  const data = JSON.stringify(payload);
+  for (const ws of set) if (ws.readyState === WebSocket.OPEN) ws.send(data);
+}
+
+// Broadcast to every connected socket of ONE account (all workspaces), keyed by Firebase uid. For
+// account-scoped events — self-hosted device status — that don't belong to any single workspace.
+export function broadcastUid(uid: string, payload: unknown): void {
+  const set = uidSockets.get(uid);
   if (!set) return;
   const data = JSON.stringify(payload);
   for (const ws of set) if (ws.readyState === WebSocket.OPEN) ws.send(data);
@@ -77,7 +170,8 @@ export function initAppSocket(server: Server, hooks: AppSocketHooks): void {
     } catch {
       /* keep default */
     }
-    if (pathname === "/api/runner") return; // handled by runners.init's own upgrade listener
+    // Handled by their own upgrade listeners (runners.init / hostcontrol.init).
+    if (pathname === "/api/runner" || pathname === "/api/host") return;
     wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
   });
 
@@ -109,7 +203,8 @@ export function initAppSocket(server: Server, hooks: AppSocketHooks): void {
     }
     const pid = participant.id;
     const workspaceId = participant.workspace_id;
-    addSocket(pid, workspaceId, ws);
+    const uid = participant.firebase_uid;
+    addSocket(pid, workspaceId, uid, ws);
     ws.send(JSON.stringify({ type: "connected", participantId: pid }));
 
     ws.on("message", async (raw) => {
@@ -157,6 +252,6 @@ export function initAppSocket(server: Server, hooks: AppSocketHooks): void {
       }
     });
 
-    ws.on("close", () => removeSocket(pid, workspaceId, ws));
+    ws.on("close", () => removeSocket(pid, workspaceId, uid, ws));
   });
 }

@@ -65,6 +65,21 @@ router.post(
   }),
 );
 
+// Durable turn chips for this channel — recent running/finished turns and still-queued
+// dispatches anchored to a message here. Hydrates the trigger-message chips on channel open /
+// page reload; live updates ride the app WS (agent_turn/agent_event/agent_queued).
+router.get(
+  "/api/channels/:id/turn-chips",
+  wrap(async (req, res) => {
+    const ctx = await requireChannelMember(req);
+    const [turns, queued] = await Promise.all([
+      db.channelTurnChips(ctx.channel.id),
+      db.channelQueuedChips(ctx.channel.id),
+    ]);
+    res.json({ turns, queued });
+  }),
+);
+
 router.get(
   "/api/channels/:id/members",
   wrap(async (req, res) => {

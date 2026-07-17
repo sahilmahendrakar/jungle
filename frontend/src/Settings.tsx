@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { avatarClass, initials } from "@/lib/people";
 import { cn } from "@/lib/utils";
 import { BrandTile, useConnections, type ConnectionState } from "@/lib/connections";
+import { useSlack } from "@/lib/slack";
 import {
   ArrowLeft,
   Bell,
@@ -256,6 +257,57 @@ function NotificationsSection() {
   );
 }
 
+// Workspace-level Slack install (distinct from the per-user Connections list): one Slack team per
+// workspace, connected by an admin. Once connected, any channel can be mirrored from its header.
+function SlackWorkspaceSection({ isAdmin }: { isAdmin: boolean }) {
+  const slack = useSlack();
+  const installed = slack.status.installed && slack.status.status !== "revoked";
+  const revoked = slack.status.installed && slack.status.status === "revoked";
+  return (
+    <section className="mt-8 space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Slack</h2>
+        {slack.loading && <Loader2 className="size-3.5 animate-spin text-muted-foreground" />}
+      </div>
+      <div className="flex items-center gap-3 rounded-xl border bg-card p-4">
+        <BrandTile brand="slack" />
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm font-semibold">
+            {installed ? slack.status.teamName || "Slack workspace" : "Mirror channels to Slack"}
+          </div>
+          <div className="truncate text-xs text-muted-foreground">
+            {installed
+              ? "Connected — link a channel from its header to start mirroring."
+              : revoked
+                ? "Reconnect needed — the Slack token was revoked."
+                : "Two-way channel mirroring. @mention agents from Slack."}
+          </div>
+        </div>
+        {installed ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={!isAdmin}
+            onClick={() => void slack.disconnect()}
+            className="gap-1.5 text-destructive hover:bg-destructive/10 hover:text-destructive"
+          >
+            <Unlink className="size-3.5" />
+            Disconnect
+          </Button>
+        ) : (
+          <Button size="sm" disabled={!isAdmin || slack.connecting} onClick={() => void slack.connect()}>
+            {slack.connecting ? <Loader2 className="size-3.5 animate-spin" /> : revoked ? "Reconnect" : "Connect"}
+          </Button>
+        )}
+      </div>
+      {!isAdmin && (
+        <p className="text-xs text-muted-foreground">Only a workspace admin can connect Slack.</p>
+      )}
+      {slack.error && <p className="text-sm text-destructive">{slack.error}</p>}
+    </section>
+  );
+}
+
 function SettingsContent() {
   const { me, signOut } = useAuth();
   const profile = me?.profile;
@@ -361,6 +413,8 @@ function SettingsContent() {
           {conns.error}
         </p>
       )}
+
+      <SlackWorkspaceSection isAdmin={participant.role === "admin"} />
 
       <section className="mt-10 border-t pt-6">
         <Button

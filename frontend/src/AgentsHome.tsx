@@ -122,7 +122,11 @@ function AgentCard({
         )}
         {!now && !pendingConfirms && !lastShipped && (
           <div className="text-muted-foreground/60">
-            {status === "sleeping" ? "Asleep — wakes on message." : "Ready for work."}
+            {status === "offline"
+              ? "Device offline — messages queue until it reconnects."
+              : status === "sleeping"
+                ? "Asleep — wakes on message."
+                : "Ready for work."}
           </div>
         )}
       </div>

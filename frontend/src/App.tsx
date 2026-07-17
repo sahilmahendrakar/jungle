@@ -16,14 +16,19 @@ import {
   getThread,
   markThreadRead,
   listUnreadThreads,
+  getChannelTurnChips,
+  getChannelSlackLink,
+  extractDeliverableLinks,
   type AgentEvent,
   type Channel,
   type Deliverable,
+  type ExtractedLink,
   type Message,
   type Participant,
   type SearchResult,
   type UnreadThread,
   type Membership,
+  type SlackChannelLink,
 } from "./api";
 import {
   mergeById,
@@ -37,6 +42,8 @@ import { Scheduled } from "./Scheduled";
 import { Approvals } from "./Approvals";
 import { DeliverablesView } from "./Deliverables";
 import { AgentsHome } from "./AgentsHome";
+import { Environments } from "./Environments";
+import { LinkDevice } from "./LinkDevice";
 import { SearchDialog } from "./SearchDialog";
 import { navigate, usePath } from "./route";
 import { Button } from "@/components/ui/button";
@@ -62,10 +69,11 @@ import { Sidebar } from "./components/chat/Sidebar";
 import { ThreadPanel } from "./components/chat/ThreadPanel";
 import { NewChannelDialog } from "./components/chat/NewChannelDialog";
 import { MembersDialog } from "./components/chat/MembersDialog";
+import { SlackLinkDialog } from "./components/chat/SlackLinkDialog";
 import { DeleteChannelDialog } from "./components/chat/DeleteChannelDialog";
 import { InviteDialog } from "./components/chat/InviteDialog";
 import { useChatSocket } from "./ws/useChatSocket";
-import { useLiveTurns, type LiveTurn } from "./ws/useLiveTurns";
+import { useLiveTurns, type TurnChipData, type QueuedTurn } from "./ws/useLiveTurns";
 
 
 
@@ -113,9 +121,12 @@ export function App({
   // Jump target from search / the deliverables feed: MessageList scrolls it into view with a
   // flash once the message renders, then clears it via onJumpDone.
   const [jumpToId, setJumpToId] = useState<string | null>(null);
-  // Bounded always-on buffer of each agent's current turn (ambient activity surfaces).
-  // liveVersion is a throttled re-render tick; the live-turn-derived useMemos below depend on it.
-  const { liveTurnsRef, liveVersion, ingestLiveEvent } = useLiveTurns();
+  // Bounded always-on buffer of each agent's current turn (ambient activity surfaces), plus the
+  // turn/queued state behind the trigger-message chips (turnChipsRef/queuedRef — durable across
+  // reload via hydrateChannel). liveVersion is a throttled re-render tick; the live-turn-derived
+  // useMemos below depend on it.
+  const { liveTurnsRef, turnChipsRef, queuedRef, liveVersion, ingestLiveEvent, ingestQueued, hydrateChannel } =
+    useLiveTurns();
 
   // Threads. The right-side panel is open when a thread is open (threadRootId) or the Threads
   // list is showing (threadsListOpen). Replies + the root are DERIVED from `messages` (the
@@ -134,6 +145,9 @@ export function App({
   // Channel members panel + delete (the dialogs own their transient add-query / busy state)
   const [members, setMembers] = useState<Participant[]>([]);
   const [showMembers, setShowMembers] = useState(false);
+  // Slack mirror binding for the open channel (null = not linked) + its dialog.
+  const [slackLink, setSlackLink] = useState<SlackChannelLink | null>(null);
+  const [showSlackLink, setShowSlackLink] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   // Channel agent roster (right-panel view; the header 🤖 button toggles it).
   const [rosterOpen, setRosterOpen] = useState(false);
@@ -163,7 +177,10 @@ export function App({
   const approvalsOpen = path === "/approvals";
   const deliverablesOpen = path === "/deliverables";
   const agentsOpen = path === "/agents";
-  const overlayViewOpen = scheduledOpen || approvalsOpen || deliverablesOpen || agentsOpen;
+  const environmentsOpen = path === "/environments";
+  const linkOpen = path === "/link";
+  const overlayViewOpen =
+    scheduledOpen || approvalsOpen || deliverablesOpen || agentsOpen || environmentsOpen || linkOpen;
   // Reading "am I on an overlay view" from long-lived callbacks without re-binding them.
   const overlayViewRef = useRef(false);
   overlayViewRef.current = overlayViewOpen;
@@ -336,6 +353,11 @@ export function App({
     if (!selected) return;
     getMessages(selected).then(setMessages);
     markRead(selected);
+    // Hydrate this channel's trigger-message chips (recent turns + still-queued dispatches) so
+    // they survive a reload — live WS state (turnChipsRef/queuedRef) always wins over this.
+    getChannelTurnChips(selected)
+      .then(({ turns, queued }) => hydrateChannel(selected, turns, queued))
+      .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected]);
 
@@ -366,6 +388,31 @@ export function App({
     }
     listChannelMembers(selected).then(setMembers).catch(() => setMembers([]));
   }, [selected]);
+
+  // Load the Slack mirror binding for the open channel (powers the header badge + dialog).
+  useEffect(() => {
+    if (!selected) {
+      setSlackLink(null);
+      return;
+    }
+    let cancelled = false;
+    getChannelSlackLink(selected)
+      .then(({ link }) => !cancelled && setSlackLink(link))
+      .catch(() => !cancelled && setSlackLink(null));
+    return () => {
+      cancelled = true;
+    };
+  }, [selected]);
+
+  // Live Slack-link updates (relayed from useChatSocket as a window event) for the open channel.
+  useEffect(() => {
+    const onSlackLink = (e: Event) => {
+      const detail = (e as CustomEvent<{ channelId: string; link: SlackChannelLink | null }>).detail;
+      if (detail.channelId === selectedRef.current) setSlackLink(detail.link);
+    };
+    window.addEventListener("jungle:slack_link", onSlackLink);
+    return () => window.removeEventListener("jungle:slack_link", onSlackLink);
+  }, []);
 
   // Persist the sidebar open/closed preference and support a ⌘\ / Ctrl+\ toggle (like Slack).
   useEffect(() => {
@@ -462,6 +509,7 @@ export function App({
     refreshThreads,
     reloadChannels,
     ingestLiveEvent,
+    ingestQueued,
     onNotifiableMessage,
     onConfirmRequested,
     onConnected: refreshConfirms,
@@ -529,7 +577,9 @@ export function App({
   // The right panel is shared by three views — a participant profile, self settings, and the
   // threads pane. Opening any one clears the others so they never fight over the panel, and
   // closes the mobile nav drawer so the panel isn't hidden behind it.
-  function openProfilePanel(id: string) {
+  // useCallback (not a plain function) so its identity is stable across re-renders — same reason
+  // as personByHandle above.
+  const openProfilePanel = useCallback((id: string) => {
     setProfileId(id);
     setSettingsPanelOpen(false);
     setThreadRootId(null);
@@ -537,7 +587,7 @@ export function App({
     setRosterOpen(false);
     setActivityId(null);
     setDrawerOpen(false);
-  }
+  }, []);
   function openSettingsPanel() {
     setSettingsPanelOpen(true);
     setProfileId(null);
@@ -663,8 +713,8 @@ export function App({
     openActivity(sender.id, m.turn_id);
   }
 
-  // Open a live turn (a trigger-message chip / roster row) in the Activity view, focused on it.
-  function openLiveTurn(turn: LiveTurn) {
+  // Open a turn (a trigger-message chip / roster row) in the Activity view, focused on it.
+  function openLiveTurn(turn: TurnChipData) {
     openActivity(turn.agentId, turn.turnId);
   }
 
@@ -754,6 +804,24 @@ export function App({
     return counts;
   }, [messages]);
 
+  // Deliverable links from a thread's replies, rolled up onto the root message so its chip row
+  // shows what the thread produced without opening it (agent messages only, own body links are
+  // handled separately by MessageBody so this only needs to cover reply bodies).
+  const deliverablesByRoot = useMemo(() => {
+    const agentHandles = new Set(people.filter((p) => p.kind === "agent").map((p) => p.handle));
+    const map = new Map<string, ExtractedLink[]>();
+    for (const m of messages) {
+      if (!m.body || !agentHandles.has(m.sender_handle)) continue;
+      const links = extractDeliverableLinks(m.body);
+      if (!links.length) continue;
+      const rootId = m.thread_root_id ?? m.id;
+      const existing = map.get(rootId) ?? [];
+      for (const l of links) if (!existing.some((e) => e.url === l.url)) existing.push(l);
+      map.set(rootId, existing);
+    }
+    return map;
+  }, [messages, people]);
+
   // Unread replies per followed thread (from the Threads endpoint), for the reply-footer badge.
   const unreadByRoot = useMemo(() => {
     const m = new Map<string, number>();
@@ -793,8 +861,14 @@ export function App({
   const rooms = channels.filter((c) => c.kind !== "dm");
   const dms = channels.filter((c) => c.kind === "dm");
   const dmChannelWith = (handle: string) => dms.find((c) => c.dm_with === handle);
-  const personByHandle = (h?: string | null) =>
-    h ? people.find((p) => p.handle === h) : undefined;
+  // Stable identity across re-renders (unlike an inline arrow fn) so consumers that key off it —
+  // notably Markdown's react-markdown `components` object — don't get a "new" prop on every
+  // render and remount their custom renderers (which would drop mounted state like an open
+  // hover card) just because an unrelated live-turn tick re-rendered this component.
+  const personByHandle = useCallback(
+    (h?: string | null) => (h ? people.find((p) => p.handle === h) : undefined),
+    [people],
+  );
   const peopleById = new Map(people.map((p) => [p.id, p]));
   // Agents working/waking in the currently-open channel (drives the header banner). Read status
   // from the live `people` map rather than the `members` roster snapshot so it stays current.
@@ -808,25 +882,47 @@ export function App({
     .map((m) => peopleById.get(m.id) ?? m);
 
   // Live-turn-derived views (recompute on liveVersion, which throttles the event stream):
-  //   - turnsByMessage: running/just-finished turns anchored to a message in the OPEN channel
-  //     (the trigger-message chips), keyed by the triggering message id.
   //   - workingChannelIds: channels with a turn currently running (sidebar dot + header pulse).
-  const { turnsByMessage, workingChannelIds } = useMemo(() => {
-    const byMessage = new Map<string, LiveTurn[]>();
+  const workingChannelIds = useMemo(() => {
     const working = new Set<string>();
     for (const turn of liveTurnsRef.current.values()) {
-      const ctx = turn.context;
-      if (!turn.done && ctx?.channelId) working.add(ctx.channelId);
-      // Anchor a chip only in the channel the turn belongs to, and only on a message we hold.
-      if (ctx?.channelId === selected && ctx.messageId) {
-        const arr = byMessage.get(ctx.messageId) ?? [];
-        arr.push(turn);
-        byMessage.set(ctx.messageId, arr);
+      if (!turn.done && turn.context?.channelId) working.add(turn.context.channelId);
+    }
+    return working;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveVersion]);
+  // Turn/queued chips anchored to a message, keyed by the triggering message id — durable across
+  // reload (turnChipsRef/queuedRef are seeded from the backend on channel open, see the
+  // hydrateChannel effect below) and not filtered by channel: a message id belongs to exactly
+  // one channel, so a chip only ever gets looked up if that message is actually rendered here.
+  const { turnsByMessage, queuedByMessage } = useMemo(() => {
+    // Per (message, agent), keep only the MOST RECENT turn's chip — a thread root now
+    // accumulates one anchor per reply that re-triggers the agent (see orchestrator.ts), so
+    // without this an old "finished" chip from an earlier reply would just sit there forever
+    // next to the new one instead of being replaced by it. This is the turn-chip half of the
+    // "one active chip per (agent, thread-root)" invariant; the queued-chip half is enforced in
+    // useLiveTurns (ingestQueued / ingestLiveEvent / hydrateChannel), so a message never shows a
+    // queued chip alongside a running turn chip.
+    const latestByMessage = new Map<string, Map<string, TurnChipData>>();
+    for (const chip of turnChipsRef.current.values()) {
+      for (const mid of chip.messageIds) {
+        const byAgent = latestByMessage.get(mid) ?? new Map<string, TurnChipData>();
+        const existing = byAgent.get(chip.agentId);
+        if (!existing || chip.startedAt >= existing.startedAt) byAgent.set(chip.agentId, chip);
+        latestByMessage.set(mid, byAgent);
       }
     }
-    return { turnsByMessage: byMessage, workingChannelIds: working };
+    const byMessage = new Map<string, TurnChipData[]>();
+    for (const [mid, byAgent] of latestByMessage) byMessage.set(mid, [...byAgent.values()]);
+    const byQueuedMessage = new Map<string, QueuedTurn[]>();
+    for (const q of queuedRef.current.values()) {
+      const arr = byQueuedMessage.get(q.messageId) ?? [];
+      arr.push(q);
+      byQueuedMessage.set(q.messageId, arr);
+    }
+    return { turnsByMessage: byMessage, queuedByMessage: byQueuedMessage };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveVersion, selected]);
+  }, [liveVersion]);
   const channelAgentsActive = channelAgents.some((a) => a.status === "working");
   const profilePerson = profileId
     ? people.find((p) => p.id === profileId) ?? (me?.id === profileId ? me : undefined)
@@ -949,6 +1045,8 @@ export function App({
         approvalsCount={confirms.length}
         onOpenDeliverables={() => navigate("/deliverables")}
         deliverablesActive={deliverablesOpen}
+        onOpenEnvironments={() => navigate("/environments")}
+        environmentsActive={environmentsOpen}
         onOpenSearch={() => {
           setSearchOpen(true);
           setDrawerOpen(false);
@@ -1013,6 +1111,19 @@ export function App({
             selectAndClose(channelId);
           }}
         />
+      ) : environmentsOpen ? (
+        <Environments
+          workspaceId={workspaceId ?? null}
+          sidebarOpen={sidebarOpen}
+          onOpenDrawer={() => setDrawerOpen(true)}
+          onExpandSidebar={() => setSidebarOpen(true)}
+        />
+      ) : linkOpen ? (
+        <LinkDevice
+          sidebarOpen={sidebarOpen}
+          onOpenDrawer={() => setDrawerOpen(true)}
+          onExpandSidebar={() => setSidebarOpen(true)}
+        />
       ) : deliverablesOpen ? (
         <DeliverablesView
           deliverables={deliverables}
@@ -1060,11 +1171,13 @@ export function App({
           personByHandle={personByHandle}
           dmAgent={dmAgentIsSdk}
           activityOpen={inlineActivityOpen}
+          slackLink={slackLink}
           onOpenDrawer={() => setDrawerOpen(true)}
           onExpandSidebar={() => setSidebarOpen(true)}
           onOpenProfile={openProfilePanel}
           onOpenMembers={() => setShowMembers(true)}
           onOpenRoster={toggleRoster}
+          onOpenSlackLink={() => setShowSlackLink(true)}
           onDeleteChannel={() => setShowDeleteConfirm(true)}
           onToggleActivity={() => dmAgentIsSdk && toggleInlineActivity(dmAgentIsSdk.id)}
         />
@@ -1086,6 +1199,8 @@ export function App({
             onOpenThread={openThread}
             onOpenTurn={openTurnForMessage}
             turnsByMessage={turnsByMessage}
+            queuedByMessage={queuedByMessage}
+            deliverablesByRoot={deliverablesByRoot}
             personById={(id) => peopleById.get(id)}
             onOpenLiveTurn={openLiveTurn}
             jumpToId={jumpToId}
@@ -1222,6 +1337,13 @@ export function App({
               onClose={closeThreadPanel}
               onOpenThreadFromList={openThreadFromList}
               onSendReply={sendThreadReply}
+              rootTurns={(threadRootId && turnsByMessage.get(threadRootId)) || []}
+              rootQueued={(threadRootId && queuedByMessage.get(threadRootId)) || []}
+              personById={(id) => peopleById.get(id)}
+              onOpenTurn={openLiveTurn}
+              people={people}
+              members={members}
+              participantId={participantId}
             />
           )}
 
@@ -1265,6 +1387,17 @@ export function App({
         participantId={participantId}
         onAdd={addMember}
         onRemove={removeMember}
+      />
+
+      {/* ---------- Slack mirroring ---------- */}
+      <SlackLinkDialog
+        open={showSlackLink}
+        onOpenChange={setShowSlackLink}
+        channelId={selected}
+        channelName={sel?.name}
+        link={slackLink}
+        isAdmin={me?.role === "admin"}
+        onLinkChanged={setSlackLink}
       />
 
       {/* ---------- Delete channel confirm ---------- */}

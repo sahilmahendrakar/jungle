@@ -37,6 +37,7 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { log } from "./log.js";
 import { Connection } from "./connection.js";
@@ -52,7 +53,8 @@ import { createGmailMcpServer } from "./gmail-tool.js";
 import { createDriveMcpServer } from "./drive-tool.js";
 import { createXMcpServer } from "./x-tool.js";
 import { applyGitCredentials, cloneRepoIfNeeded, getGhToken } from "./git.js";
-import { loadState, saveState } from "./state.js";
+import { loadState, saveState, stateDir } from "./state.js";
+import { ServiceManager } from "./services.js";
 import {
   downloadAttachments,
   httpBaseFromWsUrl,
@@ -66,6 +68,8 @@ import {
   type EnqueueAttachment,
   type McpIntegrationGrant,
   type PermissionMode,
+  type ProviderConfig,
+  type SetModelFrame,
 } from "./protocol.js";
 
 interface QueueItem {
@@ -80,6 +84,9 @@ export interface RunnerEnv {
   token: string;
 }
 
+// Reported to the backend in the self-hosted `hello`. Set by the daemon from its package version.
+const RUNNER_VERSION = process.env.JUNGLE_RUNNER_VERSION ?? "0.1.0";
+
 // Tools that never need a human in `default` mode: read-only, informational, or
 // SDK-internal (ToolSearch loads tool schemas; TodoWrite is the agent's own bookkeeping).
 // Everything NOT listed (Bash, Write, Edit, NotebookEdit, external MCP tools, …) asks.
@@ -87,6 +94,10 @@ const SAFE_TOOLS = new Set([
   "ToolSearch", "Read", "Glob", "Grep", "WebSearch", "WebFetch",
   "TodoWrite", "Task", "NotebookRead", "BashOutput", "TaskOutput",
   "ListMcpResources", "ReadMcpResource", "mcp__jungle__read_history",
+  // Managed-service reads: status/log inspection never changes anything. service_start/stop
+  // are deliberately NOT here (and not in allowedTools): they run arbitrary commands / kill
+  // processes, so default mode routes them through the confirmation card like Bash.
+  "mcp__jungle__service_status", "mcp__jungle__service_logs",
   // Gmail read/search: never mutate the mailbox, so no confirmation.
   "mcp__gmail__gmail_search", "mcp__gmail__gmail_read_message",
   // Google Drive read: search/list/get never mutate, so no confirmation.
@@ -130,6 +141,7 @@ const X_READ_TOOLS = [
 // occupancy; modelUsage carries the model's context window when present.
 function contextFromResult(
   msg: unknown,
+  fallbackMaxTokens: number,
 ): { tokens: number; maxTokens: number } | null {
   const m = msg as {
     usage?: {
@@ -152,7 +164,7 @@ function contextFromResult(
       maxTokens = mu.contextWindow;
     }
   }
-  if (maxTokens <= 0) maxTokens = 200_000; // conservative default when unknown
+  if (maxTokens <= 0) maxTokens = fallbackMaxTokens; // model's window when the SDK doesn't report
   return { tokens, maxTokens };
 }
 
@@ -172,6 +184,18 @@ function messageHasStreamClosed(message: unknown): boolean {
   );
 }
 
+// True for a `result` stream message that does NOT conclude one of the user messages we
+// yielded — e.g. the CLI's bookkeeping result for an orphaned background task delivered on
+// session resume (`origin: { kind: "task-notification" }`, 0 tokens, emitted at init time).
+// Counting such a result in the close rule closes stdin at TURN START (turnResults >=
+// turnYields with the real turn still running), which kills hook/MCP control wiring for the
+// rest of the query — the same dead-wiring failure the close rule exists to prevent. Results
+// for our own yielded messages carry no origin (or "human"); anything else is not ours.
+function isNonTurnResult(message: unknown): boolean {
+  const origin = (message as { origin?: { kind?: string } }).origin;
+  return origin != null && origin.kind !== "human";
+}
+
 export class Runner {
   private conn: Connection;
 
@@ -181,6 +205,9 @@ export class Runner {
 
   // Config (from `configure`; updated by set_model / set_permission_mode / set_effort).
   private model: string | null = null;
+  // Non-Anthropic provider routing for `model` (from `configure`/`set_model`). null = first-party
+  // Anthropic (use the container's ANTHROPIC_API_KEY). Applied to the CLI child env per turn.
+  private provider: ProviderConfig | null = null;
   private permissionMode: PermissionMode = "default";
   // Reasoning effort passed to query(). undefined = let the SDK/CLI use its default (the backend
   // always sends one post-migration, so this is only undefined against an old backend).
@@ -218,11 +245,27 @@ export class Runner {
   private queue: QueueItem[] = [];
   private running = false;
   private activeQuery: Query | null = null;
+  // Hard-kill path for the active query's CLI subprocess (and any tool child processes it
+  // spawned, e.g. a blocked bash command). query.interrupt() is cooperative — a control
+  // message the CLI acts on between steps — and does not preempt an in-flight tool call.
+  // Aborting goes through the SDK's own graceful-close path (stdin EOF, ~2s grace, then
+  // child.kill()), so it actually tears down a stuck subprocess where interrupt() can't.
+  private activeAbortController: AbortController | null = null;
+  private static readonly INTERRUPT_GRACE_MS = 2_000;
   private pendingModel: string | null = null;
+  // Provider routing that lands together with pendingModel at the next turn boundary. `undefined`
+  // means "no pending model change" (distinct from `null` = pending switch to an Anthropic model).
+  private pendingProvider: ProviderConfig | null | undefined = undefined;
   // Set by a `compact` frame; consumed at the next idle boundary by running a
   // dedicated `/compact` turn. A flag (not a queue item) so it can't interleave
   // with real messages and is naturally coalesced if pressed repeatedly.
   private compactRequested = false;
+  // Set by a `clear` frame; consumed at the next idle boundary by dropping the current
+  // session so the next turn starts with an empty context window (Claude Code's /clear).
+  // Same flag-not-queue rationale as compact; coalesces if pressed repeatedly. A pending
+  // compact is dropped too (see runTurn) — summarizing a context you're about to clear is
+  // wasted work. Memory files live in a separate dir and are untouched.
+  private clearRequested = false;
 
   // Streaming-input generator plumbing: the running query's generator awaits this between
   // yields; deliverFollowupBatch resolves it with items (mid-turn splice) and endTurn()
@@ -244,6 +287,11 @@ export class Runner {
   // on this process; the post-configure report seeds it.
   private lastMemoryHash: string | null = null;
 
+  // The maxTokens the runner last reported (from getContextUsage), so a `clear` can emit a
+  // context_usage frame with the same ceiling and tokens=0 to drop the meter to empty. 0
+  // until the first turn reports usage; clear then falls back to the provider's window.
+  private lastMaxTokens = 0;
+
   // In-flight request/response correlation.
   private pendingSendMessages = new Map<string, (r: SendMessageResult) => void>();
   private pendingReadHistory = new Map<string, (r: ReadHistoryResult) => void>();
@@ -258,6 +306,12 @@ export class Runner {
   // Backend HTTP origin for attachment transfer, derived from the WS URL.
   private readonly httpBase: string;
 
+  // Long-lived processes the agent asked for (service_* tools). Owned by THIS process, not
+  // the per-turn CLI subprocess, so they survive turn boundaries; see services.ts.
+  private readonly servicesMgr = new ServiceManager(this.workspace, stateDir(), () =>
+    this.reportServices(),
+  );
+
   constructor(private readonly env: RunnerEnv) {
     this.httpBase = httpBaseFromWsUrl(env.wsUrl);
     this.conn = new Connection(env.wsUrl, env.token, {
@@ -271,12 +325,20 @@ export class Runner {
     const persisted = await loadState();
     this.sessionId = persisted.sessionId;
     this.model = persisted.model;
+    // Re-adopt services a previous runner process left running (registry + pid probe) before
+    // connecting, so the post-configure services report reflects reality.
+    await this.servicesMgr.init();
     log.info("runner starting", {
       agentId: this.env.agentId,
       sessionId: this.sessionId,
       model: this.model,
     });
     this.conn.start();
+  }
+
+  // Intentional stop (SIGTERM/SIGINT): the agent is being shut down, take its services along.
+  shutdown(): void {
+    this.servicesMgr.stopAll();
   }
 
   // ---- connection lifecycle ----
@@ -287,6 +349,19 @@ export class Runner {
       agentId: this.env.agentId,
       sessionId: this.sessionId,
       protocol: PROTOCOL_VERSION,
+      // Self-hosted runners (spawned by the daemon, which sets JUNGLE_SELF_HOSTED=1) report their
+      // machine so the backend can show it and tailor the agent's "your environment" prompt. Cloud
+      // runners omit it. `host` is optional in the protocol, so this needs no version bump.
+      ...(process.env.JUNGLE_SELF_HOSTED === "1"
+        ? {
+            host: {
+              hostname: os.hostname(),
+              platform: process.platform,
+              arch: process.arch,
+              runnerVersion: RUNNER_VERSION,
+            },
+          }
+        : {}),
     });
   }
 
@@ -327,11 +402,14 @@ export class Runner {
       case "compact":
         this.handleCompact();
         break;
+      case "clear":
+        this.handleClear();
+        break;
       case "set_permission_mode":
         void this.handleSetPermissionMode(frame.mode);
         break;
       case "set_model":
-        this.handleSetModel(frame.model);
+        this.handleSetModel(frame);
         break;
       case "set_effort":
         this.handleSetEffort(frame.effort);
@@ -402,6 +480,12 @@ export class Runner {
         // refreshes before each drain so every turn starts fresh either way.
         this.integrationTokens.set(frame.key, frame.accessToken);
         break;
+      case "service_stop":
+        // Human pressed stop in the profile panel. The manager's onChange reports the new list.
+        void this.servicesMgr.stop(frame.name).catch((err) => {
+          log.warn("service_stop frame failed", { name: frame.name, err: String(err) });
+        });
+        break;
       default:
         log.warn("unknown frame from backend", { type: (frame as any).type });
     }
@@ -409,6 +493,7 @@ export class Runner {
 
   private async handleConfigure(frame: ConfigureFrame): Promise<void> {
     this.model = frame.model;
+    this.provider = frame.provider ?? null;
     this.permissionMode = frame.permissionMode;
     this.effort = frame.effort as EffortLevel | undefined;
     this.systemPromptAppend = frame.systemPromptAppend ?? "";
@@ -455,6 +540,9 @@ export class Runner {
     // Report the current MEMORY.md once per (re)configure so the backend's mirror heals any
     // drift (e.g. rows migrated before memory existed, or a report lost across a disconnect).
     void this.reportMemoryIfChanged();
+    // Same for services: heal the backend's snapshot (covers re-adopted services after a
+    // runner restart and reports lost across a disconnect).
+    this.reportServices();
     this.maybeStartTurn();
   }
 
@@ -476,13 +564,23 @@ export class Runner {
   }
 
   private async handleInterrupt(): Promise<void> {
-    if (this.activeQuery) {
-      log.info("interrupting active turn");
-      try {
-        await this.activeQuery.interrupt();
-      } catch (err) {
-        log.warn("interrupt failed", { err: String(err) });
-      }
+    if (!this.activeQuery) return;
+    const abortController = this.activeAbortController;
+    log.info("interrupting active turn");
+    try {
+      await this.activeQuery.interrupt();
+    } catch (err) {
+      log.warn("interrupt failed", { err: String(err) });
+    }
+    // interrupt() only asks the CLI to stop between steps — it won't preempt a blocked
+    // tool subprocess (e.g. a long-running bash command). Give it a short grace window to
+    // actually end the turn; if it's still running, escalate to a hard kill. Compare by
+    // reference so we never abort a later turn's controller if one started in the meantime.
+    if (!abortController) return;
+    await new Promise((resolve) => setTimeout(resolve, Runner.INTERRUPT_GRACE_MS));
+    if (this.running && this.activeAbortController === abortController) {
+      log.warn("interrupt did not stop the turn in time; aborting");
+      abortController.abort();
     }
   }
 
@@ -492,6 +590,15 @@ export class Runner {
   private handleCompact(): void {
     this.compactRequested = true;
     log.info("compact requested");
+    this.maybeStartTurn();
+  }
+
+  // Clear request: remember it and drop the session at the next idle boundary. If a turn is
+  // already running we don't interrupt it — the flag is picked up when it finishes (runTurn's
+  // tail calls maybeStartTurn). See runTurn for why this also clears a pending compact.
+  private handleClear(): void {
+    this.clearRequested = true;
+    log.info("clear requested");
     this.maybeStartTurn();
   }
 
@@ -517,16 +624,21 @@ export class Runner {
     this.sendState();
   }
 
-  private handleSetModel(model: string): void {
-    log.info("set model requested", { model });
+  private handleSetModel(frame: SetModelFrame): void {
+    const { model } = frame;
+    const provider = frame.provider ?? null;
+    log.info("set model requested", { model, provider: provider?.name ?? "anthropic" });
     if (!this.running) {
-      // Idle: apply immediately; next turn uses the new model.
+      // Idle: apply model + provider immediately; next turn uses both.
       this.model = model;
+      this.provider = provider;
       void saveState({ sessionId: this.sessionId, model: this.model });
       this.sendState();
     } else {
-      // Running: apply at the next turn boundary by ending the current query.
+      // Running: apply at the next turn boundary by ending the current query. Model and provider
+      // land together (see the pendingModel block in endTurn) so the env swap is atomic.
       this.pendingModel = model;
+      this.pendingProvider = provider;
       // Release any pending follow-up wait so the generator returns and query ends.
       if (this.batchResolver) {
         const resolve = this.batchResolver;
@@ -540,12 +652,28 @@ export class Runner {
 
   private maybeStartTurn(): void {
     if (this.running || !this.configured) return;
-    if (this.queue.length === 0 && !this.compactRequested) return;
+    if (this.queue.length === 0 && !this.compactRequested && !this.clearRequested) return;
     void this.runTurn();
   }
 
   private async runTurn(): Promise<void> {
     this.running = true;
+
+    // A clear drops the conversation session at an idle boundary — no model work, so it
+    // short-circuits before any query/MCP setup. It also supersedes a pending compact
+    // (summarizing a context you're about to drop is wasted work). Real queued messages
+    // always win over a clear: they're drained into a normal turn and the clear is retried
+    // at its tail (maybeStartTurn), so a clear never eats pending user messages.
+    const clearing = this.queue.length === 0 && this.clearRequested;
+    if (clearing) {
+      this.clearRequested = false;
+      this.compactRequested = false;
+      await this.applyClear();
+      this.running = false;
+      this.sendState();
+      this.maybeStartTurn();
+      return;
+    }
 
     // A compact turn runs only when there's no real work queued, so `/compact`
     // operates on a settled context and never mixes with user messages.
@@ -583,6 +711,10 @@ export class Runner {
       "mcp__jungle__schedule_create",
       "mcp__jungle__schedule_list",
       "mcp__jungle__schedule_cancel",
+      // Read-only service tools are auto-allowed; service_start/stop are NOT (they run
+      // arbitrary commands / kill processes, so default mode shows a confirmation card).
+      "mcp__jungle__service_status",
+      "mcp__jungle__service_logs",
     ];
     if (gmailServer) {
       allowedTools.push(...GMAIL_READ_TOOLS);
@@ -622,12 +754,28 @@ export class Runner {
       (memoryIndex
         ? `\n\n— Your memory index (current MEMORY.md; Read linked memory files when relevant) —\n${memoryIndex}`
         : "");
+    const abortController = new AbortController();
+    this.activeAbortController = abortController;
+    // Child env for the SDK's CLI subprocess. For a non-Anthropic model, point the CLI at that
+    // provider's Anthropic-compatible endpoint and auth with its token — and DELETE the container's
+    // ANTHROPIC_API_KEY: if both it and ANTHROPIC_AUTH_TOKEN are set the request is rejected, and an
+    // empty string still wins the credential precedence, so it must be removed, not blanked.
+    const childEnv = this.childEnv();
+    if (this.provider) {
+      childEnv.ANTHROPIC_BASE_URL = this.provider.baseUrl;
+      childEnv.ANTHROPIC_AUTH_TOKEN = this.provider.authToken;
+      delete childEnv.ANTHROPIC_API_KEY;
+    }
     const q = query({
       prompt: this.makeInputGenerator(firstBatch, turnId, compacting),
       options: {
+        abortController,
         cwd: this.workspace,
         model: this.model ?? undefined,
-        effort: this.effort,
+        // Gate effort: a routed model whose registry entry says it doesn't support the Agent SDK
+        // effort/output_config knob would 400 on it. Anthropic models pass effort through (Haiku
+        // silently downgrades, as before).
+        effort: this.provider && !this.provider.supportsEffort ? undefined : this.effort,
         permissionMode: this.permissionMode,
         resume: resumeId ?? undefined,
         systemPrompt: {
@@ -647,7 +795,7 @@ export class Runner {
           PreToolUse: [{ hooks: [(input) => this.preToolUseHook(input)] }],
         },
         canUseTool: (toolName, input, opts) => this.handleCanUseTool(toolName, input, opts),
-        env: this.childEnv(),
+        env: childEnv,
       },
     });
     this.activeQuery = q;
@@ -695,9 +843,27 @@ export class Runner {
           await reconnectJungle();
         } else if ((message as any).type === "user" && messageHasStreamClosed(message)) {
           await reconnectJungle();
+        } else if ((message as any).type === "system" && (message as any).subtype === "init") {
+          // Init-time verify + heal: every init reports the CLI's mounted MCP servers. If the
+          // jungle server is missing or unhealthy, the model has NO send_message in its catalog
+          // for the whole turn — the reactive "Stream closed" reconnect can never fire (it keys
+          // on a tool_result, which requires the tool to be callable at all). Observed cause:
+          // resuming a session that has an orphaned background task makes the CLI come up with
+          // mcp_servers:[] entirely (CLI 2.1.198), silencing the agent for whole turns. Healing
+          // here covers that and any future cause of a dropped mount.
+          const mounted = (message as any).mcp_servers;
+          if (
+            Array.isArray(mounted) &&
+            !mounted.some((s: any) => s?.name === "jungle" && s?.status === "connected")
+          ) {
+            log.warn("jungle MCP server missing/unhealthy at init; remounting", {
+              mcp_servers: mounted,
+            });
+            await reconnectJungle();
+          }
         }
 
-        if ((message as any).type === "result") {
+        if ((message as any).type === "result" && !isNonTurnResult(message)) {
           this.turnResults++;
           const sid = (message as any).session_id;
           if (typeof sid === "string" && sid.length > 0 && sid !== this.sessionId) {
@@ -731,6 +897,7 @@ export class Runner {
       log.error("turn errored", { turnId, err: error });
     } finally {
       this.activeQuery = null;
+      this.activeAbortController = null;
       this.batchResolver = null;
       this.running = false;
       if (this.quiesceTimer) {
@@ -745,12 +912,18 @@ export class Runner {
     // After turn_done so a slow read can't delay the idle transition; best-effort by design.
     void this.reportMemoryIfChanged();
 
-    // Apply a pending model change now (at the turn boundary).
+    // Apply a pending model change now (at the turn boundary). The provider lands with it so the
+    // next turn's child env routes to the right endpoint. pendingProvider === undefined means no
+    // model change is pending; null means switch to an Anthropic (unrouted) model.
     if (this.pendingModel !== null) {
       this.model = this.pendingModel;
       this.pendingModel = null;
+      if (this.pendingProvider !== undefined) {
+        this.provider = this.pendingProvider;
+        this.pendingProvider = undefined;
+      }
       void saveState({ sessionId: this.sessionId, model: this.model });
-      log.info("applied pending model change", { model: this.model });
+      log.info("applied pending model change", { model: this.model, provider: this.provider?.name ?? "anthropic" });
     }
 
     this.sendState();
@@ -769,7 +942,15 @@ export class Runner {
       scheduleCreate: (id, input) => this.bridgeScheduleCreate(id, input),
       scheduleList: (id) => this.bridgeScheduleList(id),
       scheduleCancel: (id, input) => this.bridgeScheduleCancel(id, input),
+      services: this.servicesMgr,
     });
+  }
+
+  // Snapshot the managed-services list to the backend (persisted on the participant row and
+  // broadcast to open profile panels). Fired by the manager on any change and once after
+  // configure; cheap and idempotent, so no hash-compare like memory needs.
+  private reportServices(): void {
+    this.conn.send({ type: "services", services: this.servicesMgr.list() });
   }
 
   // The in-process "gmail" SDK-MCP server (gmail_search/read/send/draft/modify), reading the
@@ -844,14 +1025,30 @@ export class Runner {
       log.warn("getContextUsage failed; using result usage", { err: String(err) });
     }
     if (tokens <= 0 || maxTokens <= 0) {
-      const fb = contextFromResult(resultMessage);
+      const fb = contextFromResult(resultMessage, this.provider?.contextWindow ?? 200_000);
       if (!fb) return;
       tokens = fb.tokens;
       maxTokens = fb.maxTokens;
     }
     if (maxTokens <= 0) return;
+    this.lastMaxTokens = maxTokens;
     const percent = Math.min(100, Math.max(0, Math.round((tokens / maxTokens) * 100)));
     this.conn.send({ type: "context_usage", tokens, maxTokens, percent });
+  }
+
+  // Clear the conversation/context window (Claude Code's `/clear`): drop the current session so
+  // the next turn's resumableSessionId() returns null and starts a fresh, empty context. The
+  // old transcript file is left on the volume (harmless — orphaned) rather than risk deleting
+  // state the agent might still be referencing mid-shutdown. Memory files live in a different
+  // dir and are re-injected via the system prompt each turn, so they're unaffected. Then report
+  // an empty context window so the profile meter reflects the clear immediately.
+  private async applyClear(): Promise<void> {
+    const prev = this.sessionId;
+    log.info("clearing context (dropping session)", { prevSessionId: prev });
+    this.sessionId = null;
+    await saveState({ sessionId: null, model: this.model });
+    const maxTokens = this.lastMaxTokens || this.provider?.contextWindow || 200_000;
+    this.conn.send({ type: "context_usage", tokens: 0, maxTokens, percent: 0 });
   }
 
   // Emit a synthetic "jungle_inbound" event through the existing event-frame path (the same

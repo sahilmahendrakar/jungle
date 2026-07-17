@@ -8,11 +8,14 @@ import type {
   ConfigureFrame,
   AgentStatus,
   PermissionMode,
+  AgentServiceInfo,
 } from "@jungle/shared";
-import { isSdkMode } from "@jungle/shared";
+import { isSdkMode, catalogEntry } from "@jungle/shared";
+import { resolveProvider } from "./providers";
 import * as db from "./db";
 import { signedPath } from "./attachments";
 import { provisionerFor } from "./provisioner";
+import * as hostcontrol from "./hostcontrol";
 import { adapterFor } from "./integrations";
 
 export type { AgentStatus };
@@ -121,6 +124,10 @@ export interface RunnerHooks {
   // A turn began: carries the dispatch context of the inbox batch that fed it (null when the
   // batch had none, e.g. compaction). Broadcast so clients learn the turn's home channel.
   onTurnStarted?: (agentId: string, turnId: string, context: db.DispatchContext | null) => void;
+  // A follow-up batch was consumed by a turn ALREADY in progress (a message spliced in rather
+  // than queued for its own turn — see runner/src/runner.ts's splice comment). Lets that
+  // message's chip anchor to the same running turn instead of showing nothing.
+  onTurnMessageJoined?: (agentId: string, turnId: string, context: db.DispatchContext) => void;
   // Persist an SDK stream event and broadcast it to app websockets. `context` is the current
   // turn's dispatch context (rides on every frame so mid-turn page loads still learn the home).
   onAgentEvent: (
@@ -135,6 +142,9 @@ export interface RunnerHooks {
   // The agent's /workspace/MEMORY.md changed (reported after the turn that changed it, and once
   // after configure). Persist the mirror + broadcast so an open profile panel live-updates.
   onMemoryUpdated: (agentId: string, content: string) => void;
+  // The agent's managed-services list changed (service_* tools: started/stopped/exited), or a
+  // post-configure heal. Snapshot semantics: persist as-is + broadcast so profiles live-update.
+  onServicesUpdated: (agentId: string, services: AgentServiceInfo[]) => void;
   // A turn died (SDK crash, OOM kill, API error). Tell the humans who were waiting —
   // otherwise the agent just goes silent mid-task.
   onTurnFailed: (agent: { id: string; handle: string }, error: string) => void;
@@ -194,7 +204,11 @@ export function isConnected(agentId: string): boolean {
   return conns.has(agentId);
 }
 
-// --- Agent status (Working / Idle / Sleeping / Waking up) ---
+// Re-exported for callers that already depend on runners (orchestrator, routes): whether a
+// self-hosted agent's device is currently connected. False for cloud agents. See hostcontrol.
+export const isAgentDeviceOnline = hostcontrol.isAgentDeviceOnline;
+
+// --- Agent status (Working / Idle / Sleeping / Waking / Offline) ---
 
 // AgentStatus (imported from @jungle/shared) is the single user-facing status for an agent,
 // derived from two independent facts: whether a runner socket is currently connected (+ its
@@ -212,6 +226,10 @@ const WAKE_TIMEOUT_MS = 3 * 60_000;
 export function agentStatus(agentId: string): AgentStatus {
   const conn = conns.get(agentId);
   if (conn) return conn.state === "running" ? "working" : "idle"; // connected always wins
+  // Self-hosted with its device disconnected: the backend CANNOT wake it (no machine to start) —
+  // it's offline, not sleeping. Queued work waits for the device to come back. This predicate is
+  // false for cloud agents, so the machine-map logic below is unchanged for them.
+  if (hostcontrol.isAgentDeviceOffline(agentId)) return "offline";
   const m = machine.get(agentId);
   if (m?.kind === "starting") return "waking";
   if (m?.kind === "stopped") return "sleeping";
@@ -220,6 +238,13 @@ export function agentStatus(agentId: string): AgentStatus {
 
 function emitStatus(agentId: string): void {
   hooks?.onStatusChanged(agentId, agentStatus(agentId));
+}
+
+// Public re-emit, for hostcontrol: when a device connects/disconnects, its agents flip between
+// `offline` and `sleeping`/`idle` with no per-agent socket event of their own to trigger a
+// broadcast. index.ts calls this for each agent on the device.
+export function refreshStatus(agentId: string): void {
+  emitStatus(agentId);
 }
 
 // Set a conn's turn state, tracking when it most recently entered idle (idleSince). Used by
@@ -294,6 +319,9 @@ export function systemPromptAppend(
   agent: db.AgentRow,
   integrationBlocks: string[],
   workspaceName?: string,
+  // For self-hosted agents: whether the device runs the agent sandboxed (isolated workspace) or
+  // unsandboxed (in the user's connect directory). undefined for non-self-hosted / unknown.
+  hostSandboxed?: boolean,
 ): string {
   const ws = workspaceName ? `the "${workspaceName}" workspace` : `a workspace`;
   let s =
@@ -379,14 +407,63 @@ export function systemPromptAppend(
     `silently when there isn't. Review with schedule_list, remove with schedule_cancel. Limits: ` +
     `10 schedules per agent, recurring at most every 15 minutes. When someone asks you to ` +
     `"remind me", "check every morning", or "do X weekly", use these tools — never just promise ` +
-    `to remember. (Schedules are for future ACTIONS; MEMORY.md is for durable FACTS.)`;
+    `to remember. (Schedules are for future ACTIONS; MEMORY.md is for durable FACTS.)\n\n` +
+    `— Long-running processes: services —\n` +
+    `For anything that must keep running after your current work ends — dev servers, file ` +
+    `watchers, tunnels — use your service tools: service_start (also restarts), service_stop, ` +
+    `service_status, service_logs. Services run under your always-on supervisor, so they ` +
+    `survive between turns and conversations; their output goes to a per-service log you read ` +
+    `with service_logs. NEVER start a server with the Bash tool's run_in_background option or ` +
+    `nohup/& — those die (or leak) when your turn's sandbox exits, and people can't see or stop ` +
+    `them. run_in_background remains fine for bounded work you'll collect within the same turn ` +
+    `(builds, test runs, installs). Stop services you no longer need; humans can also see and ` +
+    `stop your services from your profile.`;
   for (const block of integrationBlocks) s += block;
-  s +=
-    `\n\n— Your environment —\n` +
-    `You run in a Linux container: no sudo/apt, ~3GB memory (don't run several heavy ` +
-    `processes at once), Chromium preinstalled for Playwright (PLAYWRIGHT_BROWSERS_PATH is set). ` +
-    `Dev servers and other long-running processes MUST use the Bash tool's run_in_background ` +
-    `option — plain \`&\` background jobs are killed when the Bash call returns.`;
+  s += `\n\n— Your environment —\n`;
+  if (agent.runner_provider === "self_hosted") {
+    // A user's OWN machine: real privileges, real files, real consequences. Say so plainly — the
+    // container caveats above are false here, and understating the stakes would be dangerous.
+    const host = (agent.runner_meta as db.RunnerMeta | null)?.host;
+    const where = host ? `directly on ${host.hostname} (${host.platform}/${host.arch})` : `directly on a personal computer`;
+    s +=
+      `You run ${where} — a personal machine belonging to your creator, NOT a disposable cloud ` +
+      `sandbox. You have that machine's real user account, real files, and real network access, so ` +
+      `your actions can have real and possibly irreversible effects. Be conservative and explicit: ` +
+      `prefer reversible steps, explain what you're about to do before anything destructive, and ` +
+      `never delete or overwrite files outside your workspace without asking. Treat credentials, ` +
+      `keys, and personal data on the machine as strictly off-limits unless the person explicitly ` +
+      `directs you to use them for the task at hand. Dev servers and other long-running ` +
+      `processes MUST use your service_start tool (see the services section above) — Bash ` +
+      `run_in_background and \`&\` jobs die with your turn.`;
+    // Unsandboxed devices root the agent's cwd at the user's connect directory rather than an
+    // isolated workspace, so the agent is editing the person's real project files in place.
+    if (hostSandboxed === false) {
+      s +=
+        ` Your working directory is the folder where \`jungle-agents connect\` was run on this ` +
+        `machine — these are your creator's real project files, not an isolated copy. Do NOT clone ` +
+        `or initialize a repo here; work with what's already present. Your session transcripts, ` +
+        `memory, and git credentials stay isolated to you, but the files in your cwd are shared ` +
+        `with the person — treat every edit as permanent.`;
+    }
+  } else {
+    s +=
+      `You run in a Linux container: no sudo/apt, ~3GB memory (don't run several heavy ` +
+      `processes at once), Chromium preinstalled for Playwright (PLAYWRIGHT_BROWSERS_PATH is set). ` +
+      `Dev servers and other long-running processes MUST use your service_start tool (see the ` +
+      `services section above) — Bash run_in_background and \`&\` jobs die with your turn.`;
+  }
+  // Non-Anthropic models don't have Claude's native memory convention trained in, so spell the
+  // mechanic out explicitly (the section above assumes the "base instructions" memory system).
+  if (catalogEntry(agent.model)?.provider !== "anthropic" && agent.model) {
+    s +=
+      `\n\n— How your memory works (mechanics) —\n` +
+      `Your memory lives as markdown files under $CLAUDE_CONFIG_DIR/projects/<slug>/memory/, ` +
+      `indexed by a MEMORY.md file in that directory. To remember a durable fact: write (or edit) ` +
+      `a short markdown file there and add a one-line entry for it to MEMORY.md. To recall: read ` +
+      `MEMORY.md (its contents are injected each turn) and Read any file whose entry looks ` +
+      `relevant before acting. Nothing you keep only in your reply survives to the next ` +
+      `conversation — if a fact should outlast this turn, write it to a memory file now.`;
+  }
   return s;
 }
 
@@ -401,6 +478,11 @@ async function buildConfigure(agent: db.AgentRow): Promise<ConfigureFrame> {
     model: agent.model ?? null,
     permissionMode: toPermissionMode(agent.mode),
     effort: agent.effort,
+    // Non-Anthropic model? Resolve its endpoint + key so the runner routes there. null for
+    // Anthropic/default models (runner keeps its container ANTHROPIC_API_KEY). If a routed
+    // provider's key is missing this returns null and logs — the turn then fails loudly against
+    // Anthropic rather than silently misrouting.
+    provider: resolveProvider(agent.model ?? null),
     systemPromptAppend: "",
   };
   const blocks: string[] = [];
@@ -411,7 +493,15 @@ async function buildConfigure(agent: db.AgentRow): Promise<ConfigureFrame> {
     if (block) blocks.push(block);
   }
   const workspace = await db.getWorkspace(agent.workspace_id);
-  frame.systemPromptAppend = systemPromptAppend(agent, blocks, workspace?.name);
+  // For self-hosted agents, the device's sandbox setting decides whether the agent runs in an
+  // isolated workspace (true) or in the user's connect directory (false). The prompt's
+  // "your environment" block depends on it, so resolve it here.
+  let hostSandboxed: boolean | undefined;
+  if (agent.runner_provider === "self_hosted") {
+    const hostId = (agent.runner_meta as db.RunnerMeta | null)?.hostId;
+    if (hostId) hostSandboxed = (await db.getHost(hostId))?.sandboxed;
+  }
+  frame.systemPromptAppend = systemPromptAppend(agent, blocks, workspace?.name, hostSandboxed);
   return frame;
 }
 
@@ -496,8 +586,13 @@ async function sweepOnce(): Promise<void> {
     const agents = await db.listSdkAgents();
     for (const agent of agents) {
       const conn = conns.get(agent.id);
+      const selfHosted = agent.runner_provider === "self_hosted";
       try {
         if (conn) {
+          // Self-hosted: keep the runner child alive while the device is online (no idle-stop) —
+          // it's cheap when idle on the user's own machine, and killing/respawning it would add
+          // session-resume latency to every message. The child stops when the device disconnects.
+          if (selfHosted) continue;
           if (IDLE_STOP_MS === 0) continue;
           if (conn.state !== "idle" || conn.idleSince == null) continue;
           if (Date.now() - conn.idleSince < IDLE_STOP_MS) continue;
@@ -505,6 +600,9 @@ async function sweepOnce(): Promise<void> {
           await provisionerFor(agent).stop(agent.id);
           noteProvisionerStop(agent.id);
         } else {
+          // Self-hosted with an offline device: we can't wake it — skip (the work stays queued and
+          // drains when the daemon reconnects). Only start when the device is actually online.
+          if (selfHosted && !hostcontrol.isAgentDeviceOnline(agent.id)) continue;
           if (machine.get(agent.id)?.kind === "starting") continue;
           if ((await db.pendingInbox(agent.id)).length === 0) continue;
           await provisionerFor(agent).start(agent.id);
@@ -526,6 +624,13 @@ export function startIdleSweeper(): void {
   setInterval(() => void sweepOnce(), SWEEP_INTERVAL_MS).unref();
 }
 
+// Run one sweep pass immediately (out of band from the 15s timer). Used when a self-hosted device
+// just came online, so any agent that queued work while it was offline starts without waiting for
+// the next tick.
+export function kickSweep(): void {
+  void sweepOnce();
+}
+
 // Loop guard for the fatal-restart path below: at most FATAL_RESTART_MAX restarts per agent
 // within FATAL_RESTART_WINDOW_MS, so a runner that fatals immediately on every boot doesn't
 // spin the machine forever.
@@ -541,7 +646,9 @@ export function setPermissionMode(agentId: string, mode: PermissionMode): void {
 }
 export function setModel(agentId: string, model: string): void {
   const conn = conns.get(agentId);
-  if (conn) send(conn, { type: "set_model", model });
+  // Carry the new model's provider routing so the runner swaps model + credentials together at
+  // its next turn boundary (see runner handleSetModel). null for Anthropic/default models.
+  if (conn) send(conn, { type: "set_model", model, provider: resolveProvider(model) });
 }
 export function setEffort(agentId: string, effort: string): void {
   const conn = conns.get(agentId);
@@ -579,9 +686,33 @@ export function compact(agentId: string): boolean {
   return true;
 }
 
+// Ask the agent's runner to stop one of its managed services (the profile panel's stop
+// button). Returns false if no runner is connected — the UI surfaces that as "agent offline"
+// (a sleeping cloud agent has no running services to stop; a disconnected self-hosted one
+// can't be reached anyway).
+export function stopService(agentId: string, name: string): boolean {
+  const conn = conns.get(agentId);
+  if (!conn) return false;
+  send(conn, { type: "service_stop", name });
+  return true;
+}
+
+// Ask the agent's runner to clear its conversation/context window (Claude Code's `/clear`).
+// The runner drops the session at the next idle boundary. Returns false if no runner is
+// connected (see clearContextOrWake for the asleep/wake path).
+export function clearContext(agentId: string): boolean {
+  const conn = conns.get(agentId);
+  if (!conn) return false;
+  send(conn, { type: "clear" });
+  return true;
+}
+
 // agentId -> a compact request made while the machine was asleep/waking, to be delivered the
 // moment its runner says `hello` (see the "hello" case below).
 const pendingCompact = new Set<string>();
+
+// Same as pendingCompact, but for a clear-context request made while asleep/waking.
+const pendingClear = new Set<string>();
 
 // Compact-button entry point: sends immediately if a runner is connected; otherwise wakes the
 // agent's machine (same wake-on-message path as a triggering chat message) and remembers the
@@ -590,6 +721,11 @@ export async function compactOrWake(
   agent: db.Participant,
 ): Promise<"sent" | "waking" | "wake_failed"> {
   if (compact(agent.id)) return "sent";
+  // Self-hosted with an offline device: nothing to wake — report failure so the UI can say the
+  // device is offline rather than spinning on "waking" forever.
+  if (agent.runner_provider === "self_hosted" && !hostcontrol.isAgentDeviceOnline(agent.id)) {
+    return "wake_failed";
+  }
   pendingCompact.add(agent.id);
   try {
     await provisionerFor(agent).start(agent.id);
@@ -598,6 +734,27 @@ export async function compactOrWake(
   } catch (e) {
     pendingCompact.delete(agent.id);
     console.error(`compactOrWake: wake failed for ${agent.id}:`, e);
+    return "wake_failed";
+  }
+}
+
+// Clear-context button entry point: same shape as compactOrWake — send immediately if a runner
+// is connected, otherwise wake the machine and deliver the clear once it says `hello`.
+export async function clearContextOrWake(
+  agent: db.Participant,
+): Promise<"sent" | "waking" | "wake_failed"> {
+  if (clearContext(agent.id)) return "sent";
+  if (agent.runner_provider === "self_hosted" && !hostcontrol.isAgentDeviceOnline(agent.id)) {
+    return "wake_failed";
+  }
+  pendingClear.add(agent.id);
+  try {
+    await provisionerFor(agent).start(agent.id);
+    noteProvisionerStart(agent.id);
+    return "waking";
+  } catch (e) {
+    pendingClear.delete(agent.id);
+    console.error(`clearContextOrWake: wake failed for ${agent.id}:`, e);
     return "wake_failed";
   }
 }
@@ -742,12 +899,22 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         conn.currentTurnId = null;
         conn.currentTurnContext = null;
         clearMachine(agentId); // a live hello always wins over stale starting/stopped state
+        // Self-hosted: persist the host details the runner reports so the "your environment"
+        // prompt block and the profile's Environment card reflect the real machine. Merge (don't
+        // clobber) so the hostId set at assignment survives.
+        if (agent.runner_provider === "self_hosted" && frame.host) {
+          const meta = (agent.runner_meta as db.RunnerMeta | null) ?? {};
+          const merged: db.RunnerMeta = { ...meta, host: frame.host };
+          await db.setRunnerMeta(agentId, merged);
+          agent.runner_meta = merged as Record<string, unknown>; // reflect in the configure we build below
+        }
         emitStatus(agentId);
         send(conn, await buildConfigure(agent));
         // Runner is idle after configure — push any queued work, plus a compact requested
         // while this agent was asleep/waking (see compactOrWake).
         await drain(agentId);
         if (pendingCompact.delete(agentId)) send(conn, { type: "compact" });
+        if (pendingClear.delete(agentId)) send(conn, { type: "clear" });
         break;
       }
       case "state": {
@@ -774,6 +941,14 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         // `consumed` carries no turnId of its own; attribute to the socket's current turn
         // (markInboxConsumed coalesces, so rows already stamped by turn_started keep theirs).
         await db.markInboxConsumed(agentId, ids, conn.currentTurnId);
+        // Anchor this batch's dispatch context to the current turn too. Covers both the very
+        // first batch (already anchored by turn_started — a no-op here) and a later batch
+        // spliced into a turn already in progress: a genuinely new anchor, so that message gets
+        // its own chip pointing at the SAME running turn instead of showing nothing.
+        if (conn.currentTurnId) {
+          const ctx = await db.contextForInboxIds(agentId, ids);
+          if (ctx) hooks?.onTurnMessageJoined?.(agentId, conn.currentTurnId, ctx);
+        }
         break;
       }
       case "event": {
@@ -785,7 +960,10 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
       case "context_usage": {
         const tokens = Number(frame.tokens);
         const maxTokens = Number(frame.maxTokens);
-        if (Number.isFinite(tokens) && Number.isFinite(maxTokens) && tokens > 0 && maxTokens > 0) {
+        // tokens may be 0 (a `/clear` reporting an emptied context window); maxTokens must
+        // still be positive so a junk/missing frame is ignored. The runner only ever sends
+        // tokens=0 for an intentional clear — reportContextUsage returns early on <=0.
+        if (Number.isFinite(tokens) && Number.isFinite(maxTokens) && tokens >= 0 && maxTokens > 0) {
           hooks?.onContextUsage(agentId, { tokens: Math.round(tokens), maxTokens: Math.round(maxTokens) });
         }
         break;
@@ -795,6 +973,27 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         // into the prompt; this guards the DB against a runaway file).
         const content = String(frame.content ?? "").slice(0, 65_536);
         hooks?.onMemoryUpdated(agentId, content);
+        break;
+      }
+      case "services": {
+        // Managed-services snapshot. Sanitize/bound each entry — this goes straight into a
+        // jsonb column and back out to clients, so never trust runner-supplied shapes.
+        const services: AgentServiceInfo[] = (Array.isArray(frame.services) ? frame.services : [])
+          .slice(0, 32)
+          .filter((s) => s && typeof s.name === "string" && typeof s.command === "string")
+          .map((s) => ({
+            name: s.name.slice(0, 64),
+            command: s.command.slice(0, 2_000),
+            ...(typeof s.cwd === "string" ? { cwd: s.cwd.slice(0, 512) } : {}),
+            status: s.status === "running" ? "running" : "exited",
+            ...(typeof s.pid === "number" ? { pid: s.pid } : {}),
+            startedAt: typeof s.startedAt === "string" ? s.startedAt.slice(0, 40) : "",
+            ...(typeof s.exitedAt === "string" ? { exitedAt: s.exitedAt.slice(0, 40) } : {}),
+            ...(typeof s.exitCode === "number" || s.exitCode === null
+              ? { exitCode: s.exitCode }
+              : {}),
+          }));
+        hooks?.onServicesUpdated(agentId, services);
         break;
       }
       case "send_message": {
@@ -949,6 +1148,10 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         const agent = await db.getAgentRow(agentId);
         if (agent && hooks) hooks.onTurnFailed({ id: agent.id, handle: agent.handle }, `fatal: ${frame.error}`);
         if (!agent) break;
+        // Self-hosted: the device's own daemon supervises its runner children (it restarts a
+        // crashed child with backoff). Don't also drive a provisioner restart from here — we don't
+        // own that machine, and stop/start would just race the daemon's own recovery.
+        if (agent.runner_provider === "self_hosted") break;
         const now = Date.now();
         const hist = (fatalRestarts.get(agentId) ?? []).filter((t) => now - t < FATAL_RESTART_WINDOW_MS);
         if (hist.length >= FATAL_RESTART_MAX) {

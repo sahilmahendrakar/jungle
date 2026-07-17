@@ -196,17 +196,44 @@ async function runAgentReply(
     // threadRootId defaults back into that thread) rides ON the inbox item and takes effect when
     // the runner consumes it. Enqueue the composed input and push it to the runner if one is
     // connected. If not, it waits in the inbox until the next `hello`.
+    // Chip anchor: a reply INSIDE a thread anchors to the thread ROOT, not itself — otherwise
+    // every follow-up reply that re-triggers the agent would pop its own new chip somewhere deep
+    // in the thread (pure thread-only replies don't even render in the main timeline, so it'd be
+    // invisible there). Anchoring to the root means all of a thread's agent activity shows/
+    // updates in the one place the root's chip already renders (main channel timeline).
+    const chipMessageId = existingThreadRootId ?? triggerMessage.id;
+    // If the agent is already busy, this dispatch will sit in the inbox until the current turn
+    // ends (or splices it in mid-turn) — tell the workspace now so the triggering message shows
+    // a "queued" chip immediately instead of nothing until a turn actually picks it up.
+    const willQueue = runners.agentStatus(agent.id) === "working";
     await db.enqueueInboxItem(agent.id, input, attachments, {
       budget: replyBudget,
       channelId: triggerChannelId,
       threadRootId: existingThreadRootId,
-      messageId: triggerMessage.id,
+      messageId: chipMessageId,
     });
+    if (willQueue) {
+      broadcastAgentWorkspace(agent.id, {
+        type: "agent_queued",
+        agentId: agent.id,
+        context: {
+          channelId: triggerChannelId,
+          threadRootId: existingThreadRootId,
+          messageId: chipMessageId,
+        },
+      });
+    }
     await runners.drain(agent.id);
     // Wake-on-message: if the agent's machine is stopped/absent (idle-stop, or never started), a
     // disconnected runner won't have received the drain above — kick the provisioner so it comes
     // up and connects, at which point `hello` drains the real inbox.
     if (!runners.isConnected(agent.id)) {
+      // Self-hosted with an offline device: there's nothing to wake — the backend doesn't own the
+      // machine. The item stays queued and drains when the daemon reconnects; the agent shows
+      // `offline`. Skip the provisioner kick (it would no-op and just log a spurious wake timeout).
+      if (agent.runner_provider === "self_hosted" && !runners.isAgentDeviceOnline(agent.id)) {
+        return;
+      }
       try {
         await provisionerFor(agent).start(agent.id);
         runners.noteProvisionerStart(agent.id);
@@ -395,11 +422,13 @@ export function buildRunnerHooks(): runners.RunnerHooks {
       return { ok: true };
     },
     // Every turn_done -> attribute the result to any schedules whose fires fed the turn
-    // (success/failure counters + auto-pause live in the scheduler).
+    // (success/failure counters + auto-pause live in the scheduler), and close out the durable
+    // turn row so a reload can show the chip as finished instead of forever "running".
     onTurnFinished: (agentId, turnId, ok, error) => {
       void scheduler.noteTurnResult(agentId, turnId, ok, error).catch((e) =>
         console.error("noteTurnResult:", e),
       );
+      void db.finishTurn(agentId, turnId, ok).catch((e) => console.error("finishTurn:", e));
     },
     // A runner's confirm_request -> surface a confirmation card in the channel that triggered this
     // agent. Resolving the card resolves this promise; runners.ts relays it as confirm_result.
@@ -411,9 +440,11 @@ export function buildRunnerHooks(): runners.RunnerHooks {
       }
       return surfaceConfirmCard(agent, channelId, confirm.toolName, confirm.input);
     },
-    // A turn began -> tell the workspace where it was triggered from (channel/thread/message),
-    // so clients can show the work where it was requested.
+    // A turn began -> persist the durable turn row (so a reload can hydrate its chip) and tell
+    // the workspace where it was triggered from (channel/thread/message), so clients can show
+    // the work where it was requested.
     onTurnStarted: (agentId, turnId, context) => {
+      void db.ensureTurn(agentId, turnId, context).catch((e) => console.error("ensureTurn:", e));
       broadcastAgentWorkspace(agentId, {
         type: "agent_turn",
         agentId,
@@ -422,6 +453,25 @@ export function buildRunnerHooks(): runners.RunnerHooks {
           ? { channelId: context.channelId, threadRootId: context.threadRootId, messageId: context.messageId }
           : null,
       });
+    },
+    // A follow-up batch was consumed by a turn ALREADY in progress (spliced in, not queued for
+    // its own turn) -> anchor its message to the same durable turn row. Only broadcast when the
+    // anchor is genuinely new (ensureTurn is a no-op — and returns false — for the batch that
+    // already anchored via onTurnStarted), so clients add this message to the same running/
+    // finished chip instead of duplicating it.
+    onTurnMessageJoined: (agentId, turnId, context) => {
+      void db
+        .ensureTurn(agentId, turnId, context)
+        .then((added) => {
+          if (!added) return;
+          broadcastAgentWorkspace(agentId, {
+            type: "agent_turn",
+            agentId,
+            turnId,
+            context: { channelId: context.channelId, threadRootId: context.threadRootId, messageId: context.messageId },
+          });
+        })
+        .catch((e) => console.error("ensureTurn (message joined):", e));
     },
     // A runner's SDK stream event -> persist for the Activity feed + broadcast to the agent's
     // workspace (raw tool output must never leak to other workspaces). The turn's context rides
@@ -459,6 +509,14 @@ export function buildRunnerHooks(): runners.RunnerHooks {
         .updateAgentMemory(agentId, content)
         .catch((e) => console.error("updateAgentMemory:", e));
       broadcastAgentWorkspace(agentId, { type: "agent_memory_changed", agentId });
+    },
+    // The agent's managed services changed -> persist the snapshot + broadcast so an open
+    // profile panel's Services section live-updates (same refetch pattern as memory).
+    onServicesUpdated: (agentId, services) => {
+      void db
+        .updateAgentServices(agentId, services)
+        .catch((e) => console.error("updateAgentServices:", e));
+      broadcastAgentWorkspace(agentId, { type: "agent_services_changed", agentId });
     },
     // A turn crashed -> post a notice from the agent into the channel that triggered it so the
     // humans waiting aren't ghosted. cascadeBudget 0: a crash notice must never trigger others.

@@ -1,5 +1,5 @@
 import type pg from "pg";
-import type { ParticipantBase, Kind } from "@jungle/shared";
+import type { ParticipantBase, Kind, AgentServiceInfo } from "@jungle/shared";
 import { pool } from "./pool";
 
 // A participant row as stored: the public shape (in @jungle/shared) plus the server-only runner
@@ -27,19 +27,20 @@ export async function createParticipant(p: {
   runtime?: string | null;
   runnerToken?: string | null;
   runnerProvider?: string | null;
+  persona?: string | null; // creator-written role/personality, injected into the system prompt
 }, client?: pg.PoolClient): Promise<Participant> {
   const { rows } = await (client ?? pool).query<Participant>(
     `insert into participants
        (kind, workspace_id, handle, display_name, role, repo, firebase_uid, email, avatar_url,
-        model, mode, runtime, runner_token, runner_provider)
+        model, mode, runtime, runner_token, runner_provider, persona)
      values ($1, $2, $3, $4, coalesce($5, 'member'), $6, $7, $8, $9, $10, coalesce($11, 'default'),
-             coalesce($12, 'sdk'), $13, coalesce($14, 'docker'))
+             coalesce($12, 'sdk'), $13, coalesce($14, 'docker'), $15)
      returning *`,
     [
       p.kind, p.workspaceId, p.handle, p.displayName, p.role ?? null, p.repo ?? null,
       p.firebaseUid ?? null, p.email ?? null, p.avatarUrl ?? null,
       p.model ?? null, p.mode ?? null, p.runtime ?? null, p.runnerToken ?? null,
-      p.runnerProvider ?? null,
+      p.runnerProvider ?? null, p.persona ?? null,
     ],
   );
   return rows[0];
@@ -121,6 +122,38 @@ export async function getAgentMemory(
   return rows[0] ?? null;
 }
 
+// Persist the managed-services snapshot an agent's runner reported (`services` frame).
+// Empty list -> null, so "never had services" and "all gone" look the same.
+export async function updateAgentServices(
+  id: string,
+  services: AgentServiceInfo[],
+): Promise<void> {
+  await pool.query(
+    `update participants set runner_services = $1, runner_services_updated_at = now()
+      where id = $2 and kind = 'agent'`,
+    [services.length ? JSON.stringify(services) : null, id],
+  );
+}
+
+// The agent's stored services snapshot, for GET /api/agents/:id/services (on-demand like
+// memory — kept out of participant list payloads).
+export async function getAgentServices(
+  id: string,
+): Promise<{ services: AgentServiceInfo[]; updatedAt: string | null }> {
+  const { rows } = await pool.query<{
+    runner_services: AgentServiceInfo[] | null;
+    runner_services_updated_at: string | null;
+  }>(
+    `select runner_services, runner_services_updated_at
+       from participants where id = $1 and kind = 'agent'`,
+    [id],
+  );
+  return {
+    services: rows[0]?.runner_services ?? [],
+    updatedAt: rows[0]?.runner_services_updated_at ?? null,
+  };
+}
+
 // Every workspace membership for a Firebase Auth uid (one participant row per workspace joined),
 // oldest first. A Google account maps to at most one participant per workspace.
 export async function listParticipantsByUid(uid: string): Promise<Participant[]> {
@@ -188,6 +221,24 @@ export async function listParticipants(workspaceId: string): Promise<Participant
 
 export async function getParticipant(id: string): Promise<Participant | null> {
   const { rows } = await pool.query<Participant>(`select * from participants where id = $1`, [id]);
+  return rows[0] ?? null;
+}
+
+// A human in a workspace matching an email (case-insensitive). Used by the Slack bridge to
+// attribute a Slack user's messages to their real Jungle account instead of a shadow. Agents
+// don't have meaningful emails, so restrict to humans. Prefer a real (signed-in) account over a
+// prior shadow if an email somehow collides — real accounts have a firebase_uid.
+export async function getParticipantByEmail(
+  workspaceId: string,
+  email: string,
+): Promise<Participant | null> {
+  const { rows } = await pool.query<Participant>(
+    `select * from participants
+     where workspace_id = $1 and kind = 'human' and lower(email) = lower($2)
+     order by (firebase_uid is null), created_at
+     limit 1`,
+    [workspaceId, email],
+  );
   return rows[0] ?? null;
 }
 

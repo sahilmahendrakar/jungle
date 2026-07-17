@@ -22,6 +22,10 @@ export interface HelloFrame {
   agentId: string;
   sessionId: string | null;
   protocol: 1;
+  // Where this runner is executing. Reported by self-hosted runners so the backend can surface
+  // the host in the UI and tailor the "your environment" system-prompt block; omitted by cloud
+  // (docker/fly) runners. Optional → no protocol version bump; old runners simply don't send it.
+  host?: { hostname: string; platform: string; arch: string; runnerVersion: string };
 }
 
 export interface StateFrame {
@@ -144,6 +148,29 @@ export interface MemoryFrame {
   content: string;
 }
 
+// A long-lived process the RUNNER manages on the agent's machine (the service_* agent tools):
+// dev servers, file watchers, tunnels. Owned by the always-on runner process — NOT the per-turn
+// CLI subprocess — so it survives turn boundaries (a Bash run_in_background task dies when the
+// turn's CLI exits, and its orphaned record breaks the next session's MCP mount; services exist
+// to make that pattern unnecessary). Registry + logs live in the runner's state dir.
+export interface AgentServiceInfo {
+  name: string; // unique per agent, kebab-case
+  command: string; // the shell command line the service runs
+  cwd?: string; // working directory (defaults to the agent workspace)
+  status: "running" | "exited";
+  pid?: number; // process-group leader while running
+  startedAt: string; // ISO
+  exitedAt?: string; // ISO, exited only
+  exitCode?: number | null; // exited only; null = killed by signal
+}
+
+// Runner -> backend: the full service list, sent after configure and on every change
+// (start/stop/exit). Snapshot semantics — the backend replaces, never merges.
+export interface ServicesFrame {
+  type: "services";
+  services: AgentServiceInfo[];
+}
+
 export interface FatalFrame {
   type: "fatal";
   error: string;
@@ -164,6 +191,7 @@ export type RunnerToBackend =
   | TurnDoneFrame
   | ContextUsageFrame
   | MemoryFrame
+  | ServicesFrame
   | FatalFrame;
 
 // ---- Backend -> runner ----
@@ -183,11 +211,27 @@ export interface McpIntegrationGrant {
   requireApproval: boolean;
 }
 
+// Routing + credentials for a non-Anthropic model served by an Anthropic-compatible endpoint
+// (e.g. GLM 5.2 via z.ai). The backend resolves this from the agent's model; the runner applies
+// it by setting ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN (and removing ANTHROPIC_API_KEY) in the
+// CLI child env for that turn. Absent/null on a frame => first-party Anthropic (container key).
+// `authToken` is a secret — never log it (log `name` instead).
+export interface ProviderConfig {
+  name: string; // provider id, e.g. "zai" (logging/telemetry only)
+  baseUrl: string; // e.g. "https://api.z.ai/api/anthropic"
+  authToken: string; // operator-owned provider API key
+  supportsEffort: boolean; // false => runner omits the SDK `effort` option for this model
+  contextWindow: number; // fallback context window when the SDK doesn't report one
+}
+
 export interface ConfigureFrame {
   type: "configure";
   model: string | null; // null = let the runner use the SDK/agent-config default model
   permissionMode: PermissionMode;
   effort?: string; // reasoning effort (low|medium|high|xhigh); omitted = SDK/CLI default
+  // Non-Anthropic provider routing for `model`, if any (see ProviderConfig). Absent/null = the
+  // model is served by first-party Anthropic using the runner container's ANTHROPIC_API_KEY.
+  provider?: ProviderConfig | null;
   systemPromptAppend?: string;
   git?: { token: string; login: string; repoUrl?: string };
   // The agent's attached Gmail integration, if any: a fresh OAuth access token for the
@@ -234,6 +278,15 @@ export interface CompactFrame {
   type: "compact";
 }
 
+// Ask the agent to clear its conversation/context window (Claude Code's `/clear`).
+// Applied at the next idle boundary: the runner drops its current session so the
+// next turn starts with an empty context. Memory files are separate (a different
+// dir, re-injected via the system prompt each turn) so they're preserved. A pending
+// compact is superseded — no point summarizing a context that's about to be dropped.
+export interface ClearFrame {
+  type: "clear";
+}
+
 export interface SetPermissionModeFrame {
   type: "set_permission_mode";
   mode: PermissionMode;
@@ -242,6 +295,10 @@ export interface SetPermissionModeFrame {
 export interface SetModelFrame {
   type: "set_model";
   model: string;
+  // Provider routing for the new model (see ProviderConfig). Carried alongside `model` so the
+  // model swap and its credentials apply atomically at the runner's next turn boundary. Absent/
+  // null => the new model is first-party Anthropic.
+  provider?: ProviderConfig | null;
 }
 
 export interface SetEffortFrame {
@@ -312,11 +369,20 @@ export interface IntegrationCredentialsFrame {
   accessToken: string;
 }
 
+// Backend -> runner: stop one of the agent's managed services by name (the profile panel's
+// stop button). The runner kills the service's process group and reports the new list via a
+// ServicesFrame. Unknown names are a no-op (the frame is advisory, not correlated).
+export interface ServiceStopFrame {
+  type: "service_stop";
+  name: string;
+}
+
 export type BackendToRunner =
   | ConfigureFrame
   | EnqueueFrame
   | InterruptFrame
   | CompactFrame
+  | ClearFrame
   | SetPermissionModeFrame
   | SetModelFrame
   | SetEffortFrame
@@ -328,4 +394,5 @@ export type BackendToRunner =
   | ConfirmResultFrame
   | GitCredentialsFrame
   | GmailCredentialsFrame
-  | IntegrationCredentialsFrame;
+  | IntegrationCredentialsFrame
+  | ServiceStopFrame;

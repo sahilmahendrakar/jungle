@@ -10,8 +10,14 @@ import path from "node:path";
 import { log } from "./log.js";
 
 const HOME = process.env.HOME ?? os.homedir();
-const CREDENTIALS_FILE = path.join(HOME, ".git-credentials");
-const REPO_DIR = "/workspace/repo";
+// Portability (self-hosted): the repo clones inside the workspace (not a hardcoded /workspace), and
+// the credential store is redirectable via JUNGLE_GIT_CREDENTIALS. On a user's own machine the
+// daemon points JUNGLE_GIT_CREDENTIALS + GIT_CONFIG_GLOBAL into the agent's private state dir so the
+// agent never clobbers the person's real ~/.gitconfig / ~/.git-credentials. In a container both are
+// unset and this stays exactly as before (~/.git-credentials, global gitconfig).
+const WORKSPACE = process.env.JUNGLE_WORKSPACE ?? "/workspace";
+const CREDENTIALS_FILE = process.env.JUNGLE_GIT_CREDENTIALS ?? path.join(HOME, ".git-credentials");
+const REPO_DIR = path.join(WORKSPACE, "repo");
 
 // Latest known token, injected into the SDK env option (see runner.ts).
 let currentToken: string | null = null;
@@ -45,7 +51,9 @@ export async function applyGitCredentials(token: string, login: string): Promise
   const line = `https://x-access-token:${token}@github.com\n`;
   try {
     await fs.writeFile(CREDENTIALS_FILE, line, { mode: 0o600 });
-    await run("git", ["config", "--global", "credential.helper", "store"]);
+    // Point the store helper explicitly at our file so it works regardless of HOME and never reads
+    // the user's default ~/.git-credentials on a self-hosted machine.
+    await run("git", ["config", "--global", "credential.helper", `store --file=${CREDENTIALS_FILE}`]);
     // Identity for commits the agent makes.
     await run("git", ["config", "--global", "user.name", user]);
     await run("git", ["config", "--global", "user.email", `${user}@users.noreply.github.com`]);
@@ -58,7 +66,16 @@ export async function applyGitCredentials(token: string, login: string): Promise
 // Clone repoUrl into /workspace/repo if it doesn't already exist there. Retries with
 // backoff: a just-minted GitHub App installation token can 404 ("Repository not found")
 // on GitHub's git endpoints for a few seconds until it propagates.
+//
+// Skipped entirely when JUNGLE_AUTO_CLONE_REPO=0: an unsandboxed self-hosted device roots the
+// agent's workspace at the user's real connect directory (their own repo), so cloning into
+// <workspace>/repo would nest or collide. Credentials are still applied above, so the agent can
+// push against the repo that's already checked out in its cwd.
 export async function cloneRepoIfNeeded(repoUrl: string): Promise<void> {
+  if (process.env.JUNGLE_AUTO_CLONE_REPO === "0") {
+    log.info("auto-clone suppressed (unsandboxed device); using repo in cwd", { repoUrl });
+    return;
+  }
   try {
     await fs.access(path.join(REPO_DIR, ".git"));
     log.info("repo already present, skipping clone", { dir: REPO_DIR });

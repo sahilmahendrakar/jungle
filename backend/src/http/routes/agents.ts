@@ -7,6 +7,7 @@ import {
   getIntegrationType,
   PERSONA_MAX_LENGTH,
 } from "@jungle/shared";
+import { providerConfigured } from "../../providers";
 import * as db from "../../db";
 import * as auth from "../../auth";
 import * as runners from "../../runners";
@@ -15,7 +16,7 @@ import { broadcastWorkspace } from "../../ws/appSocket";
 import { listPendingConfirmsFor, resolveConfirmDecision } from "../../services/confirmations";
 import { wrap, ApiError } from "../errors";
 import { optInt } from "../validate";
-import { publicParticipant, requireAgent, requireRequester } from "../guards";
+import { publicParticipant, requireAgent, requireRequester, accountUid } from "../guards";
 import { adapterFor } from "../../integrations";
 
 const router = Router();
@@ -69,13 +70,38 @@ router.post(
     const me = await requireRequester(req);
     const { handle, displayName } = req.body ?? {};
     if (!handle || !displayName) throw new ApiError(400, "handle, displayName required");
+    // Optional creator-written instructions/persona, injected into the agent's system prompt. Same
+    // length cap as the profile-page edit; empty string clears it (stored as null).
+    let persona: string | null = null;
+    if (req.body?.persona !== undefined) {
+      persona = String(req.body.persona ?? "").trim() || null;
+      if (persona && persona.length > PERSONA_MAX_LENGTH) {
+        throw new ApiError(400, `instructions must be at most ${PERSONA_MAX_LENGTH} characters`);
+      }
+    }
     const model = req.body?.model ? String(req.body.model) : null;
     if (model && !isAllowedModel(model)) throw new ApiError(400, `unsupported model: ${model}`);
+    if (model && !providerConfigured(model)) {
+      throw new ApiError(400, `model unavailable: ${model}'s provider API key is not configured`);
+    }
     const mode = req.body?.mode ? String(req.body.mode) : "default";
     if (!isSdkMode(mode)) throw new ApiError(400, `unsupported mode: ${mode}`);
     const integrations = validateIntegrations(req.body?.integrations);
     const runnerToken = randomBytes(32).toString("hex");
-    const runnerProvider = req.body?.runnerProvider === "fly" ? "fly" : RUNNER_PROVIDER_DEFAULT;
+    // Environment: cloud default, 'fly' opt-in, or 'self_hosted' bound to one of the requester's
+    // registered devices (must be assignable — their own device, or one shared into this workspace).
+    let runnerProvider = RUNNER_PROVIDER_DEFAULT;
+    let hostId: string | null = null;
+    if (req.body?.runnerProvider === "fly") {
+      runnerProvider = "fly";
+    } else if (req.body?.runnerProvider === "self_hosted") {
+      runnerProvider = "self_hosted";
+      hostId = String(req.body?.hostId ?? "");
+      if (!hostId) throw new ApiError(400, "hostId is required for a self-hosted agent");
+      if (!(await db.canAssignHost(hostId, accountUid(me), me.workspace_id))) {
+        throw new ApiError(403, "you don't have access to run agents on that device");
+      }
+    }
     // The agent joins the creator's workspace, subject to the workspace's agent cap. The cap check
     // + insert run in one transaction (FOR UPDATE on the workspace row) so concurrent creates can't
     // both slip past the limit.
@@ -84,22 +110,29 @@ router.post(
       if (count >= cap) throw new ApiError(409, `this workspace has reached its agent limit (${cap})`);
       return db.createParticipant({
         kind: "agent", workspaceId: me.workspace_id, handle, displayName, runtime: "sdk", runnerToken,
-        model, mode, runnerProvider,
+        model, mode, runnerProvider, persona,
       }, client);
     });
+    // Bind the agent to its device before provisioning reads runner_meta.hostId.
+    if (hostId) await db.setRunnerMeta(participant.id, { hostId });
     for (const { key, config } of integrations) {
       await db.setAgentIntegration(participant.id, key, await resolveIntegrationConfig(me, participant.id, key, config));
     }
     // Respond immediately — provisioning (esp. a Fly machine's first boot / image pull) can take
-    // up to ~1min, and the row + status UI ("waking") already give the client what it needs.
-    res.status(201).json({ ...publicParticipant(participant), integrations });
+    // up to ~1min, and the row + status UI ("waking"/"offline") already give the client what it needs.
+    const runnerMeta = hostId ? { hostId } : participant.runner_meta;
+    res.status(201).json({ ...publicParticipant({ ...participant, runner_meta: runnerMeta }), integrations });
     // Provision + start in the background. Best-effort: if the provisioner isn't available the
-    // agent row still exists and a runner can be started later; just log the failure.
+    // agent row still exists and a runner can be started later; just log the failure. For
+    // self-hosted, start() sends a run command to the device (no-op if it's offline — the agent
+    // shows `offline` until the daemon reconnects), and we only show "waking" if the device is up.
     void (async () => {
       try {
         await provisionerFor(participant).create({ id: participant.id, handle, runnerToken });
         await provisionerFor(participant).start(participant.id);
-        runners.noteProvisionerStart(participant.id); // show "waking" until the runner connects
+        if (runnerProvider !== "self_hosted" || runners.isAgentDeviceOnline(participant.id)) {
+          runners.noteProvisionerStart(participant.id); // show "waking" until the runner connects
+        }
       } catch (e) {
         console.error("provisioner create/start:", e);
       }
@@ -141,6 +174,9 @@ router.patch(
     if (req.body?.model !== undefined) {
       const model = String(req.body.model);
       if (!isAllowedModel(model)) throw new ApiError(400, `unsupported model: ${model}`);
+      if (!providerConfigured(model)) {
+        throw new ApiError(400, `model unavailable: ${model}'s provider API key is not configured`);
+      }
       if (model !== agent.model) runners.setModel(agent.id, model);
       patch.model = model;
     }
@@ -239,6 +275,33 @@ router.get(
   }),
 );
 
+// The agent's managed services (service_* tools: dev servers, watchers), as last reported by
+// its runner — the profile panel's Services section. On-demand like memory; live updates are
+// signalled by agent_services_changed broadcasts.
+router.get(
+  "/api/agents/:id/services",
+  wrap(async (req, res) => {
+    const { agent } = await requireAgent(req);
+    const { services, updatedAt } = await db.getAgentServices(agent.id);
+    res.json({ services, updatedAt });
+  }),
+);
+
+// Stop one of the agent's managed services (the profile panel's stop button). Forwards a
+// service_stop frame to the connected runner; the runner kills the process group and reports
+// the fresh list (which lands as an agent_services_changed broadcast).
+router.post(
+  "/api/agents/:id/services/:name/stop",
+  wrap(async (req, res) => {
+    const { agent } = await requireAgent(req);
+    const name = String(req.params.name ?? "");
+    if (!runners.stopService(agent.id, name)) {
+      throw new ApiError(409, "agent is not connected — nothing to stop right now");
+    }
+    res.json({ ok: true });
+  }),
+);
+
 // Activity feed history for an sdk agent: persisted SDK stream events, oldest-first within the
 // returned page. Live updates ride the app WS as `agent_event` broadcasts.
 router.get(
@@ -298,6 +361,19 @@ router.post(
   wrap(async (req, res) => {
     const { agent } = await requireAgent(req);
     const result = await runners.compactOrWake(agent);
+    if (result === "wake_failed") return res.json({ ok: false, error: "failed to wake agent" });
+    res.json({ ok: true, waking: result === "waking" });
+  }),
+);
+
+// Ask an sdk agent to clear its conversation/context window (the profile's Clear button —
+// Claude Code's `/clear`). The runner drops the session at the next idle boundary; memory
+// files are untouched. Same wake-if-asleep path as compact.
+router.post(
+  "/api/agents/:id/clear",
+  wrap(async (req, res) => {
+    const { agent } = await requireAgent(req);
+    const result = await runners.clearContextOrWake(agent);
     if (result === "wake_failed") return res.json({ ok: false, error: "failed to wake agent" });
     res.json({ ok: true, waking: result === "waking" });
   }),

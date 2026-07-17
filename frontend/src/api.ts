@@ -17,6 +17,12 @@ import type {
   Deliverable,
   DeliverableKind,
   SearchResult,
+  ExtractedLink,
+  RunnerHost,
+  SlackStatus,
+  SlackChannelInfo,
+  SlackChannelLink,
+  AgentServiceInfo,
 } from "@jungle/shared";
 export {
   INTEGRATION_TYPES,
@@ -27,8 +33,11 @@ export {
   extractDeliverableLinks,
 } from "@jungle/shared";
 export type { IntegrationType, ConnectionType } from "@jungle/shared";
+export type { ExtractedLink };
+export type { SlackStatus, SlackChannelInfo, SlackChannelLink };
 
-export type { Participant, Attachment, UnreadThread, AgentEvent, AgentStatus, AgentIntegration };
+export type { Participant, Attachment, UnreadThread, AgentEvent, AgentStatus, AgentIntegration, RunnerHost };
+export type { AgentServiceInfo };
 export type { Schedule, Deliverable, DeliverableKind, SearchResult };
 export type { Me, GoogleProfile, Workspace, Membership, InviteInfo };
 // A message as delivered to the client (attachments carry signed download urls).
@@ -185,6 +194,12 @@ export function createParticipant(p: {
   integrations?: Array<{ key: string; config: Record<string, unknown> }>;
   model?: string;
   mode?: string;
+  // Creator-written instructions/persona injected into the agent's system prompt (optional).
+  persona?: string;
+  // Environment: omitted = cloud default; "self_hosted" + hostId runs the agent on a registered
+  // device (see listDevices).
+  runnerProvider?: string;
+  hostId?: string;
 }): Promise<Participant> {
   const path = p.kind === "agent" ? "/api/agents" : "/api/participants";
   const json =
@@ -195,9 +210,66 @@ export function createParticipant(p: {
           ...(p.integrations?.length ? { integrations: p.integrations } : {}),
           ...(p.model ? { model: p.model } : {}),
           ...(p.mode ? { mode: p.mode } : {}),
+          ...(p.persona ? { persona: p.persona } : {}),
+          ...(p.runnerProvider ? { runnerProvider: p.runnerProvider } : {}),
+          ...(p.hostId ? { hostId: p.hostId } : {}),
         }
       : { kind: "human", handle: p.handle, displayName: p.displayName };
   return request<Participant>(path, { json, auth: true, devAuth: true, errorMessage: "create failed" });
+}
+
+// --- Self-hosted devices (Environments) ---
+
+// The signed-in account's registered devices (the Environments page).
+export function listDevices(): Promise<RunnerHost[]> {
+  return request<RunnerHost[]>(`/api/devices`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load devices",
+  });
+}
+
+// Rename a device or change its assign policy / shared workspaces / sandboxing (owner only).
+export function updateDevice(
+  id: string,
+  patch: { name?: string; assignPolicy?: string; sharedWorkspaceIds?: string[]; sandboxed?: boolean },
+): Promise<RunnerHost> {
+  return request<RunnerHost>(`/api/devices/${id}`, {
+    method: "PATCH",
+    json: patch,
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to update device",
+  });
+}
+
+// Remove a device (revoke its token; its agents go offline until reassigned).
+export function removeDevice(id: string): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`/api/devices/${id}`, {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to remove device",
+  });
+}
+
+// Approve a device-code shown by `jungle-agents connect` on a machine (the /link page).
+export function approveDeviceCode(userCode: string): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`/api/devices/auth/approve`, {
+    json: { userCode },
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to approve device",
+  });
+}
+
+// Whether a device code is still valid + unapproved (drives the /link confirm page).
+export function checkDeviceCode(userCode: string): Promise<{ valid: boolean }> {
+  return request<{ valid: boolean }>(`/api/devices/auth/${encodeURIComponent(userCode)}`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to check code",
+  });
 }
 
 // This agent's attached integrations (the settings panel's Integrations section).
@@ -275,6 +347,70 @@ export function disconnectIntegration(key: string): Promise<{ ok: boolean }> {
   });
 }
 
+// --- Slack integration (workspace-scoped install + per-channel mirroring) ---
+
+export function getSlackStatus(): Promise<SlackStatus> {
+  return request<SlackStatus>(`/api/slack/status`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load Slack status",
+  });
+}
+
+export function slackInstallUrl(opts?: { popup?: boolean }): Promise<{ url: string }> {
+  return request(`/api/slack/install-url`, {
+    method: "POST",
+    json: { popup: opts?.popup === true },
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to start Slack install",
+  });
+}
+
+export function disconnectSlack(): Promise<{ ok: boolean }> {
+  return request(`/api/slack/install`, {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to disconnect Slack",
+  });
+}
+
+export function listSlackChannels(): Promise<SlackChannelInfo[]> {
+  return request<SlackChannelInfo[]>(`/api/slack/channels`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to list Slack channels",
+  });
+}
+
+export function getChannelSlackLink(channelId: string): Promise<{ link: SlackChannelLink | null }> {
+  return request(`/api/channels/${channelId}/slack-link`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load Slack link",
+  });
+}
+
+export function linkChannelToSlack(channelId: string, slackChannelId: string): Promise<{ link: SlackChannelLink }> {
+  return request(`/api/channels/${channelId}/slack-link`, {
+    method: "POST",
+    json: { slackChannelId },
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to link channel to Slack",
+  });
+}
+
+export function unlinkChannelFromSlack(channelId: string): Promise<{ ok: boolean }> {
+  return request(`/api/channels/${channelId}/slack-link`, {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to unlink channel from Slack",
+  });
+}
+
 // The agent's long-term memory (its MEMORY.md mirror, reported by the runner after turns that
 // change it). Fetched on demand — it doesn't ride in participant payloads.
 export function getAgentMemory(
@@ -284,6 +420,29 @@ export function getAgentMemory(
     auth: true,
     devAuth: true,
     errorMessage: "failed to load memory",
+  });
+}
+
+// The agent's managed services (service_* tools: dev servers, watchers), as last reported by
+// its runner. Fetched on demand like memory.
+export function getAgentServices(
+  id: string,
+): Promise<{ services: AgentServiceInfo[]; updatedAt: string | null }> {
+  return request(`/api/agents/${id}/services`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load services",
+  });
+}
+
+// Stop one of an agent's managed services. The fresh list arrives via an
+// agent_services_changed broadcast once the runner has killed the process group.
+export function stopAgentService(id: string, name: string): Promise<{ ok: boolean }> {
+  return request(`/api/agents/${id}/services/${encodeURIComponent(name)}/stop`, {
+    method: "POST",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to stop service",
   });
 }
 
@@ -359,6 +518,19 @@ export function compactAgent(id: string): Promise<{ ok: boolean; waking?: boolea
   });
 }
 
+// Ask an sdk agent to clear its conversation/context window (Claude Code's `/clear`). The
+// runner drops the session at the next idle boundary; the meter drops to 0% when the runner
+// reports the emptied window. `waking: true` if the agent was asleep — the clear runs once its
+// runner reconnects. Memory files are untouched.
+export function clearAgentContext(id: string): Promise<{ ok: boolean; waking?: boolean; error?: string }> {
+  return request(`/api/agents/${id}/clear`, {
+    method: "POST",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to clear context",
+  });
+}
+
 export function listChannels(participantId: string): Promise<Channel[]> {
   // participantId is the dev/no-token identity (read by the backend under DEV_BYPASS). In
   // Firebase mode the bearer token identifies the requester and this query param is ignored.
@@ -403,6 +575,34 @@ export function getMessages(channelId: string): Promise<Message[]> {
     auth: true,
     devAuth: true,
     errorMessage: "failed to load messages",
+  });
+}
+
+export interface TurnChipRow {
+  turn_id: string;
+  agent_id: string;
+  message_ids: string[];
+  started_at: string;
+  done_at: string | null;
+  ok: boolean | null;
+  duration_ms: number | null;
+}
+
+export interface QueuedChipRow {
+  agent_id: string;
+  message_id: string;
+}
+
+// Durable turn chips for a channel (recent running/finished turns + still-queued dispatches),
+// keyed to the messages that triggered them. Hydrates chips on channel open / reload; live
+// updates ride the app WS (agent_turn/agent_event/agent_queued).
+export function getChannelTurnChips(
+  channelId: string,
+): Promise<{ turns: TurnChipRow[]; queued: QueuedChipRow[] }> {
+  return request(`/api/channels/${channelId}/turn-chips`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load turn chips",
   });
 }
 

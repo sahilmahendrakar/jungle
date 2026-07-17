@@ -42,6 +42,11 @@ export function firebaseConfigured(): boolean {
   return app != null;
 }
 
+// The admin app, for other firebase-admin consumers (push via firebase-admin/messaging).
+export function firebaseApp(): App | null {
+  return app;
+}
+
 // When auth isn't configured (tests/local), or AUTH_DEV_BYPASS=1 is set explicitly, the
 // backend trusts ?participantId=/?as= so the existing flow and Playwright suites still work.
 export const DEV_BYPASS = !firebaseConfigured() || process.env.AUTH_DEV_BYPASS === "1";

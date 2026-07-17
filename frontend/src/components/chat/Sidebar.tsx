@@ -89,6 +89,8 @@ export function Sidebar({
   approvalsCount,
   onOpenDeliverables,
   deliverablesActive,
+  onOpenEnvironments,
+  environmentsActive,
   onOpenSearch,
   workingChannelIds,
   onNewChannel,
@@ -129,6 +131,8 @@ export function Sidebar({
   approvalsCount: number;
   onOpenDeliverables: () => void;
   deliverablesActive: boolean;
+  onOpenEnvironments: () => void;
+  environmentsActive: boolean;
   onOpenSearch: () => void;
   workingChannelIds: Set<string>; // channels with a turn currently running (pulsing dot)
   onNewChannel: () => void;
@@ -250,6 +254,14 @@ export function Sidebar({
               onClick={onOpenScheduled}
               icon={<CalendarClock className="size-4 opacity-70" />}
               label="Scheduled"
+            />
+            {/* Environments: the account's own machines that can run agents (self-hosted). */}
+            <NavItem
+              testId="environments-nav"
+              active={environmentsActive}
+              onClick={onOpenEnvironments}
+              icon={<MonitorSmartphone className="size-4 opacity-70" />}
+              label="Environments"
             />
 
             <div className="h-3" />

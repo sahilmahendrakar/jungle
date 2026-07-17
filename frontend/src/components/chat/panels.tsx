@@ -6,9 +6,12 @@ import {
   BookOpenText,
   Check,
   ChevronDown,
+  Cloud,
   FileText,
   FoldVertical,
+  MonitorSmartphone,
   Plus,
+  Server,
   ShieldQuestion,
   Sparkles,
   Trash2,
@@ -19,13 +22,16 @@ import {
   updateAgent,
   deleteAgent,
   compactAgent,
+  clearAgentContext,
   attachmentUrl,
   getAgentMemory,
+  getAgentServices,
+  stopAgentService,
   listAgentIntegrations,
   setAgentIntegration,
   removeAgentIntegration,
 } from "../../api";
-import type { Attachment, Participant, AgentStatus } from "../../api";
+import type { Attachment, Participant, AgentStatus, AgentServiceInfo } from "../../api";
 import {
   IntegrationsEditor,
   integrationFingerprint,
@@ -40,11 +46,12 @@ import {
   fmtTokens,
   INLINE_IMAGE_MIMES,
   MODEL_OPTIONS,
-  SDK_MODE_OPTIONS,
+  sdkModeOptionsFor,
   STATUS_DOT,
   STATUS_LABEL,
   type ToolConfirm,
 } from "../../lib/chat";
+import { catalogEntry } from "@jungle/shared";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -129,25 +136,32 @@ export function SelectMenu({
   onChange,
   options,
   testId,
+  disabled,
 }: {
   value: string;
   onChange: (v: string) => void;
-  options: { id: string; label: string; hint?: string }[];
+  options: { id: string; label: ReactNode; hint?: string }[];
   testId?: string;
+  disabled?: boolean;
 }) {
   const current = options.find((o) => o.id === value) ?? options[0];
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button variant="outline" data-testid={testId} className="w-full justify-between font-normal">
+      <DropdownMenuTrigger asChild disabled={disabled}>
+        <Button
+          variant="outline"
+          data-testid={testId}
+          disabled={disabled}
+          className="w-full justify-between font-normal"
+        >
           <span className="truncate">{current?.label}</span>
           <ChevronDown className="size-4 shrink-0 opacity-50" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
-        portal={false}
         align="start"
-        className="w-[var(--radix-dropdown-menu-trigger-width)]"
+        collisionPadding={8}
+        className="w-[var(--radix-dropdown-menu-trigger-width)] max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto"
       >
         {options.map((o) => (
           <DropdownMenuItem
@@ -381,7 +395,7 @@ export function ParticipantProfilePanel({
               <SelectMenu
                 value={mode}
                 onChange={setMode}
-                options={SDK_MODE_OPTIONS}
+                options={sdkModeOptionsFor(mode)}
                 testId="agent-mode-select"
               />
             </div>
@@ -404,12 +418,17 @@ export function ParticipantProfilePanel({
                 onChange={setEffort}
                 options={EFFORT_OPTIONS}
                 testId="agent-effort-select"
+                disabled={catalogEntry(model)?.supportsEffort === false}
               />
               <p className="text-[11px] leading-tight text-muted-foreground">
-                Lower effort spends fewer tokens. Applies at the agent's next turn.
+                {catalogEntry(model)?.supportsEffort === false
+                  ? "Not supported by this model."
+                  : "Lower effort spends fewer tokens. Applies at the agent's next turn."}
               </p>
             </div>
             <IntegrationsEditor value={integrations} onChange={setIntegrations} connections={connections} />
+            <EnvironmentCard person={person} />
+            <ServicesCard person={person} />
             <MemoryCard person={person} />
             <ContextUsageCard person={person} />
             <Button
@@ -502,11 +521,57 @@ export function ParticipantProfilePanel({
 // Context-window occupancy + compaction control in an agent's profile. `person` is the live
 // row from `people`, so the meter updates in place whenever an `agent_context` broadcast
 // lands — including the one the runner sends after a requested compaction finishes.
+// Where this agent runs: a cloud sandbox, or one of the creator's own devices (self-hosted). For a
+// self-hosted agent we show the host details the runner reported (runner_meta.host) + which device.
+export function EnvironmentCard({ person }: { person: Participant }) {
+  const selfHosted = person.runner_provider === "self_hosted";
+  const host = (person.runner_meta as { host?: { hostname?: string; platform?: string; arch?: string } } | null)?.host;
+  const offline = person.status === "offline";
+  return (
+    <div data-testid="environment-card" className="space-y-1.5 rounded-lg border bg-muted/30 p-3">
+      <div className="text-xs font-medium text-muted-foreground">Environment</div>
+      <div className="flex items-center gap-2">
+        <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary/10">
+          {selfHosted ? <MonitorSmartphone className="size-3.5 text-primary" /> : <Cloud className="size-3.5 text-primary" />}
+        </span>
+        <div className="min-w-0">
+          <div className="truncate text-sm font-medium">
+            {selfHosted ? host?.hostname ?? "Your device" : "Cloud sandbox"}
+          </div>
+          <div className="truncate text-[11px] text-muted-foreground">
+            {selfHosted
+              ? [host?.platform && host?.arch ? `${host.platform}/${host.arch}` : host?.platform, offline ? "offline" : null]
+                  .filter(Boolean)
+                  .join(" · ") || "self-hosted"
+              : "managed by Jungle"}
+          </div>
+        </div>
+      </div>
+      {selfHosted && offline && (
+        <p className="text-[11px] leading-tight text-muted-foreground">
+          This agent's device is offline — messages queue until it reconnects.
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function ContextUsageCard({ person }: { person: Participant }) {
   const [requesting, setRequesting] = useState(false);
   const [requested, setRequested] = useState(false);
   const [waking, setWaking] = useState(false);
   const [err, setErr] = useState("");
+
+  // Clear-context (Claude Code's /clear): drops the conversation, keeps memory. Destructive, so
+  // the button arms on first click and fires on the second (disarms after a few seconds).
+  const [clearing, setClearing] = useState(false);
+  const [clearRequested, setClearRequested] = useState(false);
+  const [clearWaking, setClearWaking] = useState(false);
+  const [clearArmed, setClearArmed] = useState(false);
+  const armedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (armedTimer.current) clearTimeout(armedTimer.current);
+  }, []);
 
   const tokens = person.context_tokens ?? null;
   const max = person.context_max_tokens ?? null;
@@ -528,15 +593,23 @@ export function ContextUsageCard({ person }: { person: Participant }) {
         ? "text-amber-600 dark:text-amber-400"
         : "text-muted-foreground";
 
-  // A fresh usage report (e.g. the compaction turn finishing) supersedes the queued note.
+  // A fresh usage report (e.g. the compaction turn finishing, or a clear dropping it to 0)
+  // supersedes the queued note for whichever action was requested.
   const updatedAt = person.context_updated_at ?? null;
-  const requestedAtRef = useRef<string | null>(null);
+  const compactRequestedAtRef = useRef<string | null>(null);
+  const clearRequestedAtRef = useRef<string | null>(null);
   useEffect(() => {
-    if (requested && updatedAt !== requestedAtRef.current) {
+    if (requested && updatedAt !== compactRequestedAtRef.current) {
       setRequested(false);
       setWaking(false);
     }
   }, [updatedAt, requested]);
+  useEffect(() => {
+    if (clearRequested && updatedAt !== clearRequestedAtRef.current) {
+      setClearRequested(false);
+      setClearWaking(false);
+    }
+  }, [updatedAt, clearRequested]);
 
   async function compact() {
     if (requesting || requested) return;
@@ -545,13 +618,39 @@ export function ContextUsageCard({ person }: { person: Participant }) {
     try {
       const r = await compactAgent(person.id);
       if (!r.ok) throw new Error(r.error ?? "compact failed");
-      requestedAtRef.current = updatedAt;
+      compactRequestedAtRef.current = updatedAt;
       setRequested(true);
       setWaking(!!r.waking);
     } catch (e) {
       setErr(String((e as Error).message ?? e));
     } finally {
       setRequesting(false);
+    }
+  }
+
+  function armClear() {
+    if (clearing || clearRequested) return;
+    setClearArmed(true);
+    if (armedTimer.current) clearTimeout(armedTimer.current);
+    armedTimer.current = setTimeout(() => setClearArmed(false), 4_000);
+  }
+
+  async function clear() {
+    if (clearing || clearRequested) return;
+    setClearing(true);
+    setErr("");
+    setClearArmed(false);
+    if (armedTimer.current) clearTimeout(armedTimer.current);
+    try {
+      const r = await clearAgentContext(person.id);
+      if (!r.ok) throw new Error(r.error ?? "clear failed");
+      clearRequestedAtRef.current = updatedAt;
+      setClearRequested(true);
+      setClearWaking(!!r.waking);
+    } catch (e) {
+      setErr(String((e as Error).message ?? e));
+    } finally {
+      setClearing(false);
     }
   }
 
@@ -583,17 +682,46 @@ export function ContextUsageCard({ person }: { person: Participant }) {
           No usage reported yet — updates after the agent's next turn.
         </p>
       )}
-      <Button
-        variant="outline"
-        size="sm"
-        data-testid="agent-compact"
-        onClick={compact}
-        disabled={requesting || requested}
-        className="w-full gap-2 text-muted-foreground"
-      >
-        <FoldVertical className="size-3.5" />
-        {requesting ? "Requesting…" : requested ? "Compaction queued" : "Compact context"}
-      </Button>
+      <div className="flex gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          data-testid="agent-compact"
+          onClick={compact}
+          disabled={requesting || requested}
+          className="flex-1 gap-2 text-muted-foreground"
+        >
+          <FoldVertical className="size-3.5" />
+          {requesting ? "Requesting…" : requested ? "Compaction queued" : "Compact context"}
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          data-testid="agent-clear"
+          onClick={clearArmed ? clear : armClear}
+          disabled={clearing || clearRequested}
+          className={cn(
+            "flex-1 gap-2",
+            clearArmed
+              ? "border-destructive text-destructive hover:bg-destructive/10"
+              : "text-muted-foreground",
+          )}
+        >
+          <Trash2 className="size-3.5" />
+          {clearing
+            ? "Requesting…"
+            : clearRequested
+              ? "Clear queued"
+              : clearArmed
+                ? "Confirm clear"
+                : "Clear context"}
+        </Button>
+      </div>
+      {clearArmed && (
+        <p className="text-[11px] leading-tight text-destructive">
+          Clears the conversation (memory is kept). Click again to confirm.
+        </p>
+      )}
       {requested && (
         <p className="text-[11px] leading-tight text-muted-foreground">
           {waking
@@ -601,6 +729,15 @@ export function ContextUsageCard({ person }: { person: Participant }) {
               "conversation; the meter updates when it finishes."
             : "The agent will summarize its older conversation when it's next idle; the meter " +
               "updates when it finishes."}
+        </p>
+      )}
+      {clearRequested && (
+        <p className="text-[11px] leading-tight text-muted-foreground">
+          {clearWaking
+            ? "The agent was asleep — waking its machine, then it'll clear its conversation; " +
+              "the meter drops to 0% when it finishes."
+            : "The agent will clear its conversation when it's next idle; the meter drops to " +
+              "0% when it finishes."}
         </p>
       )}
       {err && <p className="text-[11px] text-destructive">{err}</p>}
@@ -670,6 +807,123 @@ export function MemoryCard({ person }: { person: Participant }) {
             <p className="text-[11px] leading-tight text-muted-foreground">
               No memories yet — the agent writes down durable facts (preferences, decisions,
               gotchas) as it works with you.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The agent's managed services (service_* tools: dev servers, watchers, tunnels), with a stop
+// button per running service. Collapsed by default; fetched on expand and refetched when an
+// agent_services_changed broadcast stamps person.services_changed_at (same pattern as Memory).
+export function ServicesCard({ person }: { person: Participant }) {
+  const [open, setOpen] = useState(false);
+  const [services, setServices] = useState<AgentServiceInfo[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [err, setErr] = useState("");
+  const [stopping, setStopping] = useState<string | null>(null);
+
+  const changedAt = person.services_changed_at ?? null;
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    getAgentServices(person.id)
+      .then((r) => {
+        if (cancelled) return;
+        setServices(r.services);
+        setLoaded(true);
+        setErr("");
+        setStopping(null); // the post-stop refetch — clear the spinner state
+      })
+      .catch((e) => !cancelled && setErr(String((e as Error).message ?? e)));
+    return () => {
+      cancelled = true;
+    };
+  }, [open, person.id, changedAt]);
+
+  const stop = async (name: string) => {
+    setStopping(name);
+    try {
+      await stopAgentService(person.id, name);
+      // The fresh list arrives via the agent_services_changed broadcast (changedAt bump).
+    } catch (e) {
+      setErr(String((e as Error).message ?? e));
+      setStopping(null);
+    }
+  };
+
+  const running = services.filter((s) => s.status === "running").length;
+  return (
+    <div data-testid="agent-services" className="rounded-lg border bg-muted/30">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        data-testid="agent-services-toggle"
+        className="flex w-full items-center gap-2 p-3 text-left"
+      >
+        <Server className="size-4 shrink-0 text-muted-foreground" />
+        <span className="flex-1 text-xs font-medium text-muted-foreground">Services</span>
+        {running > 0 && (
+          <span className="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+            {running} running
+          </span>
+        )}
+        <ChevronDown
+          className={cn("size-4 shrink-0 text-muted-foreground transition-transform", open && "rotate-180")}
+        />
+      </button>
+      {open && (
+        <div className="space-y-2 border-t px-3 pb-3 pt-2">
+          {err && <p className="text-[11px] text-destructive">{err}</p>}
+          {!loaded && !err ? (
+            <p className="text-[11px] text-muted-foreground">Loading…</p>
+          ) : services.length ? (
+            services.map((s) => (
+              <div
+                key={s.name}
+                data-testid={`agent-service-${s.name}`}
+                className="rounded-md border bg-background/70 p-2"
+              >
+                <div className="flex items-center gap-2">
+                  <span
+                    className={cn(
+                      "size-1.5 shrink-0 rounded-full",
+                      s.status === "running" ? "bg-emerald-500" : "bg-muted-foreground/40",
+                    )}
+                  />
+                  <span className="min-w-0 flex-1 truncate font-mono text-xs">{s.name}</span>
+                  {s.status === "running" ? (
+                    <button
+                      onClick={() => stop(s.name)}
+                      disabled={stopping === s.name}
+                      data-testid={`agent-service-stop-${s.name}`}
+                      className="rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-muted disabled:opacity-50"
+                    >
+                      {stopping === s.name ? "Stopping…" : "Stop"}
+                    </button>
+                  ) : (
+                    <span className="text-[10px] text-muted-foreground">
+                      exited{s.exitCode != null ? ` (${s.exitCode})` : ""}
+                    </span>
+                  )}
+                </div>
+                <p className="mt-1 truncate font-mono text-[10px] text-muted-foreground" title={s.command}>
+                  $ {s.command}
+                </p>
+                <p className="text-[10px] text-muted-foreground">
+                  {s.status === "running"
+                    ? `up since ${new Date(s.startedAt).toLocaleString()}`
+                    : s.exitedAt
+                      ? `exited ${new Date(s.exitedAt).toLocaleString()}`
+                      : ""}
+                </p>
+              </div>
+            ))
+          ) : (
+            <p className="text-[11px] leading-tight text-muted-foreground">
+              No services — long-running processes the agent starts (dev servers, watchers)
+              appear here.
             </p>
           )}
         </div>

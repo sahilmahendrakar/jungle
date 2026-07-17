@@ -1,7 +1,7 @@
 // Load secrets from the repo-local .env (gitignored). Imported first by db.ts / index.ts
 // so process.env is populated before use. Holds everything:
 //   DATABASE_URL, ANTHROPIC_API_KEY, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET,
-//   GITHUB_APP_PRIVATE_KEY (inline PEM).
+//   GITHUB_APP_PRIVATE_KEY (inline PEM), Z_AI_API_KEY (GLM 5.2 via z.ai; see providers.ts).
 // Override the path with JUNGLE_ENV_FILE if needed.
 import dotenv from "dotenv";
 import { fileURLToPath } from "node:url";

@@ -1,14 +1,42 @@
 {
-  "name": "jungle-runner",
-  "version": "0.1.0",
-  "private": true,
+  "name": "jungle-agents",
+  "version": "0.1.2",
   "type": "module",
-  "description": "Jungle agent-runner: a long-lived process that bridges a Claude Agent SDK session to the Jungle backend over one outbound WebSocket.",
+  "description": "Run Jungle agents on your own machine: `jungle-agents connect` registers this device and runs the agents you assign to it from the Jungle web app.",
+  "keywords": [
+    "jungle",
+    "agents",
+    "self-hosted",
+    "runner",
+    "cli"
+  ],
+  "license": "MIT",
+  "homepage": "https://jungleagents.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sahilmahendrakar/jungle.git",
+    "directory": "runner"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "main": "dist/index.js",
+  "bin": {
+    "jungle-agents": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "prebuild": "node scripts/sync-protocol.mjs",
     "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build",
     "start": "node dist/index.js",
+    "cli": "node dist/cli.js",
     "dev": "tsc -p tsconfig.json && node dist/index.js",
     "mock": "node test/mock-backend.mjs"
   },

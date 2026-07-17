@@ -1,6 +1,7 @@
 import { Activity, Bot, Hash, MessageSquare, MoreVertical, PanelLeft, Trash2, UserPlus, Users } from "lucide-react";
-import type { Channel, Participant } from "../../api";
+import type { Channel, Participant, SlackChannelLink } from "../../api";
 import { PersonAvatar } from "./panels";
+import { BrandGlyph } from "@/lib/connections";
 import { Button } from "@/components/ui/button";
 import {
   Tooltip,
@@ -31,11 +32,13 @@ export function ChannelHeader({
   personByHandle,
   dmAgent,
   activityOpen,
+  slackLink,
   onOpenDrawer,
   onExpandSidebar,
   onOpenProfile,
   onOpenMembers,
   onOpenRoster,
+  onOpenSlackLink,
   onDeleteChannel,
   onToggleActivity,
 }: {
@@ -51,11 +54,15 @@ export function ChannelHeader({
   // The other participant in this DM, when it's an sdk agent (drives the activity toggle).
   dmAgent?: Participant;
   activityOpen: boolean;
+  // Slack mirror binding for this channel (null/undefined = not linked). Drives the header badge
+  // and the menu item's active state.
+  slackLink?: SlackChannelLink | null;
   onOpenDrawer: () => void;
   onExpandSidebar: () => void;
   onOpenProfile: (id: string) => void;
   onOpenMembers: () => void;
   onOpenRoster: () => void;
+  onOpenSlackLink: () => void;
   onDeleteChannel: () => void;
   onToggleActivity: () => void;
 }) {
@@ -117,6 +124,27 @@ export function ChannelHeader({
             <>
               <Hash className="size-5 text-muted-foreground" />
               <h2 className="truncate font-semibold">{headerTitle}</h2>
+              {slackLink && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      data-testid="slack-link-badge"
+                      onClick={onOpenSlackLink}
+                      className="flex size-5 shrink-0 items-center justify-center rounded"
+                    >
+                      <BrandGlyph
+                        brand="slack"
+                        className={slackLink.status === "error" ? "size-3.5 text-destructive" : "size-3.5"}
+                      />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    {slackLink.status === "error"
+                      ? `Slack mirror error: ${slackLink.lastError ?? "delivery failed"}`
+                      : `Mirrored to Slack #${slackLink.slackChannelName ?? slackLink.slackChannelId}`}
+                  </TooltipContent>
+                </Tooltip>
+              )}
             </>
           )}
 
@@ -191,6 +219,10 @@ export function ChannelHeader({
                   <DropdownMenuItem data-testid="menu-members" onClick={onOpenMembers}>
                     <UserPlus className="size-4" />
                     Members
+                  </DropdownMenuItem>
+                  <DropdownMenuItem data-testid="menu-slack-link" onClick={onOpenSlackLink}>
+                    <BrandGlyph brand="slack" className="size-4" />
+                    {slackLink ? "Slack mirroring…" : "Mirror to Slack…"}
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem
