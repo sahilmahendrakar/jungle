@@ -7,6 +7,7 @@ import { fanOut, broadcastWorkspace } from "../ws/appSocket";
 import { surfaceConfirmCard } from "./confirmations";
 import { recordDeliverables } from "./deliverables";
 import * as scheduler from "./scheduler";
+import * as workflows from "./workflows";
 import { ApiError } from "../http/errors";
 
 // Agent -> workspace id, memoized. An agent's workspace never changes, so this is a permanent
@@ -206,11 +207,18 @@ async function runAgentReply(
     // ends (or splices it in mid-turn) — tell the workspace now so the triggering message shows
     // a "queued" chip immediately instead of nothing until a turn actually picks it up.
     const willQueue = runners.agentStatus(agent.id) === "working";
+    // Run scoping: a turn triggered from inside a live workflow-run's thread belongs to that
+    // run — the run id rides the dispatch context (that's the entire mechanism; see
+    // services/workflows.ts).
+    const run = existingThreadRootId
+      ? await db.getLiveRunByRootMessage(existingThreadRootId).catch(() => null)
+      : null;
     await db.enqueueInboxItem(agent.id, input, attachments, {
       budget: replyBudget,
       channelId: triggerChannelId,
       threadRootId: existingThreadRootId,
       messageId: chipMessageId,
+      ...(run ? { workflowRunId: run.id } : {}),
     });
     if (willQueue) {
       broadcastAgentWorkspace(agent.id, {
@@ -295,6 +303,8 @@ async function deliverAgentMessage(
     });
     await fanOut(channelId, { type: "message", message: att.withUrls(msg) });
     void recordDeliverables(agent, channelId, msg);
+    // Workflow-run completion: a member's "Run complete: …" thread message closes the run.
+    void workflows.completeRunFromMessage(msg).catch((e) => console.error("run complete check:", e));
     void triggerMentionedAgents(channelId, msg, "agent");
     return { ok: true, messageId: msg.id };
   } catch (e) {

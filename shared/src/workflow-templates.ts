@@ -62,9 +62,9 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
       "assigns each bug to one fixer; fixers open PRs and report back. Work in the run thread. " +
       "Pushes and anything customer-visible go through the usual approval flow — wait for it, " +
       "don't route around it. When every assigned bug has a PR (or a documented blocker), the " +
-      "manager posts a summary (bugs found, PRs opened, anything stuck) and calls " +
-      "workflow_run_complete. If the inbox has nothing actionable, say so briefly and complete " +
-      "the run — an empty run is a normal outcome.",
+      "manager posts a thread message starting with \"Run complete:\" summarizing bugs found, " +
+      "PRs opened, and anything stuck. If the inbox has nothing actionable, post " +
+      "\"Run complete: nothing to do\" — an empty run is a normal outcome.",
   },
   {
     id: "standup-digest",
@@ -86,8 +86,8 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
       "Each run: gather yesterday's activity from the connected tools and post ONE digest " +
       "message to the destination channel named in your instructions (default: this workflow's " +
       "home channel). Lead with what shipped, then what's in flight, then blockers. No filler — " +
-      "if nothing happened, one line saying so. Then call workflow_run_complete with a one-line " +
-      "summary.",
+      "if nothing happened, one line saying so. Then post \"Run complete:\" plus a one-line " +
+      "summary in the run thread.",
   },
   {
     id: "lead-research",
@@ -116,9 +116,9 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
       "A run starts when someone @mentions intake in the home channel with a lead. Intake " +
       "extracts who/what and briefs the researcher; the researcher works in the run thread and " +
       "DMs the final brief to the workflow's creator. Keep the brief under ~300 words — it's " +
-      "read on the way into a call. The researcher calls workflow_run_complete after sending " +
-      "the brief. If the message contains no identifiable lead, intake asks once in the thread " +
-      "and completes the run if there's no answer.",
+      "read on the way into a call. After sending the brief, the researcher posts " +
+      "\"Run complete:\" plus one line in the run thread. If the message contains no identifiable " +
+      "lead, intake asks once in the thread and completes the run the same way if there's no answer.",
   },
   {
     id: "content-pipeline",
@@ -147,8 +147,9 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
       "A run starts when someone @mentions the writer in the home channel with an idea. The " +
       "writer drafts in the docs tool and posts the link in the run thread; the editor reviews " +
       "and they iterate (at most two revision rounds — then ship the best version rather than " +
-      "looping). The editor DMs the workflow's creator the final link for sign-off and calls " +
-      "workflow_run_complete. Nothing is published anywhere without the creator's explicit OK.",
+      "looping). The editor DMs the workflow's creator the final link for sign-off, then posts " +
+      "\"Run complete:\" plus one line in the run thread. Nothing is published anywhere without " +
+      "the creator's explicit OK.",
   },
 ];
 

@@ -492,6 +492,16 @@ async function buildConfigure(agent: db.AgentRow): Promise<ConfigureFrame> {
     const block = await adapter.buildGrant(frame, agent, row.config);
     if (block) blocks.push(block);
   }
+  // Workflow membership: the agent's role/playbook/team for each workflow it sits in. Rides the
+  // same appended-blocks channel as integrations (see services/workflows.ts).
+  try {
+    const { workflowPromptBlocks } = await import("./services/workflows");
+    for (const b of await workflowPromptBlocks(agent.id)) {
+      blocks.push(`— Workflow —\n${b}`);
+    }
+  } catch (e) {
+    console.error(`buildConfigure: workflow blocks for ${agent.id}:`, e);
+  }
   const workspace = await db.getWorkspace(agent.workspace_id);
   // For self-hosted agents, the device's sandbox setting decides whether the agent runs in an
   // isolated workspace (true) or in the user's connect directory (false). The prompt's
