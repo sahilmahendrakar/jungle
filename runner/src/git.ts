@@ -45,7 +45,14 @@ function run(
 }
 
 // Write/refresh the git credential store and configure the helper. Never logs the token.
-export async function applyGitCredentials(token: string, login: string): Promise<void> {
+// `author` optionally overrides the commit identity (git user.name/user.email) so an agent's
+// commits can be attributed to a real GitHub account; absent = the identity derived from the
+// agent's handle, matching what the backend's prompt block tells the agent.
+export async function applyGitCredentials(
+  token: string,
+  login: string,
+  author?: { name?: string; email?: string },
+): Promise<void> {
   currentToken = token;
   const user = login || "x-access-token";
   const line = `https://x-access-token:${token}@github.com\n`;
@@ -55,8 +62,8 @@ export async function applyGitCredentials(token: string, login: string): Promise
     // the user's default ~/.git-credentials on a self-hosted machine.
     await run("git", ["config", "--global", "credential.helper", `store --file=${CREDENTIALS_FILE}`]);
     // Identity for commits the agent makes.
-    await run("git", ["config", "--global", "user.name", user]);
-    await run("git", ["config", "--global", "user.email", `${user}@users.noreply.github.com`]);
+    await run("git", ["config", "--global", "user.name", author?.name || user]);
+    await run("git", ["config", "--global", "user.email", author?.email || `${user}@users.noreply.github.com`]);
     log.info("git credentials applied", { login: user });
   } catch (err) {
     log.error("failed to write git credentials", { err: String(err) });

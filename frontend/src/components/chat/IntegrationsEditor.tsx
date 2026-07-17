@@ -48,6 +48,12 @@ export function integrationFingerprint(entry: IntegrationDraft): string {
   const type = INTEGRATION_TYPES.find((t) => t.key === entry.key);
   const parts: string[] = [entry.key];
   for (const f of type?.configFields ?? []) parts.push(`${f.key}=${String(entry.config[f.key] ?? "").trim()}`);
+  if (type?.key === "github") {
+    // GitHub's optional commit identity (see the github entry in INTEGRATION_TYPES) is
+    // user-editable like the typed fields, so it counts for dirty detection too.
+    parts.push(`authorName=${String(entry.config.authorName ?? "").trim()}`);
+    parts.push(`authorEmail=${String(entry.config.authorEmail ?? "").trim()}`);
+  }
   const apKey = type ? approvalKey(type) : null;
   if (apKey) parts.push(`${apKey}=${approvalOn(entry.config[apKey])}`);
   return parts.join("\0");
@@ -75,6 +81,12 @@ export function validateIntegrations(list: IntegrationDraft[], connections: Conn
     for (const f of type.configFields) {
       if (!String(entry.config[f.key] ?? "").trim()) return `${type.name}: ${f.label} is required.`;
     }
+    if (type.key === "github") {
+      const email = String(entry.config.authorEmail ?? "").trim();
+      if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return `${type.name}: commit author email must be a valid email address.`;
+      }
+    }
   }
   return null;
 }
@@ -97,6 +109,62 @@ function rowSummary(
   const approval = key ? (approvalOn(config[key]) ? "asks before changes" : "acts without asking") : "";
   const parts = [account, approval].filter(Boolean);
   return { text: parts.join(" · ") || "Ready", warn: false };
+}
+
+// GitHub-only "Advanced" settings: the agent's git commit identity (config.authorName /
+// config.authorEmail). Optional — when set, the agent's commits are authored with this name/email.
+// Pointing the email at a real GitHub account (its `12345+login@users.noreply.github.com` noreply
+// works) makes GitHub attribute the commits to that account; the default identity
+// (<handle>@agents.jungle.dev) shows as unverified. Starts open when values are already set (e.g.
+// editing a configured agent from its profile).
+function GithubAdvanced({
+  config,
+  onChange,
+}: {
+  config: Record<string, string>;
+  onChange: (config: Record<string, string>) => void;
+}) {
+  const [open, setOpen] = useState(() => !!(config.authorName || config.authorEmail));
+  return (
+    <div className="space-y-2 border-t border-dashed pt-2">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        data-testid="github-advanced-toggle"
+        className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground hover:text-foreground"
+      >
+        <ChevronDown className={cn("size-3 transition-transform", open && "rotate-180")} />
+        Advanced
+      </button>
+      {open && (
+        <div className="space-y-2">
+          <div className="space-y-1">
+            <Label className="text-xs text-muted-foreground">Commit author name</Label>
+            <Input
+              value={config.authorName ?? ""}
+              placeholder="e.g. Sahil Mahendrakar"
+              data-testid="github-author-name"
+              onChange={(e) => onChange({ ...config, authorName: e.target.value })}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label className="text-xs text-muted-foreground">Commit author email</Label>
+            <Input
+              value={config.authorEmail ?? ""}
+              placeholder="12345+you@users.noreply.github.com"
+              data-testid="github-author-email"
+              onChange={(e) => onChange({ ...config, authorEmail: e.target.value })}
+            />
+          </div>
+          <p className="text-[11px] leading-snug text-muted-foreground">
+            The agent's commits show this author. Use an email linked to a GitHub account (its
+            noreply address works) so commits are attributed to it — otherwise GitHub can't verify
+            an account for the commit.
+          </p>
+        </div>
+      )}
+    </div>
+  );
 }
 
 // One attached integration: a thin row (brand tile + name + summary) that expands on click to
@@ -239,6 +307,7 @@ function IntegrationRow({
                   )}
                 </div>
               ))}
+              {type.key === "github" && <GithubAdvanced config={config} onChange={onChange} />}
               {apKey && (
                 <label className="flex items-center gap-2 text-xs text-foreground">
                   <input
