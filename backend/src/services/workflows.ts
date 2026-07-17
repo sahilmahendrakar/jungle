@@ -138,6 +138,13 @@ async function bindOrCreateMember(
     if (i > 50) throw new ApiError(500, "couldn't find a free handle");
   }
   taken.add(handle);
+  // Display name from the handle ("scout" -> "Scout"), NOT the role — otherwise a two-fixer
+  // template puts two agents both named "Fixer" in the sidebar. The role lives in the workflow
+  // prompt section and the diagram subtitle.
+  const displayName = handle
+    .split("-")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
   const runnerToken = randomBytes(32).toString("hex");
   const participant = await db.withTransaction(async (client) => {
     const { count, cap } = await db.agentCountAndCap(client, wf.workspace_id);
@@ -147,7 +154,7 @@ async function bindOrCreateMember(
         kind: "agent",
         workspaceId: wf.workspace_id,
         handle,
-        displayName: role.role,
+        displayName,
         runtime: "sdk",
         runnerToken,
         model: null,
