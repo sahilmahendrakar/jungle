@@ -35,33 +35,56 @@ export class FlyProvisioner implements Provisioner {
 
   async create(agent: { id: string; handle: string; runnerToken: string }): Promise<void> {
     if ((await db.getRunnerMeta(agent.id))?.machineId) return;
-    const vol = await fly<{ id: string }>(`/apps/${FLY_APP}/volumes`, {
-      method: "POST",
-      body: JSON.stringify({ name: volumeName(agent.id), region: FLY_REGION, size_gb: 10 }),
-    });
-    const machine = await fly<{ id: string }>(`/apps/${FLY_APP}/machines`, {
-      method: "POST",
-      body: JSON.stringify({
-        name: machineName(agent.id),
-        region: FLY_REGION,
-        config: {
-          image: FLY_RUNNER_IMAGE,
-          guest: { cpu_kind: "shared", cpus: 2, memory_mb: 3072 },
-          mounts: [{ volume: vol.id, path: "/workspace" }],
-          restart: { policy: "no" },
-          kill_signal: "SIGINT",
-          kill_timeout: 30,
-          env: {
-            JUNGLE_BACKEND_WS: RUNNER_BACKEND_WS,
-            JUNGLE_RUNNER_TOKEN: agent.runnerToken,
-            JUNGLE_AGENT_ID: agent.id,
-            JUNGLE_AGENT_HANDLE: agent.handle,
-            ANTHROPIC_API_KEY,
-          },
-        },
-      }),
-    });
-    await db.setRunnerMeta(agent.id, { machineId: machine.id, volumeId: vol.id });
+    // A volume is pinned to one physical host, and the machine mounting it MUST land on that
+    // same host. When that host is full, machine-create 412s with "insufficient resources" — a
+    // transient, placement-specific failure (not a quota). Retry a few times: each attempt makes
+    // a FRESH volume that may land on a host with capacity. Always delete the just-created volume
+    // when the machine step fails, so a failed attempt never leaks an orphaned volume.
+    const MAX_ATTEMPTS = 3;
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const vol = await fly<{ id: string }>(`/apps/${FLY_APP}/volumes`, {
+        method: "POST",
+        body: JSON.stringify({ name: volumeName(agent.id), region: FLY_REGION, size_gb: 10 }),
+      });
+      try {
+        const machine = await fly<{ id: string }>(`/apps/${FLY_APP}/machines`, {
+          method: "POST",
+          body: JSON.stringify({
+            name: machineName(agent.id),
+            region: FLY_REGION,
+            config: {
+              image: FLY_RUNNER_IMAGE,
+              guest: { cpu_kind: "shared", cpus: 2, memory_mb: 3072 },
+              mounts: [{ volume: vol.id, path: "/workspace" }],
+              restart: { policy: "no" },
+              kill_signal: "SIGINT",
+              kill_timeout: 30,
+              env: {
+                JUNGLE_BACKEND_WS: RUNNER_BACKEND_WS,
+                JUNGLE_RUNNER_TOKEN: agent.runnerToken,
+                JUNGLE_AGENT_ID: agent.id,
+                JUNGLE_AGENT_HANDLE: agent.handle,
+                ANTHROPIC_API_KEY,
+              },
+            },
+          }),
+        });
+        await db.setRunnerMeta(agent.id, { machineId: machine.id, volumeId: vol.id });
+        return;
+      } catch (e) {
+        lastErr = e;
+        // The volume is orphaned now that its machine failed to launch — tear it down so we
+        // don't accumulate leaked volumes across retries (or on the final give-up).
+        await fly(`/apps/${FLY_APP}/volumes/${vol.id}`, { method: "DELETE" }).catch(() => {});
+        // Only host-capacity failures are worth retrying (a fresh volume may land elsewhere);
+        // anything else (bad image, auth, quota) will just fail again, so surface it immediately.
+        const retriable = /insufficient resources|-> 412\b/i.test(String(e));
+        if (!retriable || attempt === MAX_ATTEMPTS) throw e;
+        await new Promise((r) => setTimeout(r, 500 * attempt));
+      }
+    }
+    throw lastErr;
   }
 
   async start(agentId: string): Promise<void> {
