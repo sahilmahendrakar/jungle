@@ -70,9 +70,10 @@ export function Home({
   const byChannel = new Map(channels.map((c) => [c.id, c]));
   const working = participants.filter((p) => p.kind === "agent" && p.status === "working");
 
-  // Coming up: next fires from schedules + active workflows. Self-fetched (coarse, refetch on
-  // the relayed schedule/workflow change events) — App doesn't need to own this state.
+  // Coming up (next fires) + stalled runs. Self-fetched (coarse, refetch on the relayed
+  // schedule/workflow change events) — App doesn't need to own this state.
   const [upcoming, setUpcoming] = useState<{ label: string; at: string; workflowId?: string }[]>([]);
+  const [stalled, setStalled] = useState<Workflow[]>([]);
   useEffect(() => {
     let alive = true;
     const load = () => {
@@ -87,11 +88,13 @@ export function Home({
           }
         }
         if (w.status === "fulfilled") {
-          for (const wf of w.value as Workflow[]) {
+          const wfs = w.value as Workflow[];
+          for (const wf of wfs) {
             if (wf.status === "active" && wf.next_run_at) {
               items.push({ label: wf.name, at: wf.next_run_at, workflowId: wf.id });
             }
           }
+          setStalled(wfs.filter((wf) => wf.last_run?.status === "stalled"));
         }
         items.sort((a, b) => a.at.localeCompare(b.at));
         setUpcoming(items.slice(0, 5));
@@ -136,16 +139,39 @@ export function Home({
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_290px]">
         <div className="min-w-0 space-y-6">
-          {/* Needs you: pending approvals (stalled workflow runs join this list later). */}
+          {/* Needs you: pending approvals + stalled workflow runs. */}
           <section data-testid="home-needs-you">
-            <SectionLabel>Needs you{confirms.length > 0 ? ` · ${confirms.length}` : ""}</SectionLabel>
-            {confirms.length === 0 ? (
+            <SectionLabel>
+              Needs you{confirms.length + stalled.length > 0 ? ` · ${confirms.length + stalled.length}` : ""}
+            </SectionLabel>
+            {confirms.length + stalled.length === 0 ? (
               <div className="flex items-center gap-2.5 rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
                 <Check className="size-4 text-primary" />
                 Nothing waiting on you.
               </div>
             ) : (
               <div className="space-y-3">
+                {stalled.map((wf) => (
+                  <div
+                    key={wf.id}
+                    data-testid="stalled-run-card"
+                    className="flex items-center gap-3 rounded-xl border border-amber-300/60 bg-amber-50/60 p-4 shadow-sm dark:border-amber-500/30 dark:bg-amber-500/5"
+                  >
+                    <span className="text-lg leading-none">{wf.emoji ?? "⚠️"}</span>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-semibold">{wf.name} looks stalled</div>
+                      <div className="text-xs text-muted-foreground">
+                        The run went quiet mid-flight — nudge the team in its thread, or stop it.
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => navigate(`/workflows/${wf.id}`)}
+                      className="shrink-0 rounded-md border bg-background px-2.5 py-1.5 text-xs font-medium hover:bg-accent"
+                    >
+                      Open run
+                    </button>
+                  </div>
+                ))}
                 {confirms.map((c) => (
                   <ApprovalCard
                     key={c.confirmId}

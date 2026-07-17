@@ -188,6 +188,23 @@ export async function getLiveWorkflowRun(workflowId: string): Promise<WorkflowRu
   return rows[0] ?? null;
 }
 
+// The active channel_message-triggered workflow whose home channel is `channelId` and whose
+// intake role (roster[0]) is `agentId`, if any — the orchestrator's channel-trigger lookup.
+export async function getChannelTriggerWorkflow(
+  channelId: string,
+  agentId: string,
+): Promise<WorkflowRow | null> {
+  const { rows } = await pool.query<WorkflowRow>(
+    `select * from workflows
+     where home_channel_id = $1 and status = 'active'
+       and trigger->>'type' = 'channel_message'
+       and roster->0->>'participant_id' = $2
+     limit 1`,
+    [channelId, agentId],
+  );
+  return rows[0] ?? null;
+}
+
 // The live run anchored at this thread root, if any — how a thread reply learns it's part of a
 // run (turn context threading) and how "Run complete:" messages find their run.
 export async function getLiveRunByRootMessage(rootMessageId: string): Promise<WorkflowRunRow | null> {

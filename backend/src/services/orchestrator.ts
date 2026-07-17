@@ -155,6 +155,24 @@ export async function triggerMentionedAgents(
 
     const agents = await db.agentsByIds(candidateIds);
     for (const agent of agents) {
+      // Channel-message workflow trigger: a HUMAN's top-level @mention of a workflow's intake
+      // agent in its home channel starts a RUN rooted at that message (the mention thread
+      // becomes the run thread) instead of a plain turn. Falls back to a normal reply when a
+      // run is already live (or anything else refuses).
+      if (senderKind === "human" && !rootId && channel.kind !== "dm") {
+        const wf = await db.getChannelTriggerWorkflow(channelId, agent.id);
+        if (wf) {
+          try {
+            await workflows.startRun(wf, "channel_message", {
+              rootMessageId: message.id,
+              triggerText: `@${message.sender_handle}: ${message.body}`,
+            });
+            continue; // the kickoff dispatch replaces the normal reply
+          } catch (e) {
+            console.error(`channel trigger for workflow ${wf.id} fell back to a plain turn:`, (e as Error).message);
+          }
+        }
+      }
       // Summon the @mentioned agent into the channel so its reply (to:"#channel") succeeds
       // — otherwise mentioning an agent that isn't a member triggers it but it can't respond.
       await db.addChannelMember(channelId, agent.id);

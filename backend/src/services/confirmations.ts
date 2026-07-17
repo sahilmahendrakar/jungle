@@ -95,6 +95,15 @@ export async function resolveConfirmDecision(
   });
 }
 
+// Any of these agents blocked on a pending confirmation? Used by the workflow stall sweep — a
+// run waiting on a human approval is an approval, not a stall.
+export function hasPendingConfirmForAgents(agentIds: string[]): boolean {
+  for (const p of pendingConfirms.values()) {
+    if (agentIds.includes(p.agentId)) return true;
+  }
+  return false;
+}
+
 // Every confirmation still awaiting a decision that `me` is allowed to act on (member of the
 // confirm's channel). Backs GET /api/confirmations so a client that loads/reconnects can rebuild
 // its approvals state — the request-time fan-out only reaches sockets open at that moment.

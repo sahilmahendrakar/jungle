@@ -423,6 +423,74 @@ export async function workflowPromptBlocks(agentId: string): Promise<string[]> {
   return blocks;
 }
 
+// --- Stall / quiescence sweep ---
+//
+// One rule each, run by a 60s ticker over live runs:
+//   stall:   running + no activity for WORKFLOW_STALL_MINUTES + nobody mid-turn + no pending
+//            approval  -> stalled, with one visible nudge in the run thread.
+//   revive:  stalled + fresh activity -> running.
+//   quiesce: live + no activity for WORKFLOW_QUIESCENCE_DONE_MINUTES + all members idle ->
+//            done ("team went quiet") — the fallback for a team that forgot "Run complete:".
+
+const SWEEP_MS = Number(process.env.WORKFLOW_SWEEP_MS ?? 60_000);
+let sweeping = false;
+
+export function startWorkflowSweeper(): void {
+  setInterval(() => {
+    if (sweeping) return;
+    sweeping = true;
+    void sweep()
+      .catch((e) => console.error("workflow sweep:", e))
+      .finally(() => {
+        sweeping = false;
+      });
+  }, SWEEP_MS).unref();
+}
+
+async function sweep(): Promise<void> {
+  const { WORKFLOW_STALL_MINUTES, WORKFLOW_QUIESCENCE_DONE_MINUTES } = await import("@jungle/shared");
+  const { hasPendingConfirmForAgents } = await import("./confirmations");
+  for (const run of await db.listLiveWorkflowRuns()) {
+    const wf = await db.getWorkflow(run.workflow_id);
+    if (!wf) continue;
+    const memberIds = wf.roster.map((r) => r.participant_id).filter((x): x is string => !!x);
+    const last = new Date(await db.workflowRunLastActivity(run)).getTime();
+    const idleMinutes = (Date.now() - last) / 60_000;
+    const anyWorking = memberIds.some((id) => runners.agentStatus(id) === "working");
+    const awaitingApproval = hasPendingConfirmForAgents(memberIds);
+
+    if (run.status === "stalled" && (idleMinutes < WORKFLOW_STALL_MINUTES || anyWorking)) {
+      await db.setWorkflowRunStatus(run.id, "running");
+      broadcastWorkspace(run.workspace_id, { type: "workflow_run_changed", workflowId: wf.id, runId: run.id });
+      continue;
+    }
+    if (anyWorking || awaitingApproval) continue;
+
+    if (idleMinutes >= WORKFLOW_QUIESCENCE_DONE_MINUTES) {
+      await db.setWorkflowRunStatus(run.id, "done", "Auto-completed: the team went quiet without posting a summary.");
+      broadcastWorkspace(run.workspace_id, { type: "workflow_run_changed", workflowId: wf.id, runId: run.id });
+    } else if (run.status === "running" && idleMinutes >= WORKFLOW_STALL_MINUTES) {
+      await db.setWorkflowRunStatus(run.id, "stalled");
+      broadcastWorkspace(run.workspace_id, { type: "workflow_run_changed", workflowId: wf.id, runId: run.id });
+      // One visible nudge in the run thread (never triggers agents: cascadeBudget 0).
+      if (run.root_message_id && wf.home_channel_id) {
+        try {
+          const msg = await db.persistMessage({
+            channelId: wf.home_channel_id,
+            senderId: wf.roster[0]?.participant_id ?? "",
+            body: `⚠️ This run looks stalled — no activity for ${Math.round(idleMinutes)} minutes. Nudge someone, or stop the run from the workflow page.`,
+            threadRootId: run.root_message_id,
+            cascadeBudget: 0,
+          });
+          await fanOut(wf.home_channel_id, { type: "message", message: att.withUrls(msg) });
+        } catch (e) {
+          console.error("stall nudge failed:", e);
+        }
+      }
+    }
+  }
+}
+
 // --- Pause / resume (active <-> paused; the backing schedule row pauses with it) ---
 
 export async function setWorkflowPaused(wf: db.WorkflowRow, paused: boolean): Promise<db.WorkflowRow> {
