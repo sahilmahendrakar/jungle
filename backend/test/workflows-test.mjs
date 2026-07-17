@@ -237,6 +237,64 @@ async function main() {
   ).rows[0];
   ok("backing schedule advanced", !!backing2?.next_run_at && new Date(backing2.next_run_at) > new Date());
 
+  // ---- 5. channel-message trigger ----
+  console.log("\nchannel trigger:");
+  const draft2 = (await req("POST", "/workflows", { templateId: "lead-research" })).json;
+  const fin2 = await req("POST", `/workflows/${draft2.id}/finalize`, {});
+  ok("lead-research finalized", fin2.status === 200 && fin2.json.status === "active");
+  const greeter = (
+    await pool.query(`select id, handle, runner_token from participants where id = $1`, [
+      fin2.json.roster[0].participant_id,
+    ])
+  ).rows[0];
+
+  const enq2 = [];
+  const runner2 = startFakeRunner(greeter.runner_token, (x) => enq2.push(x));
+  await sleep(1000);
+
+  // Human @mentions the intake agent top-level in the home channel -> a run, not a plain turn.
+  const appWs = new WebSocket(`ws://localhost:${PORT}?participantId=${SEED.human}`);
+  await new Promise((r) => appWs.on("open", r));
+  appWs.send(
+    JSON.stringify({
+      type: "post",
+      channelId: fin2.json.home_channel_id,
+      body: `@${greeter.handle} new lead: Jane Doe <jane@acme.com>, VP Eng at Acme`,
+    }),
+  );
+
+  const chanRun = await waitFor("channel-triggered run", async () => {
+    const r = (
+      await pool.query(`select * from workflow_runs where workflow_id = $1 limit 1`, [draft2.id])
+    ).rows[0];
+    return r ?? null;
+  });
+  ok("run trigger is channel_message", chanRun.trigger === "channel_message", chanRun.trigger);
+  const mentionMsg = (
+    await pool.query(`select id, body from messages where channel_id = $1 and body like '%new lead%'`, [
+      fin2.json.home_channel_id,
+    ])
+  ).rows[0];
+  ok("run rooted at the mention message", chanRun.root_message_id === mentionMsg?.id);
+  const kicked2 = await waitFor("greeter kickoff", async () => enq2[0]);
+  ok("kickoff carries the triggering message", /jane@acme\.com/.test(kicked2.items[0]?.text ?? ""));
+  ok("kickoff is a workflow kickoff (not a plain mention turn)", /WORKFLOW RUN kickoff/.test(kicked2.items[0]?.text ?? ""));
+
+  // Complete it via the thread convention.
+  kicked2.send({
+    type: "send_message",
+    id: "sm-2",
+    input: { to: `#inbound-lead-research`, body: "Run complete: brief sent to the creator." },
+  });
+  kicked2.send({ type: "turn_done", turnId: kicked2.turnId, ok: true });
+  const done2 = await waitFor("channel run done", async () => {
+    const r = (await pool.query(`select * from workflow_runs where id = $1`, [chanRun.id])).rows[0];
+    return r?.status === "done" ? r : null;
+  });
+  ok("channel-triggered run completed", done2.summary === "brief sent to the creator.", done2.summary);
+
+  appWs.close();
+  runner2.close();
   runner.close();
   console.log(`\nDONE: ${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);

@@ -10,6 +10,7 @@ import { createApp } from "./app";
 import { initAppSocket, broadcastUid } from "./ws/appSocket";
 import { triggerMentionedAgents, buildRunnerHooks } from "./services/orchestrator";
 import { startScheduler } from "./services/scheduler";
+import { startWorkflowSweeper } from "./services/workflows";
 import { startSlackOutbox } from "./services/slackBridge";
 import { registerBuiltinIntegrations } from "./integrations";
 
@@ -96,6 +97,7 @@ runners.startIdleSweeper();
 // Fire due scheduled turns (recurring/one-shot). Advances next_run_at before dispatch, so a
 // crash mid-fire skips rather than double-fires.
 startScheduler();
+startWorkflowSweeper();
 // Drain the Slack mirror outbox (Jungle -> Slack). Enqueued transactionally in persistMessage.
 startSlackOutbox();
 
