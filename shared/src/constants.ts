@@ -12,7 +12,7 @@ export const ALLOWED_MODELS = [
   "claude-sonnet-5",
   "claude-opus-4-8",
   "glm-5.2",
-  "kimi-k3[1m]",
+  "kimi-k3",
 ] as const;
 export type AllowedModel = (typeof ALLOWED_MODELS)[number];
 
@@ -38,7 +38,7 @@ export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
   { id: "claude-sonnet-5", label: "Sonnet 5", hint: "Balanced", provider: "anthropic", supportsEffort: true, contextWindow: 200_000 },
   { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5", hint: "Fastest", provider: "anthropic", supportsEffort: false, contextWindow: 200_000 },
   { id: "glm-5.2", label: "GLM 5.2", hint: "Open source · fast & cheap", provider: "zai", supportsEffort: false, contextWindow: 200_000 },
-  { id: "kimi-k3[1m]", label: "Kimi K3", hint: "Open source · 1M context", provider: "moonshot", supportsEffort: true, contextWindow: 1_048_576 },
+  { id: "kimi-k3", label: "Kimi K3", hint: "Open source · 1M context", provider: "moonshot", supportsEffort: true, contextWindow: 1_048_576 },
 ];
 
 // Catalog lookup by model id. Accepts null/undefined (agent's model override may be unset) so
