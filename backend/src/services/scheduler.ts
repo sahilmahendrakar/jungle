@@ -186,7 +186,14 @@ async function tick(): Promise<void> {
   });
   for (const s of due) {
     try {
-      await dispatchScheduledTurn(s);
+      if (s.workflow_id) {
+        // A workflow's cron trigger: fire a run, not a plain agent turn. Dynamic import — the
+        // workflows service imports this module's cron helpers, so a static import would cycle.
+        const workflows = await import("./workflows");
+        await workflows.startRunFromSchedule(s);
+      } else {
+        await dispatchScheduledTurn(s);
+      }
     } catch (e) {
       console.error(`scheduler: dispatch failed for schedule ${s.id}:`, e);
     }

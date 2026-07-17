@@ -873,6 +873,33 @@ export function updateWorkflow(
   });
 }
 
+export function finalizeWorkflow(id: string, body: { homeChannelId?: string } = {}): Promise<Workflow> {
+  return request<Workflow>(`/api/workflows/${id}/finalize`, {
+    json: body,
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to create the workflow",
+  });
+}
+
+export function runWorkflow(id: string): Promise<WorkflowRun> {
+  return request<WorkflowRun>(`/api/workflows/${id}/run`, {
+    json: {},
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to start a run",
+  });
+}
+
+export function stopWorkflowRun(id: string, runId: string): Promise<WorkflowRun> {
+  return request<WorkflowRun>(`/api/workflows/${id}/runs/${runId}/stop`, {
+    json: {},
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to stop the run",
+  });
+}
+
 export function deleteWorkflow(id: string): Promise<{ ok: boolean }> {
   return request(`/api/workflows/${id}`, {
     method: "DELETE",

@@ -68,6 +68,38 @@ router.post(
   }),
 );
 
+// Finalize a draft: bind/create the roster agents, create/adopt the home channel, create the
+// backing schedule for cron triggers, set active. Body: { homeChannelId? } to adopt an existing
+// channel; roster binding (participant_id per role) is edited via PATCH before finalizing.
+router.post(
+  "/api/workflows/:id/finalize",
+  wrap(async (req, res) => {
+    const { me, row } = await requireWorkflow(req);
+    const homeChannelId = req.body?.homeChannelId ? String(req.body.homeChannelId) : undefined;
+    res.json(await workflows.finalizeWorkflow(row, me, { homeChannelId }));
+  }),
+);
+
+// Manual "Run now".
+router.post(
+  "/api/workflows/:id/run",
+  wrap(async (req, res) => {
+    const { row } = await requireWorkflow(req);
+    res.status(201).json(await workflows.startRun(row, "manual"));
+  }),
+);
+
+router.post(
+  "/api/workflows/:id/runs/:runId/stop",
+  wrap(async (req, res) => {
+    const { me, row } = await requireWorkflow(req);
+    const run = await db.getWorkflowRun(String(req.params.runId));
+    if (!run || run.workflow_id !== row.id) throw new ApiError(404, "run not found");
+    if (run.status !== "running" && run.status !== "stalled") throw new ApiError(400, "run is not live");
+    res.json(await workflows.stopRun(run, `@${me.handle}`));
+  }),
+);
+
 router.patch(
   "/api/workflows/:id",
   wrap(async (req, res) => {

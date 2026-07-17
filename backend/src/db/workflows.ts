@@ -188,6 +188,18 @@ export async function getLiveWorkflowRun(workflowId: string): Promise<WorkflowRu
   return rows[0] ?? null;
 }
 
+// The live run anchored at this thread root, if any — how a thread reply learns it's part of a
+// run (turn context threading) and how "Run complete:" messages find their run.
+export async function getLiveRunByRootMessage(rootMessageId: string): Promise<WorkflowRunRow | null> {
+  const { rows } = await pool.query<WorkflowRunRow>(
+    `select * from workflow_runs
+     where root_message_id = $1 and status in ('running','stalled')
+     order by started_at desc limit 1`,
+    [rootMessageId],
+  );
+  return rows[0] ?? null;
+}
+
 export async function setWorkflowRunRoot(id: string, rootMessageId: string): Promise<void> {
   await pool.query(`update workflow_runs set root_message_id = $2 where id = $1`, [id, rootMessageId]);
 }
