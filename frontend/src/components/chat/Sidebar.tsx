@@ -1,16 +1,16 @@
 import {
   Bot,
-  CalendarClock,
   Hash,
+  Home,
   LogOut,
   MessagesSquare,
   Moon,
   MonitorSmartphone,
-  Package,
   PanelLeftClose,
   Search,
-  ShieldQuestion,
   Sun,
+  Users,
+  Workflow,
 } from "lucide-react";
 import type { Channel, Participant, Membership } from "../../api";
 import { firebaseEnabled } from "../../firebase";
@@ -80,15 +80,13 @@ export function Sidebar({
   onSelectChannel,
   onOpenDm,
   onOpenThreads,
-  onOpenScheduled,
-  scheduledActive,
-  onOpenAgents,
-  agentsActive,
-  onOpenApprovals,
-  approvalsActive,
-  approvalsCount,
-  onOpenDeliverables,
-  deliverablesActive,
+  onOpenHome,
+  homeActive,
+  homeBadge,
+  onOpenWorkflows,
+  workflowsActive,
+  onOpenTeam,
+  teamActive,
   onOpenEnvironments,
   environmentsActive,
   onOpenSearch,
@@ -122,15 +120,13 @@ export function Sidebar({
   onSelectChannel: (id: string) => void;
   onOpenDm: (otherId: string) => void;
   onOpenThreads: () => void;
-  onOpenScheduled: () => void;
-  scheduledActive: boolean;
-  onOpenAgents: () => void;
-  agentsActive: boolean;
-  onOpenApprovals: () => void;
-  approvalsActive: boolean;
-  approvalsCount: number;
-  onOpenDeliverables: () => void;
-  deliverablesActive: boolean;
+  onOpenHome: () => void;
+  homeActive: boolean;
+  homeBadge: number; // things waiting on the user (pending approvals + stalled runs)
+  onOpenWorkflows: () => void;
+  workflowsActive: boolean;
+  onOpenTeam: () => void;
+  teamActive: boolean;
   onOpenEnvironments: () => void;
   environmentsActive: boolean;
   onOpenSearch: () => void;
@@ -209,13 +205,33 @@ export function Sidebar({
                 </kbd>
               }
             />
-            {/* Agents: mission control — every agent, its live status, and what it's doing. */}
+            {/* Home: the attention inbox — approvals + stalled runs ("needs you"), deliverables,
+                live activity, upcoming runs. The badge is the ONE number to check. */}
             <NavItem
-              testId="agents-nav"
-              active={agentsActive}
-              onClick={onOpenAgents}
-              icon={<Bot className="size-4 opacity-70" />}
-              label="Agents"
+              testId="home-nav"
+              active={homeActive}
+              onClick={onOpenHome}
+              icon={<Home className="size-4 opacity-70" />}
+              label="Home"
+              unread={homeBadge > 0}
+              badgeCount={homeBadge}
+              badgeMention={homeBadge > 0}
+            />
+            {/* Workflows: teams of agents on a trigger, plus scheduled tasks (absorbs Scheduled). */}
+            <NavItem
+              testId="workflows-nav"
+              active={workflowsActive}
+              onClick={onOpenWorkflows}
+              icon={<Workflow className="size-4 opacity-70" />}
+              label="Workflows"
+            />
+            {/* Team: every agent (grouped by workflow), live status, what each is doing. */}
+            <NavItem
+              testId="team-nav"
+              active={teamActive}
+              onClick={onOpenTeam}
+              icon={<Users className="size-4 opacity-70" />}
+              label="Team"
             />
             {/* Threads: my followed threads with unread replies (participation-gated). */}
             <NavItem
@@ -227,41 +243,6 @@ export function Sidebar({
               unread={totalThreadUnread > 0}
               badgeCount={totalThreadUnread}
               badgeMention={totalThreadUnread > 0}
-            />
-            {/* Approvals: tool confirmations waiting on a human — badge = blocked agents. */}
-            <NavItem
-              testId="approvals-nav"
-              active={approvalsActive}
-              onClick={onOpenApprovals}
-              icon={<ShieldQuestion className="size-4 opacity-70" />}
-              label="Approvals"
-              unread={approvalsCount > 0}
-              badgeCount={approvalsCount}
-              badgeMention={approvalsCount > 0}
-            />
-            {/* Deliverables: the durable "what agents shipped" feed. */}
-            <NavItem
-              testId="deliverables-nav"
-              active={deliverablesActive}
-              onClick={onOpenDeliverables}
-              icon={<Package className="size-4 opacity-70" />}
-              label="Deliverables"
-            />
-            {/* Scheduled: workspace-wide scheduled agent turns (a main-column view in-layout). */}
-            <NavItem
-              testId="scheduled-nav"
-              active={scheduledActive}
-              onClick={onOpenScheduled}
-              icon={<CalendarClock className="size-4 opacity-70" />}
-              label="Scheduled"
-            />
-            {/* Environments: the account's own machines that can run agents (self-hosted). */}
-            <NavItem
-              testId="environments-nav"
-              active={environmentsActive}
-              onClick={onOpenEnvironments}
-              icon={<MonitorSmartphone className="size-4 opacity-70" />}
-              label="Environments"
             />
 
             <div className="h-3" />
@@ -374,6 +355,22 @@ export function Sidebar({
                 <div className="truncate text-xs text-sidebar-foreground/50">@{me.handle}</div>
               </div>
             </button>
+            {/* Environments (self-hosted devices) lives in the footer now — it's setup, not daily. */}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  data-testid="environments-nav"
+                  onClick={onOpenEnvironments}
+                  className={cn(
+                    "flex size-8 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground",
+                    environmentsActive ? "text-sidebar-foreground" : "text-sidebar-foreground/70",
+                  )}
+                >
+                  <MonitorSmartphone className="size-4" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>Environments — your devices that run agents</TooltipContent>
+            </Tooltip>
             <ThemeToggle />
             <Tooltip>
               <TooltipTrigger asChild>

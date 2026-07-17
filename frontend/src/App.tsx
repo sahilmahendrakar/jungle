@@ -46,6 +46,8 @@ import { Environments } from "./Environments";
 import { LinkDevice } from "./LinkDevice";
 import { SearchDialog } from "./SearchDialog";
 import { navigate, usePath } from "./route";
+import { Home } from "./Home";
+import { Workflows } from "./Workflows";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { DmActivityView } from "./components/chat/DmActivityView";
@@ -173,14 +175,24 @@ export function App({
   const path = usePath();
   const scheduledOpen = path === "/scheduled" && !!workspaceId;
   // The other main-column views (deep-linkable like Scheduled, but not workspace-gated — they
-  // work in dev mode too).
+  // work in dev mode too). Home/Workflows/Team are the primary nav; Approvals/Deliverables/
+  // Scheduled survive as deep links (their content is absorbed into Home and Workflows).
+  const homeOpen = path === "/home";
+  const workflowsOpen = path === "/workflows";
   const approvalsOpen = path === "/approvals";
   const deliverablesOpen = path === "/deliverables";
-  const agentsOpen = path === "/agents";
+  const agentsOpen = path === "/agents" || path === "/team";
   const environmentsOpen = path === "/environments";
   const linkOpen = path === "/link";
   const overlayViewOpen =
-    scheduledOpen || approvalsOpen || deliverablesOpen || agentsOpen || environmentsOpen || linkOpen;
+    homeOpen ||
+    workflowsOpen ||
+    scheduledOpen ||
+    approvalsOpen ||
+    deliverablesOpen ||
+    agentsOpen ||
+    environmentsOpen ||
+    linkOpen;
   // Reading "am I on an overlay view" from long-lived callbacks without re-binding them.
   const overlayViewRef = useRef(false);
   overlayViewRef.current = overlayViewOpen;
@@ -1036,15 +1048,13 @@ export function App({
           goToChat();
           openThreadsList();
         }}
-        onOpenScheduled={() => navigate("/scheduled")}
-        scheduledActive={scheduledOpen}
-        onOpenAgents={() => navigate("/agents")}
-        agentsActive={agentsOpen}
-        onOpenApprovals={() => navigate("/approvals")}
-        approvalsActive={approvalsOpen}
-        approvalsCount={confirms.length}
-        onOpenDeliverables={() => navigate("/deliverables")}
-        deliverablesActive={deliverablesOpen}
+        onOpenHome={() => navigate("/home")}
+        homeActive={homeOpen}
+        homeBadge={confirms.length}
+        onOpenWorkflows={() => navigate("/workflows")}
+        workflowsActive={workflowsOpen || scheduledOpen}
+        onOpenTeam={() => navigate("/team")}
+        teamActive={agentsOpen}
         onOpenEnvironments={() => navigate("/environments")}
         environmentsActive={environmentsOpen}
         onOpenSearch={() => {
@@ -1091,7 +1101,43 @@ export function App({
       )}
 
       {/* ---------- Main ---------- */}
-      {scheduledOpen ? (
+      {homeOpen ? (
+        <Home
+          me={me}
+          confirms={confirms}
+          channels={channels}
+          participants={others}
+          deliverables={deliverables}
+          sidebarOpen={sidebarOpen}
+          onOpenDrawer={() => setDrawerOpen(true)}
+          onExpandSidebar={() => setSidebarOpen(true)}
+          onDecide={decideConfirm}
+          onJumpToChannel={(channelId) => {
+            goToChat();
+            selectAndClose(channelId);
+          }}
+          onJumpToMessage={(channelId, messageId) => jumpToMessage(channelId, messageId)}
+          onOpenAgentProfile={(id) => {
+            goToChat();
+            openProfilePanel(id);
+          }}
+        />
+      ) : workflowsOpen ? (
+        <Workflows
+          workspaceId={workspaceId ?? ""}
+          sidebarOpen={sidebarOpen}
+          onOpenDrawer={() => setDrawerOpen(true)}
+          onExpandSidebar={() => setSidebarOpen(true)}
+          onOpenWorkflow={(w) => {
+            // Until the detail/builder pages land, a workflow's most useful "open" is its home
+            // channel (drafts don't have one yet — stay here).
+            if (w.home_channel_id) {
+              goToChat();
+              selectAndClose(w.home_channel_id);
+            }
+          }}
+        />
+      ) : scheduledOpen ? (
         <Scheduled
           workspaceId={workspaceId!}
           sidebarOpen={sidebarOpen}

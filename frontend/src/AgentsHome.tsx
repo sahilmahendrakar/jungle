@@ -213,7 +213,7 @@ export function AgentsHome({
   return (
     <ViewShell
       icon={<Bot className="size-5" />}
-      title="Agents"
+      title="Team"
       sidebarOpen={sidebarOpen}
       onOpenDrawer={onOpenDrawer}
       onExpandSidebar={onExpandSidebar}
