@@ -449,6 +449,25 @@ export function buildRunnerHooks(): runners.RunnerHooks {
       broadcastWorkspace(row.workspace_id, { type: "schedule_changed", scheduleId: id, action: "deleted" });
       return { ok: true };
     },
+    // The workflow_* builder tools (Architect's draft/finalize family) — thin dispatch onto
+    // services/workflows.ts, which owns validation and the compile step.
+    workflowTool: async (agent, frame) => {
+      const input = frame.input as never;
+      switch (frame.type) {
+        case "workflow_list_templates":
+          return workflows.toolListTemplates();
+        case "workflow_draft_create":
+          return workflows.toolDraftCreate(agent, input);
+        case "workflow_draft_get":
+          return workflows.toolDraftGet(agent, input);
+        case "workflow_draft_set":
+          return workflows.toolDraftSet(agent, input);
+        case "workflow_finalize":
+          return workflows.toolFinalize(agent, input);
+        default:
+          return { ok: false, error: `unknown workflow tool ${frame.type}` };
+      }
+    },
     // Every turn_done -> attribute the result to any schedules whose fires fed the turn
     // (success/failure counters + auto-pause live in the scheduler), and close out the durable
     // turn row so a reload can show the chip as finished instead of forever "running".

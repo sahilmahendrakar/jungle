@@ -1111,6 +1111,11 @@ export function App({
           channels={channels}
           participants={others}
           deliverables={deliverables}
+          totalThreadUnread={totalThreadUnread}
+          onOpenThreads={() => {
+            goToChat();
+            openThreadsList();
+          }}
           sidebarOpen={sidebarOpen}
           onOpenDrawer={() => setDrawerOpen(true)}
           onExpandSidebar={() => setSidebarOpen(true)}
@@ -1132,6 +1137,10 @@ export function App({
           onOpenDrawer={() => setDrawerOpen(true)}
           onExpandSidebar={() => setSidebarOpen(true)}
           onOpenWorkflow={(w) => navigate(`/workflows/${w.id}`)}
+          onOpenBuilderDm={(dmChannelId) => {
+            goToChat();
+            selectAndClose(dmChannelId);
+          }}
         />
       ) : workflowDetailId ? (
         <WorkflowDetail

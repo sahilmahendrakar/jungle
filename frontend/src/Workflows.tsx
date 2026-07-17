@@ -15,11 +15,11 @@ import {
 import type { Participant, Workflow, WorkflowRole, WorkflowTemplate } from "./api";
 import {
   createWorkflowDraft,
-  deleteWorkflow,
   finalizeWorkflow,
   listParticipants,
   listWorkflows,
   listWorkflowTemplates,
+  openWorkflowBuilder,
   runWorkflow,
   stopWorkflowRun,
   updateWorkflow,
@@ -338,12 +338,14 @@ export function Workflows({
   onOpenDrawer,
   onExpandSidebar,
   onOpenWorkflow,
+  onOpenBuilderDm,
 }: {
   workspaceId: string;
   sidebarOpen: boolean;
   onOpenDrawer: () => void;
   onExpandSidebar: () => void;
   onOpenWorkflow: (w: Workflow) => void;
+  onOpenBuilderDm: (dmChannelId: string) => void;
 }) {
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [templates, setTemplates] = useState<WorkflowTemplate[]>([]);
@@ -411,6 +413,21 @@ export function Workflows({
     else onOpenWorkflow(w);
   }
 
+  const [openingBuilder, setOpeningBuilder] = useState(false);
+  // "New workflow" = a DM with the Architect: it drafts while you talk; the Workflows page and
+  // the draft's detail page update live as it works. Templates keep the quick dialog path.
+  async function newWorkflow() {
+    setOpeningBuilder(true);
+    try {
+      const r = await openWorkflowBuilder({});
+      onOpenBuilderDm(r.dmChannelId);
+    } catch (e) {
+      alert((e as Error).message);
+    } finally {
+      setOpeningBuilder(false);
+    }
+  }
+
   return (
     <ViewShell
       icon={<WorkflowIcon className="size-5" />}
@@ -428,9 +445,21 @@ export function Workflows({
         <div className="space-y-8">
           {/* Your workflows */}
           <section data-testid="your-workflows">
-            <h2 className="mb-2 px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              Your workflows
-            </h2>
+            <div className="mb-2 flex items-center px-1">
+              <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Your workflows
+              </h2>
+              <Button
+                size="sm"
+                data-testid="new-workflow"
+                disabled={openingBuilder}
+                onClick={newWorkflow}
+                className="ml-auto h-7 text-xs"
+              >
+                {openingBuilder ? <Loader2 className="size-3.5 animate-spin" /> : <Bot className="size-3.5" />}
+                New workflow — chat with the Architect
+              </Button>
+            </div>
             {workflows.length === 0 ? (
               <div className="rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground">
                 A workflow is a small team of agents with a trigger and a playbook — pick a

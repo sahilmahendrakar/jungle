@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CalendarClock, Check, Home as HomeIcon, Package, Radio } from "lucide-react";
+import { CalendarClock, Check, Home as HomeIcon, MessageSquare, Package, Radio } from "lucide-react";
 import type { Channel, Participant, Deliverable, Schedule, Workflow } from "./api";
 import { listSchedules, listWorkflows } from "./api";
 import { fmtRelative, type ToolConfirm } from "./lib/chat";
@@ -46,6 +46,8 @@ export function Home({
   channels,
   participants,
   deliverables,
+  totalThreadUnread,
+  onOpenThreads,
   sidebarOpen,
   onOpenDrawer,
   onExpandSidebar,
@@ -59,6 +61,8 @@ export function Home({
   channels: Channel[];
   participants: Participant[];
   deliverables: Deliverable[];
+  totalThreadUnread: number;
+  onOpenThreads: () => void;
   sidebarOpen: boolean;
   onOpenDrawer: () => void;
   onExpandSidebar: () => void;
@@ -182,6 +186,20 @@ export function Home({
                   />
                 ))}
               </div>
+            )}
+            {/* Threads left the sidebar nav — unread replies surface here instead. */}
+            {totalThreadUnread > 0 && (
+              <button
+                data-testid="home-threads-row"
+                onClick={onOpenThreads}
+                className="mt-3 flex w-full items-center gap-2.5 rounded-xl border bg-card p-3 text-left text-sm shadow-sm transition-colors hover:border-primary/40"
+              >
+                <MessageSquare className="size-4 text-muted-foreground" />
+                <span className="font-medium">
+                  {totalThreadUnread} thread{totalThreadUnread === 1 ? "" : "s"} with new replies
+                </span>
+                <span className="ml-auto text-xs text-muted-foreground">View →</span>
+              </button>
             )}
           </section>
 
