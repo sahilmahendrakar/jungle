@@ -68,12 +68,19 @@ const BRAND_COLORS: Record<string, string> = {
 };
 
 // Official full-color product marks, inlined from the vendors' published SVGs (Google's 2020
-// marks; Granola's from granola.ai — its favicon renders the curl in near-black, so it follows
-// text-foreground like GitHub's mark). `fill` omitted = currentColor. These take precedence over
-// the monochrome glyphs above: the Google family's brand guidelines call for the real marks,
-// and they read far better at tile size. "google" maps to the Gmail envelope — that connection
-// IS the Gmail grant (renamed in Settings accordingly).
-type RichGlyph = { viewBox: string; transform?: string; paths: { d: string; fill?: string }[] };
+// marks; Granola's curl from granola.ai, rendered on its chartreuse brand tile — lime square +
+// near-black curl, which reads in both light and dark themes). `fill` omitted = currentColor.
+// These take precedence over the monochrome glyphs above: the Google family's brand guidelines
+// call for the real marks, and they read far better at tile size. "google" maps to the Gmail
+// envelope — that connection IS the Gmail grant (renamed in Settings accordingly).
+type RichGlyph = {
+  viewBox: string;
+  transform?: string;
+  // Full-viewBox rounded tile behind the glyph (Granola's lime square), when the mark is
+  // branded as a tile rather than a bare glyph.
+  background?: { fill: string; rx?: number };
+  paths: { d: string; fill?: string }[];
+};
 
 const GMAIL_RICH: RichGlyph = {
   viewBox: "52 42 88 66",
@@ -117,9 +124,13 @@ const RICH_BRAND_GLYPHS: Record<string, RichGlyph> = {
   },
   granola: {
     viewBox: "0 0 40 40",
+    // The brand tile: chartreuse rounded square (sampled from granola.ai's mark, #b2c248) with
+    // the curl scaled/padded to sit inside it, in its near-black (#1e1e1e).
+    background: { fill: "#b2c248", rx: 9 },
+    transform: "translate(6 4.5) scale(0.71)",
     paths: [
-      { d: "M22.1137 9.29854C23.327 9.12219 26.7606 9.15242 27.276 10.5191C26.9821 12.2533 22.9676 10.9968 21.4283 11.0817C17.9473 11.2733 16.1922 12.9161 13.4731 14.7208C8.70209 17.8874 5.39937 25.6132 9.23225 30.5822C10.8198 32.6294 13.1625 33.9546 15.7339 34.2609C23.8312 35.2656 35.0209 26.2349 31.9327 17.4897C31.4243 16.048 29.9575 14.8478 30.1441 13.2929C30.4757 12.8151 30.3781 12.9542 30.9632 12.6928C31.8018 13.2334 32.3074 13.8379 32.7963 14.729C33.4775 15.9735 34.3648 18.4101 33.9859 19.8103C33.8912 20.1613 33.7909 20.587 33.7031 20.9422C33.8327 21.1287 33.9636 21.3138 34.0974 21.4974C34.0444 22.1562 33.5444 23.4008 33.2964 24.0897C33.0443 24.532 33.132 25.2334 32.969 25.6393C29.3487 34.6223 17.5893 40.0807 9.31611 33.5973C7.26455 31.9894 5.80933 29.1935 5.58966 26.7942C5.18514 22.8005 6.40997 18.8129 8.98654 15.7349C12.8179 11.1597 16.2075 9.82243 22.1137 9.29854Z" },
-      { d: "M33.7855 3.4707L34.0222 3.69942C33.8579 4.48617 34.1852 4.94292 34.6212 5.56544C30.2947 10.1803 27.1466 16.642 23.8815 22.0853C22.7657 23.9463 21.9564 26.0864 20.7682 27.9387L20.6261 28.0046C19.9477 28.3155 19.6775 28.5009 18.9908 28.2475C17.9168 27.2932 17.6257 20.7492 17.2928 18.6539C15.9151 19.8369 14.2561 21.8372 14.5737 23.7754L14.4316 24.5605C14.1084 24.9268 14.2742 24.8127 13.7254 24.945C11.1202 24.4281 13.8619 19.1953 15.0083 17.9989C19.4045 13.4147 19.8307 21.8754 19.9965 24.7573C20.8908 23.4005 21.7057 21.5217 22.547 20.1825C25.6686 15.2209 29.6846 7.36153 33.7855 3.4707Z" },
+      { d: "M22.1137 9.29854C23.327 9.12219 26.7606 9.15242 27.276 10.5191C26.9821 12.2533 22.9676 10.9968 21.4283 11.0817C17.9473 11.2733 16.1922 12.9161 13.4731 14.7208C8.70209 17.8874 5.39937 25.6132 9.23225 30.5822C10.8198 32.6294 13.1625 33.9546 15.7339 34.2609C23.8312 35.2656 35.0209 26.2349 31.9327 17.4897C31.4243 16.048 29.9575 14.8478 30.1441 13.2929C30.4757 12.8151 30.3781 12.9542 30.9632 12.6928C31.8018 13.2334 32.3074 13.8379 32.7963 14.729C33.4775 15.9735 34.3648 18.4101 33.9859 19.8103C33.8912 20.1613 33.7909 20.587 33.7031 20.9422C33.8327 21.1287 33.9636 21.3138 34.0974 21.4974C34.0444 22.1562 33.5444 23.4008 33.2964 24.0897C33.0443 24.532 33.132 25.2334 32.969 25.6393C29.3487 34.6223 17.5893 40.0807 9.31611 33.5973C7.26455 31.9894 5.80933 29.1935 5.58966 26.7942C5.18514 22.8005 6.40997 18.8129 8.98654 15.7349C12.8179 11.1597 16.2075 9.82243 22.1137 9.29854Z", fill: "#1e1e1e" },
+      { d: "M33.7855 3.4707L34.0222 3.69942C33.8579 4.48617 34.1852 4.94292 34.6212 5.56544C30.2947 10.1803 27.1466 16.642 23.8815 22.0853C22.7657 23.9463 21.9564 26.0864 20.7682 27.9387L20.6261 28.0046C19.9477 28.3155 19.6775 28.5009 18.9908 28.2475C17.9168 27.2932 17.6257 20.7492 17.2928 18.6539C15.9151 19.8369 14.2561 21.8372 14.5737 23.7754L14.4316 24.5605C14.1084 24.9268 14.2742 24.8127 13.7254 24.945C11.1202 24.4281 13.8619 19.1953 15.0083 17.9989C19.4045 13.4147 19.8307 21.8754 19.9965 24.7573C20.8908 23.4005 21.7057 21.5217 22.547 20.1825C25.6686 15.2209 29.6846 7.36153 33.7855 3.4707Z", fill: "#1e1e1e" },
     ],
   },
 };
@@ -130,8 +141,12 @@ export function BrandGlyph({ brand, className }: { brand: string; className?: st
   const rich = RICH_BRAND_GLYPHS[brand];
   if (rich) {
     const paths = rich.paths.map((p, i) => <path key={i} d={p.d} fill={p.fill} />);
+    const [, , vbw, vbh] = rich.viewBox.split(" ").map(Number);
     return (
       <svg viewBox={rich.viewBox} className={cn("shrink-0 text-foreground", className)} aria-hidden>
+        {rich.background && (
+          <rect width={vbw} height={vbh} rx={rich.background.rx ?? 0} fill={rich.background.fill} />
+        )}
         {rich.transform ? <g transform={rich.transform}>{paths}</g> : paths}
       </svg>
     );
