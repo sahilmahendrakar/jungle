@@ -879,7 +879,6 @@ export function App({
   const others = people.filter((p) => p.id !== participantId);
   const rooms = channels.filter((c) => c.kind !== "dm");
   const dms = channels.filter((c) => c.kind === "dm");
-  const dmChannelWith = (handle: string) => dms.find((c) => c.dm_with === handle);
   // Stable identity across re-renders (unlike an inline arrow fn) so consumers that key off it —
   // notably Markdown's react-markdown `components` object — don't get a "new" prop on every
   // render and remount their custom renderers (which would drop mounted state like an open
@@ -1031,7 +1030,6 @@ export function App({
       <Sidebar
         rooms={rooms}
         dms={dms}
-        others={others}
         selected={selected}
         me={me}
         threadsListOpen={threadsListOpen}
@@ -1042,14 +1040,9 @@ export function App({
         resizing={resizing}
         leftWidth={left.width}
         personByHandle={personByHandle}
-        dmChannelWith={dmChannelWith}
         onSelectChannel={(id) => {
           goToChat();
           selectAndClose(id);
-        }}
-        onOpenDm={(id) => {
-          goToChat();
-          openDm(id);
         }}
         onOpenThreads={() => {
           goToChat();
@@ -1070,7 +1063,6 @@ export function App({
         }}
         workingChannelIds={workingChannelIds}
         onNewChannel={() => setShowNew(true)}
-        onAddAgent={() => setShowAddAgent(true)}
         onCollapse={() => {
           setSidebarOpen(false); // desktop: collapse
           setDrawerOpen(false); // mobile: close the off-canvas drawer
@@ -1211,7 +1203,7 @@ export function App({
       ) : agentsOpen || !sel ? (
         // Mission control — also the landing view when no conversation is open.
         <AgentsHome
-          agents={others.filter((p) => p.kind === "agent")}
+          participants={others}
           liveTurns={liveTurnsRef.current}
           confirms={confirms}
           deliverables={deliverables}
