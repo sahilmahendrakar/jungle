@@ -32,6 +32,7 @@ import { DeleteWorkflowDialog } from "./components/workflow/DeleteWorkflowDialog
 import { UnconnectedIntegrationsDialog } from "./components/workflow/UnconnectedIntegrationsDialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
@@ -141,6 +142,75 @@ function TriggerEditor({
         <p className="text-xs text-muted-foreground">Runs only when you press Run — no automatic trigger.</p>
       )}
     </div>
+  );
+}
+
+// ---- emoji picker ----
+
+// Curated set for the icon picker (no emoji lib in the app). The tile mirrors the card/list
+// rendering so what you pick here is what you see everywhere.
+const WORKFLOW_EMOJIS = [
+  "🛟", "📋", "🔎", "✍️", "🧹", "📊", "📈", "📥",
+  "📤", "📨", "✉️", "🐛", "🔧", "🛠️", "⚙️", "🤖",
+  "🧠", "💡", "🚀", "⏰", "📅", "🗞️", "📝", "✅",
+  "🎯", "🔥", "💼", "🏗️", "🧪", "🛡️", "📣", "🤝",
+];
+
+function EmojiPicker({
+  emoji,
+  onPick,
+}: {
+  emoji: string | null;
+  onPick: (e: string | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          data-testid="workflow-emoji"
+          aria-label="Change workflow icon"
+          title="Change workflow icon"
+          className="flex size-9 shrink-0 cursor-pointer items-center justify-center rounded-lg bg-accent text-lg leading-none transition-shadow hover:ring-2 hover:ring-primary/40"
+        >
+          {emoji ?? <WorkflowIcon className="size-4 text-muted-foreground" />}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-auto p-2">
+        <div className="grid grid-cols-8 gap-0.5">
+          {WORKFLOW_EMOJIS.map((e) => (
+            <button
+              key={e}
+              type="button"
+              data-testid="workflow-emoji-option"
+              onClick={() => {
+                onPick(e);
+                setOpen(false);
+              }}
+              className={cn(
+                "flex size-8 cursor-pointer items-center justify-center rounded-md text-lg hover:bg-accent",
+                e === emoji && "bg-accent ring-1 ring-primary/40",
+              )}
+            >
+              {e}
+            </button>
+          ))}
+        </div>
+        {emoji && (
+          <button
+            type="button"
+            onClick={() => {
+              onPick(null);
+              setOpen(false);
+            }}
+            className="mt-1 flex w-full cursor-pointer items-center justify-center rounded-md px-2 py-1.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground"
+          >
+            Remove icon
+          </button>
+        )}
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -321,15 +391,24 @@ export function WorkflowBuilder({
       {error && <p className="mb-3 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</p>}
 
       <div className="space-y-6">
-        {/* Name */}
-        <Input
-          data-testid="workflow-name"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          onBlur={() => name.trim() && name !== w.name && persist({ name: name.trim() })}
-          placeholder="Name this workflow"
-          className="h-11 border-0 border-b border-border px-0 text-lg font-semibold shadow-none focus-visible:ring-0"
-        />
+        {/* Icon + name */}
+        <div className="flex items-center gap-3">
+          <EmojiPicker
+            emoji={w.emoji}
+            onPick={(emoji) => {
+              setW({ ...w, emoji });
+              void persist({ emoji });
+            }}
+          />
+          <Input
+            data-testid="workflow-name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onBlur={() => name.trim() && name !== w.name && persist({ name: name.trim() })}
+            placeholder="Name this workflow"
+            className="h-11 flex-1 border-0 border-b border-border px-0 text-lg font-semibold shadow-none focus-visible:ring-0"
+          />
+        </div>
 
         {/* The team, as it will run */}
         <section>
