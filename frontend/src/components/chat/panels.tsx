@@ -30,8 +30,11 @@ import {
   listAgentIntegrations,
   setAgentIntegration,
   removeAgentIntegration,
+  listWorkflows,
+  updateWorkflow,
+  connectionForIntegration,
 } from "../../api";
-import type { Attachment, Participant, AgentStatus, AgentServiceInfo } from "../../api";
+import type { Attachment, Participant, AgentStatus, AgentServiceInfo, Workflow } from "../../api";
 import {
   IntegrationsEditor,
   integrationFingerprint,
@@ -39,7 +42,7 @@ import {
   validateIntegrations,
   type IntegrationDraft,
 } from "./IntegrationsEditor";
-import { useConnections } from "@/lib/connections";
+import { useConnections, BrandTile } from "@/lib/connections";
 import {
   fmtBytes,
   EFFORT_OPTIONS,
@@ -51,7 +54,7 @@ import {
   STATUS_LABEL,
   type ToolConfirm,
 } from "../../lib/chat";
-import { catalogEntry } from "@jungle/shared";
+import { catalogEntry, getIntegrationType } from "@jungle/shared";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -182,6 +185,40 @@ export function SelectMenu({
   );
 }
 
+// --- template (draft-workflow seat) vs real agents ---
+//
+// A "template agent" is referenced by a DRAFT workflow's roster. The roster's integration keys
+// are the team's wishlist: keys whose backing user connection wasn't linked at draft time never
+// attached (the backend attach is best-effort), so they don't exist as agent_integrations rows.
+// Template agents show those as a pending, removable list; removing keeps the roster (and the
+// workflow canvas, via the workflow_changed broadcast) in sync. Once the workflow finalizes the
+// agent is real: its profile hides integrations whose connection still isn't linked.
+
+// Drop one integration key from every draft roster seat the agent occupies. Returns the updated
+// workflow list (same shape it was given), for the panel's local state.
+async function scrubKeyFromDraftSeats(
+  workflows: Workflow[],
+  participantId: string,
+  key: string,
+): Promise<Workflow[]> {
+  const next: Workflow[] = [];
+  for (const wf of workflows) {
+    if (!wf.roster.some((r) => r.participant_id === participantId && r.integrations.includes(key))) {
+      next.push(wf);
+      continue;
+    }
+    const roster = wf.roster.map((r) => {
+      if (r.participant_id !== participantId || !r.integrations.includes(key)) return r;
+      const n = { ...r, integrations: r.integrations.filter((k) => k !== key) };
+      // The repo shorthand only means something alongside the github integration.
+      if (key === "github") delete n.repo;
+      return n;
+    });
+    next.push(await updateWorkflow(wf.id, { roster }));
+  }
+  return next;
+}
+
 // Slack-style profile for viewing another participant. Humans are read-only (just their alias
 // for now). Agents expose an editable config: display name + tool-permission mode (applied live),
 // model (applied at the next turn), and an Activity view.
@@ -193,6 +230,7 @@ export function ParticipantProfilePanel({
   onSaved,
   onOpenActivity,
   onDeleted,
+  onOpenConnections,
 }: {
   person: Participant;
   isSelf: boolean;
@@ -200,6 +238,8 @@ export function ParticipantProfilePanel({
   onSaved: (p: Participant) => void;
   onOpenActivity: () => void;
   onDeleted: (id: string) => void;
+  // Opens the user's settings panel on Connections (template agents' pending integrations).
+  onOpenConnections?: () => void;
 }) {
   const isAgent = person.kind === "agent";
   const [name, setName] = useState(person.display_name);
@@ -214,6 +254,8 @@ export function ParticipantProfilePanel({
   const [deleting, setDeleting] = useState(false);
   const [integrations, setIntegrations] = useState<IntegrationDraft[]>([]);
   const [origIntegrations, setOrigIntegrations] = useState<IntegrationDraft[]>([]);
+  // Draft workflows whose roster seats this agent — non-empty = template agent (see above).
+  const [seatWorkflows, setSeatWorkflows] = useState<Workflow[]>([]);
   // The viewer's per-user connections gate the integration rows (inline connect / approval toggle).
   const connections = useConnections(isAgent);
 
@@ -230,6 +272,54 @@ export function ParticipantProfilePanel({
       cancelled = true;
     };
   }, [isAgent, person.id]);
+
+  // Track the draft rosters this agent sits on (live — a roster scrub elsewhere, or the
+  // workflow finalizing, flips the panel between template and real-agent behavior).
+  useEffect(() => {
+    if (!isAgent) return;
+    let cancelled = false;
+    const load = () => {
+      listWorkflows()
+        .then((wfs) => {
+          if (cancelled) return;
+          setSeatWorkflows(
+            wfs.filter(
+              (wf) => wf.status === "draft" && wf.roster.some((r) => r.participant_id === person.id),
+            ),
+          );
+        })
+        .catch(() => {});
+    };
+    load();
+    window.addEventListener("jungle:workflow-changed", load);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("jungle:workflow-changed", load);
+    };
+  }, [isAgent, person.id]);
+
+  const isTemplateAgent = seatWorkflows.length > 0;
+  // Roster-listed keys with no attached row — shown pending, removable (scrubs the roster).
+  // Keyed off origIntegrations (server truth) so unsaved editor edits don't reshuffle the list.
+  const attachedKeys = new Set(origIntegrations.map((v) => v.key));
+  const pendingKeys: string[] = [];
+  for (const wf of seatWorkflows) {
+    for (const r of wf.roster) {
+      if (r.participant_id !== person.id) continue;
+      for (const k of r.integrations) {
+        if (!attachedKeys.has(k) && !pendingKeys.includes(k)) pendingKeys.push(k);
+      }
+    }
+  }
+
+  async function removeTemplateKey(key: string) {
+    setErr("");
+    try {
+      setSeatWorkflows(await scrubKeyFromDraftSeats(seatWorkflows, person.id, key));
+    } catch (e) {
+      setErr(String((e as Error).message ?? e));
+    }
+  }
 
   async function del() {
     if (deleting) return;
@@ -282,9 +372,16 @@ export function ParticipantProfilePanel({
         persona: persona.trim(),
       };
       const nextKeys = new Set(integrations.map((v) => v.key));
+      // Removed rows also drop off any draft roster seats (template agents) so the workflow
+      // canvas stops advertising an integration the agent no longer has.
+      let seats = seatWorkflows;
       for (const orig of origIntegrations) {
-        if (!nextKeys.has(orig.key)) await removeAgentIntegration(person.id, orig.key);
+        if (!nextKeys.has(orig.key)) {
+          await removeAgentIntegration(person.id, orig.key);
+          seats = await scrubKeyFromDraftSeats(seats, person.id, orig.key);
+        }
       }
+      if (seats !== seatWorkflows) setSeatWorkflows(seats);
       for (const entry of integrations) {
         const prev = origIntegrations.find((v) => v.key === entry.key);
         if (!prev || integrationFingerprint(prev) !== integrationFingerprint(entry)) {
@@ -426,7 +523,69 @@ export function ParticipantProfilePanel({
                   : "Lower effort spends fewer tokens. Applies at the agent's next turn."}
               </p>
             </div>
-            <IntegrationsEditor value={integrations} onChange={setIntegrations} connections={connections} />
+            <IntegrationsEditor
+              value={integrations}
+              onChange={setIntegrations}
+              connections={connections}
+              // Real agents only show working integrations; a template agent keeps its
+              // not-yet-linked rows visible so they can be connected (or removed) pre-launch.
+              hideUnconnected={!isTemplateAgent}
+            />
+            {isTemplateAgent && pendingKeys.length > 0 && (
+              <div className="space-y-1.5" data-testid="template-pending-integrations">
+                <Label className="text-muted-foreground">Not connected yet</Label>
+                {pendingKeys.map((k) => {
+                  const connType = connectionForIntegration(k);
+                  const conn = connType ? connections.byKey[connType.key] : undefined;
+                  const linked = !!conn?.connected;
+                  return (
+                    <div
+                      key={k}
+                      className="group flex items-center gap-2.5 rounded-lg border border-amber-400/50 bg-amber-50/40 pr-1.5 dark:bg-amber-500/5"
+                      data-testid={`template-pending-${k}`}
+                    >
+                      <button
+                        type="button"
+                        onClick={onOpenConnections ? () => onOpenConnections() : undefined}
+                        title="Open your connections settings"
+                        className="flex min-w-0 flex-1 items-center gap-2.5 rounded-l-lg py-2 pl-2.5 text-left hover:bg-accent/40"
+                      >
+                        <BrandTile brand={k} className="size-7 rounded-md" glyphClassName="size-3.5" />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-sm font-medium leading-tight">
+                            {getIntegrationType(k)?.name ?? k}
+                          </span>
+                          <span
+                            className={cn(
+                              "block truncate text-[11px] leading-tight",
+                              linked ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400",
+                            )}
+                          >
+                            {linked
+                              ? "Account linked — attaches when the workflow is created"
+                              : "Not connected — link it in your settings"}
+                          </span>
+                        </span>
+                      </button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="size-6 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
+                        onClick={() => void removeTemplateKey(k)}
+                        data-testid={`template-pending-remove-${k}`}
+                        aria-label={`Remove ${getIntegrationType(k)?.name ?? k}`}
+                      >
+                        <X className="size-3.5" />
+                      </Button>
+                    </div>
+                  );
+                })}
+                <p className="text-[11px] leading-tight text-muted-foreground">
+                  The workflow template expects these. Connect them in your settings, or remove
+                  them from the agent — the canvas updates either way.
+                </p>
+              </div>
+            )}
             <EnvironmentCard person={person} />
             <ServicesCard person={person} />
             <MemoryCard person={person} />

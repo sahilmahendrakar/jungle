@@ -337,16 +337,23 @@ function IntegrationRow({
 // `disabledKeys` hides an integration from the picker for the current context — e.g. the GitHub
 // repo integration is meaningless (and would collide) when the agent runs unsandboxed in the
 // user's own repo, so the create dialog passes it for an unsandboxed selected device.
+//
+// `hideUnconnected` (agent profile on REAL agents) drops rows whose backing connection is
+// required but no longer linked — a real agent's profile shows only working integrations.
+// Display-only: the underlying list (and dirty/save diffing) is untouched. Template agents
+// (draft workflow seats) leave it off — their pending connections stay visible pre-launch.
 export function IntegrationsEditor({
   value,
   onChange,
   connections,
   disabledKeys,
+  hideUnconnected = false,
 }: {
   value: IntegrationDraft[];
   onChange: (v: IntegrationDraft[]) => void;
   connections: ConnectionsApi;
   disabledKeys?: Set<string>;
+  hideUnconnected?: boolean;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -360,6 +367,18 @@ export function IntegrationsEditor({
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [query, value, disabledKeys]);
+
+  // Rows actually rendered (see hideUnconnected above). The editor's value/onChange always
+  // carry the FULL list, so hiding never leaks into saves.
+  const visibleRows = hideUnconnected
+    ? value.filter((entry) => {
+        const type = INTEGRATION_TYPES.find((t) => t.key === entry.key);
+        if (!type || !connectionRequired(type)) return true;
+        const connType = connectionForIntegration(entry.key);
+        const conn = connType ? connections.byKey[connType.key] : undefined;
+        return !conn || conn.connected;
+      })
+    : value;
 
   function add(type: IntegrationType) {
     if (type.comingSoon || disabledKeys?.has(type.key)) return;
@@ -450,9 +469,13 @@ export function IntegrationsEditor({
           This agent is a plain chat agent — it can talk in channels and DMs, but has no repo
           access, tickets, or files. Add one above to give it more.
         </div>
+      ) : visibleRows.length === 0 ? (
+        // Everything attached is hidden by hideUnconnected — render nothing rather than the
+        // "no integrations" empty state, which would be wrong.
+        null
       ) : (
         <div className="space-y-1.5">
-          {value.map((entry) => {
+          {visibleRows.map((entry) => {
             const type = INTEGRATION_TYPES.find((t) => t.key === entry.key);
             if (!type) return null;
             return (

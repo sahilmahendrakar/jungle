@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "./auth";
 import { navigate } from "./route";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -308,7 +308,7 @@ function SlackWorkspaceSection({ isAdmin }: { isAdmin: boolean }) {
   );
 }
 
-function SettingsContent() {
+function SettingsContent({ focusConnections = false }: { focusConnections?: boolean }) {
   const { me, signOut } = useAuth();
   const profile = me?.profile;
   // Resolve the active membership (the workspace stored by AuthGate), falling back to the first.
@@ -320,6 +320,13 @@ function SettingsContent() {
   const conns = useConnections();
   const [query, setQuery] = useState("");
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  // When opened from an integration deep-link (e.g. a workflow's connections panel), land
+  // directly on the Connections section instead of the account block at the top.
+  const connectionsRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (focusConnections) connectionsRef.current?.scrollIntoView({ block: "start" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -368,7 +375,7 @@ function SettingsContent() {
 
       {/* Connections: every account link agents can build on — one searchable list; each row
           expands for details. Integrations attach these per-agent (agent profile → Integrations). */}
-      <section className="mt-8 space-y-3">
+      <section ref={connectionsRef} className="mt-8 scroll-mt-4 space-y-3">
         <div className="flex items-center justify-between gap-3">
           <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
             Connections
@@ -432,7 +439,15 @@ function SettingsContent() {
 }
 
 // Settings as a right-panel view (contextual sidebar). Shares its body with the full-page route.
-export function SettingsPanel({ onClose }: { onClose: () => void }) {
+// `focusConnections` scrolls straight to the Connections section — used by integration
+// deep-links (workflow pages) where the user clearly wants to manage account links.
+export function SettingsPanel({
+  onClose,
+  focusConnections = false,
+}: {
+  onClose: () => void;
+  focusConnections?: boolean;
+}) {
   return (
     <div data-testid="settings-panel" className="flex h-full flex-col">
       <header className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
@@ -450,7 +465,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
         </Button>
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <SettingsContent />
+        <SettingsContent focusConnections={focusConnections} />
       </div>
     </div>
   );

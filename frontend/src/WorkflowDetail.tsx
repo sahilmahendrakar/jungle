@@ -65,6 +65,7 @@ export function WorkflowDetail({
   onOpenDrawer,
   onExpandSidebar,
   onOpenAgent,
+  onOpenConnections,
   onOpenRunThread,
 }: {
   workflowId: string;
@@ -73,6 +74,7 @@ export function WorkflowDetail({
   onOpenDrawer: () => void;
   onExpandSidebar: () => void;
   onOpenAgent: (id: string) => void;
+  onOpenConnections: () => void;
   onOpenRunThread: (channelId: string, rootMessageId: string) => void;
 }) {
   const [w, setW] = useState<Workflow | null>(null);
@@ -213,6 +215,7 @@ export function WorkflowDetail({
             participants={participants}
             connectedKeys={connectedKeys}
             onSelectAgent={onOpenAgent}
+            onOpenConnections={onOpenConnections}
           />
           {w.description && <p className="text-sm text-muted-foreground">{w.description}</p>}
           <div className="grid gap-6 lg:grid-cols-3">
@@ -246,7 +249,7 @@ export function WorkflowDetail({
               </div>
               <div>
                 <h2 className="mb-2 px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Connections</h2>
-                <ConnectionsPanel w={w} connectedKeys={connectedKeys} onSelectAgent={onOpenAgent} />
+                <ConnectionsPanel w={w} connectedKeys={connectedKeys} onOpenConnections={onOpenConnections} />
               </div>
             </div>
           </div>
