@@ -148,6 +148,18 @@ export function WorkflowDetail({
           {w.status === "draft" ? <Badge variant="secondary">Draft</Badge> : w.status === "paused" ? <Badge variant="secondary">Paused</Badge> : <Badge variant="outline" className="text-primary">Active</Badge>}
         </span>
         <div className="ml-auto flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={busy}
+            data-testid="detail-delete"
+            onClick={() => setDeleting(true)}
+            aria-label="Delete workflow"
+            title="Delete workflow"
+            className="size-7 px-0 text-muted-foreground hover:border-destructive hover:text-destructive"
+          >
+            <Trash2 className="size-3.5" />
+          </Button>
           <Button size="sm" variant="outline" data-testid="detail-edit" onClick={() => navigate(`/workflows/${w.id}/edit`)} className="h-8 text-xs">
             <Pencil className="size-3.5" /> Edit
           </Button>
@@ -172,18 +184,6 @@ export function WorkflowDetail({
               <Zap className="size-3.5" /> Run now
             </Button>
           )}
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={busy}
-            data-testid="detail-delete"
-            onClick={() => setDeleting(true)}
-            aria-label="Delete workflow"
-            title="Delete workflow"
-            className="h-8 px-2 text-muted-foreground hover:text-destructive"
-          >
-            <Trash2 className="size-3.5" />
-          </Button>
         </div>
       </div>
       <p className="mb-4 text-sm text-muted-foreground" data-testid="trigger-sentence">

@@ -1,10 +1,9 @@
 import { useEffect, useState } from "react";
-import { CalendarClock, Hash, Loader2, MessageSquare, Play, Plus, Square, Trash2, Users, Workflow as WorkflowIcon, Zap } from "lucide-react";
+import { CalendarClock, Hash, Loader2, MessageSquare, Play, Plus, Square, Users, Workflow as WorkflowIcon, Zap } from "lucide-react";
 import type { Workflow, WorkflowTemplate } from "./api";
-import { createWorkflowDraft, deleteWorkflow, listWorkflows, listWorkflowTemplates, runWorkflow, stopWorkflowRun } from "./api";
+import { createWorkflowDraft, listWorkflows, listWorkflowTemplates, runWorkflow, stopWorkflowRun } from "./api";
 import { fmtRelative } from "./lib/chat";
 import { ViewShell } from "./components/chat/ViewShell";
-import { DeleteWorkflowDialog } from "./components/workflow/DeleteWorkflowDialog";
 import { Scheduled } from "./Scheduled";
 import { navigate } from "./route";
 import { Badge } from "@/components/ui/badge";
@@ -46,14 +45,12 @@ function WorkflowCard({
   onOpen,
   onRun,
   onStop,
-  onDelete,
 }: {
   w: Workflow;
   busy: boolean;
   onOpen: (w: Workflow) => void;
   onRun: (w: Workflow) => void;
   onStop: (w: Workflow) => void;
-  onDelete: (w: Workflow) => void;
 }) {
   const trig = triggerLabel(w);
   const liveRun = w.last_run && (w.last_run.status === "running" || w.last_run.status === "stalled");
@@ -69,22 +66,6 @@ function WorkflowCard({
       <div className="flex items-center gap-2">
         {w.emoji && <span className="text-lg leading-none">{w.emoji}</span>}
         <span className="min-w-0 flex-1 truncate text-sm font-semibold">{w.name}</span>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={busy}
-          data-testid="workflow-delete"
-          onClick={(e) => {
-            e.stopPropagation();
-            onDelete(w);
-          }}
-          onKeyDown={(e) => e.stopPropagation()}
-          aria-label="Delete workflow"
-          title="Delete workflow"
-          className="ml-auto size-7 px-0 text-muted-foreground opacity-0 transition-opacity hover:border-destructive hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
-        >
-          <Trash2 className="size-3.5" />
-        </Button>
         {statusBadge(w)}
       </div>
       {w.description && (
@@ -161,7 +142,6 @@ export function Workflows({
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState<string | null>(null); // template id, or "blank"
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [deleting, setDeleting] = useState<Workflow | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -225,20 +205,6 @@ export function Workflows({
     }
   }
 
-  async function confirmDelete() {
-    if (!deleting) return;
-    setBusyId(deleting.id);
-    try {
-      await deleteWorkflow(deleting.id);
-      setDeleting(null);
-      reload();
-    } catch (e) {
-      alert((e as Error).message);
-    } finally {
-      setBusyId(null);
-    }
-  }
-
   return (
     <ViewShell
       icon={<WorkflowIcon className="size-5" />}
@@ -270,7 +236,7 @@ export function Workflows({
             ) : (
               <div className="grid gap-3 sm:grid-cols-2">
                 {workflows.map((w) => (
-                  <WorkflowCard key={w.id} w={w} busy={busyId === w.id} onOpen={openWorkflow} onRun={runNow} onStop={stopRun} onDelete={setDeleting} />
+                  <WorkflowCard key={w.id} w={w} busy={busyId === w.id} onOpen={openWorkflow} onRun={runNow} onStop={stopRun} />
                 ))}
               </div>
             )}
@@ -293,12 +259,6 @@ export function Workflows({
           )}
         </div>
       )}
-      <DeleteWorkflowDialog
-        workflow={deleting}
-        liveRun={!!deleting?.last_run && (deleting.last_run.status === "running" || deleting.last_run.status === "stalled")}
-        onOpenChange={(v) => !v && setDeleting(null)}
-        onConfirm={confirmDelete}
-      />
     </ViewShell>
   );
 }
