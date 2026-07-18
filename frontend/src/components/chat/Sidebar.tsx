@@ -7,6 +7,7 @@ import {
   Moon,
   MonitorSmartphone,
   PanelLeftClose,
+  Plus,
   Search,
   Sun,
   Users,
@@ -17,6 +18,7 @@ import { firebaseEnabled } from "../../firebase";
 import { useTheme, type ThemePreference } from "../../theme";
 import { EmptyHint, NavItem, PersonAvatar, SectionHeader } from "./panels";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
+import { Button } from "@/components/ui/button";
 import {
   Tooltip,
   TooltipContent,
@@ -342,6 +344,20 @@ export function Sidebar({
             ))}
             {others.length === 0 && <EmptyHint>No one else yet.</EmptyHint>}
           </div>
+        </div>
+
+        {/* Create agent: the primary CTA, pinned just above the footer. It used to be the
+            "Add agent" action on the People section header; that section is going away, so
+            the entry point gets a permanent, prominent home here. */}
+        <div className="shrink-0 px-3 pb-2.5 pt-1.5">
+          <Button
+            data-testid="add-agent-toggle"
+            onClick={onAddAgent}
+            className="h-10 w-full rounded-full text-sm font-semibold shadow-md"
+          >
+            <Plus />
+            Create agent
+          </Button>
         </div>
 
         {/* User footer */}
