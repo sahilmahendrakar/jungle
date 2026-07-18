@@ -50,10 +50,19 @@ export function validateRoster(r: unknown): WorkflowRole[] {
     if (!role.handle_seed || typeof role.handle_seed !== "string") throw new ApiError(400, `roster[${i}]: handle_seed is required`);
     return {
       role: role.role.trim().slice(0, 80),
-      handle_seed: role.handle_seed.trim().toLowerCase().slice(0, 32),
+      ...(role.name && typeof role.name === "string" ? { name: role.name.trim().slice(0, 80) } : {}),
+      handle_seed: role.handle_seed.trim().toLowerCase().slice(0, 48),
       duties: typeof role.duties === "string" ? role.duties.slice(0, 2000) : "",
       integrations: Array.isArray(role.integrations) ? role.integrations.filter((k) => typeof k === "string") : [],
+      ...(role.repo && typeof role.repo === "string" ? { repo: role.repo.trim().slice(0, 200) } : {}),
       ...(role.participant_id ? { participant_id: String(role.participant_id) } : {}),
+      // Canvas layout hints (presentation only — see shared/src/workflows.ts).
+      ...(typeof role.stage === "number" && role.stage > 0
+        ? { stage: Math.min(Math.floor(role.stage), WORKFLOW_MAX_ROLES) }
+        : {}),
+      ...(role.edge_label && typeof role.edge_label === "string"
+        ? { edge_label: role.edge_label.trim().slice(0, 40) }
+        : {}),
     };
   });
 }
@@ -80,6 +89,10 @@ export async function createDraft(args: {
   createdBy: string | null;
   templateId?: string;
   name?: string;
+  // When set (the builder/HTTP path), template seats become real unprovisioned agents right
+  // away so the builder can open real profile panels on them. The Architect's tool path omits
+  // it — its seats materialize at finalize.
+  materializeFor?: db.Participant;
 }): Promise<db.WorkflowRow> {
   const count = await db.countWorkspaceWorkflows(args.workspaceId);
   if (count >= MAX_WORKFLOWS_PER_WORKSPACE) {
@@ -87,7 +100,7 @@ export async function createDraft(args: {
   }
   const template = args.templateId ? getWorkflowTemplate(args.templateId) : undefined;
   if (args.templateId && !template) throw new ApiError(400, `unknown template ${JSON.stringify(args.templateId)}`);
-  const row = await db.createWorkflow({
+  let row = await db.createWorkflow({
     workspaceId: args.workspaceId,
     name: args.name?.trim() || template?.name || "New workflow",
     description: template?.description ?? "",
@@ -99,11 +112,19 @@ export async function createDraft(args: {
     playbook: template?.playbook ?? "",
     createdBy: args.createdBy,
   });
+  if (args.materializeFor) row = await materializeSeats(row, args.materializeFor);
   broadcastWorkspace(args.workspaceId, { type: "workflow_changed", workflowId: row.id, action: "created" });
   return row;
 }
 
-// --- Finalize: draft -> active (the compile step: agents, channel, backing schedule) ---
+// --- Seats are real agents from draft time (unprovisioned = no machine, no cost) ---
+//
+// A workflow is deliberately just existing Jungle pieces composed: seats are ordinary agents
+// (persona = the seat's instructions, integrations via the ordinary integrations editor), the
+// cron trigger is an ordinary schedule row, runs live in an ordinary channel. The only net-new
+// concept is the playbook. Creating a draft therefore creates its agents immediately — the
+// builder can open the REAL profile panel on them — but provisioning (the machine) waits for
+// finalize, and deleting a draft deletes its never-provisioned agents again.
 
 function slugify(name: string): string {
   return (
@@ -115,84 +136,221 @@ function slugify(name: string): string {
   );
 }
 
-// Bind or create the agent for one roster role. Creating mirrors POST /api/agents (cap check in
-// a workspace-locked transaction; provisioning fire-and-forget). Persona = the role's duties —
-// the workflow section of the prompt (workflowPromptBlock) carries the playbook/roster, so the
-// persona stays about WHO the agent is, not the process.
-async function bindOrCreateMember(
-  wf: db.WorkflowRow,
-  role: WorkflowRole,
-  taken: Set<string>,
-): Promise<string> {
-  if (role.participant_id) {
-    const existing = await db.getParticipant(role.participant_id);
-    if (!existing || existing.kind !== "agent" || existing.workspace_id !== wf.workspace_id) {
-      throw new ApiError(400, `roster role "${role.role}": bound agent not found in this workspace`);
+// Best-effort integration attach (same resolution as POST /api/agents, but non-fatal): a key
+// whose underlying connection isn't linked yet just stays unattached — the builder shows it as
+// "needs setup" and the profile panel's ordinary flow fixes it. `repo` supplies the github
+// config; other per-integration config is set later via the profile panel.
+async function tryAttachIntegrations(
+  actor: db.Participant,
+  agentId: string,
+  keys: string[],
+  repo?: string,
+): Promise<void> {
+  const { adapterFor } = await import("../integrations");
+  const { getIntegrationType } = await import("@jungle/shared");
+  for (const key of keys) {
+    const type = getIntegrationType(key);
+    if (!type || type.comingSoon) continue;
+    try {
+      const existing = await db.getAgentIntegration(agentId, key);
+      if (existing) continue;
+      const raw: Record<string, unknown> = key === "github" && repo ? { repo } : {};
+      const adapter = adapterFor(key);
+      const config = adapter?.resolveConfig
+        ? await adapter.resolveConfig({ me: actor, agentId, existing: null }, raw)
+        : raw;
+      await db.setAgentIntegration(agentId, key, config);
+    } catch (e) {
+      console.log(`workflow seat ${agentId}: integration ${key} not attached yet: ${(e as Error).message}`);
     }
-    return existing.id;
   }
-  // Pick a free handle: seed, then seed-2, seed-3, …
-  let handle = role.handle_seed;
-  for (let i = 2; taken.has(handle) || (await db.getParticipantByHandle(wf.workspace_id, handle)); i++) {
-    handle = `${role.handle_seed}-${i}`;
+}
+
+// Create one seat's agent: an ordinary participant row with an animal-preset identity and the
+// seat's instructions as persona. NOT provisioned — that happens at finalize.
+async function createSeatAgent(
+  workspaceId: string,
+  actor: db.Participant,
+  seat: { name: string; handle: string; persona: string; integrations: string[]; repo?: string },
+): Promise<db.Participant> {
+  let handle = seat.handle;
+  for (let i = 2; !(await db.handleAvailable(workspaceId, handle)); i++) {
+    handle = `${seat.handle}-${i}`;
     if (i > 50) throw new ApiError(500, "couldn't find a free handle");
   }
-  taken.add(handle);
-  // Display name from the handle ("scout" -> "Scout"), NOT the role — otherwise a two-fixer
-  // template puts two agents both named "Fixer" in the sidebar. The role lives in the workflow
-  // prompt section and the diagram subtitle.
-  const displayName = handle
-    .split("-")
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
   const runnerToken = randomBytes(32).toString("hex");
   const participant = await db.withTransaction(async (client) => {
-    const { count, cap } = await db.agentCountAndCap(client, wf.workspace_id);
+    const { count, cap } = await db.agentCountAndCap(client, workspaceId);
     if (count >= cap) throw new ApiError(409, `this workspace has reached its agent limit (${cap})`);
     return db.createParticipant(
       {
         kind: "agent",
-        workspaceId: wf.workspace_id,
+        workspaceId,
         handle,
-        displayName,
+        displayName: seat.name,
         runtime: "sdk",
         runnerToken,
         model: null,
         mode: "default",
         runnerProvider: "fly",
-        persona: role.duties || null,
+        persona: seat.persona || null,
       },
       client,
     );
   });
-  void (async () => {
-    try {
-      await provisionerFor(participant).create({ id: participant.id, handle, runnerToken });
-      await provisionerFor(participant).start(participant.id);
-      runners.noteProvisionerStart(participant.id);
-    } catch (e) {
-      console.error(`workflow ${wf.id}: provision member @${handle}:`, e);
-    }
-  })();
-  return participant.id;
+  await tryAttachIntegrations(actor, participant.id, seat.integrations, seat.repo);
+  return participant;
 }
 
-// The compile step: bind/create every roster agent, create (or adopt) the home channel, add
-// members, create the backing schedule row for cron triggers, set active. Idempotent-ish: rerun
-// after a failure just fills in what's missing (bound roles keep their agents).
+// Assign an unused animal preset for a new seat (workspace-wide + within-draft uniqueness).
+async function pickSeatPreset(workspaceId: string, usedInDraft: Set<string>) {
+  const { AGENT_PRESETS } = await import("@jungle/shared");
+  const candidates = AGENT_PRESETS.filter((p) => !usedInDraft.has(p.handle));
+  for (const p of candidates.sort(() => Math.random() - 0.5)) {
+    if (await db.handleAvailable(workspaceId, p.handle)) {
+      usedInDraft.add(p.handle);
+      return p;
+    }
+  }
+  // Every animal taken: fall back to a suffixed random one (createSeatAgent dedups further).
+  const p = AGENT_PRESETS[Math.floor(Math.random() * AGENT_PRESETS.length)];
+  usedInDraft.add(p.handle);
+  return p;
+}
+
+// Materialize a draft's seats as real (unprovisioned) agents: called right after createDraft
+// for template drafts, and by addSeat for one-off additions.
+export async function materializeSeats(wf: db.WorkflowRow, actor: db.Participant): Promise<db.WorkflowRow> {
+  const used = new Set<string>(
+    wf.roster.map((r) => r.handle_seed).filter((h) => !!h),
+  );
+  const roster: WorkflowRole[] = [];
+  let changed = false;
+  for (const role of wf.roster) {
+    if (role.participant_id) {
+      roster.push(role);
+      continue;
+    }
+    const preset = await pickSeatPreset(wf.workspace_id, used);
+    const agent = await createSeatAgent(wf.workspace_id, actor, {
+      name: preset.name,
+      handle: preset.handle,
+      persona: role.duties,
+      integrations: role.integrations,
+      repo: role.repo,
+    });
+    roster.push({
+      ...role,
+      name: agent.display_name,
+      handle_seed: agent.handle,
+      participant_id: agent.id,
+    });
+    changed = true;
+  }
+  if (!changed) return wf;
+  const updated = (await db.updateWorkflow(wf.id, { roster })) ?? wf;
+  broadcastWorkspace(wf.workspace_id, { type: "workflow_changed", workflowId: wf.id, action: "updated" });
+  return updated;
+}
+
+// Add one blank seat to a draft (builder's "+ Add agent").
+export async function addSeat(
+  wf: db.WorkflowRow,
+  actor: db.Participant,
+  roleTitle?: string,
+): Promise<db.WorkflowRow> {
+  if (wf.status !== "draft") throw new ApiError(400, "seats can only be added to drafts");
+  const { WORKFLOW_MAX_ROLES } = await import("@jungle/shared");
+  if (wf.roster.length >= WORKFLOW_MAX_ROLES) throw new ApiError(400, `at most ${WORKFLOW_MAX_ROLES} seats`);
+  const used = new Set<string>(wf.roster.map((r) => r.handle_seed));
+  const preset = await pickSeatPreset(wf.workspace_id, used);
+  const agent = await createSeatAgent(wf.workspace_id, actor, {
+    name: preset.name,
+    handle: preset.handle,
+    persona: "",
+    integrations: [],
+  });
+  const roster = [
+    ...wf.roster,
+    {
+      role: roleTitle?.trim() || "Teammate",
+      name: agent.display_name,
+      handle_seed: agent.handle,
+      duties: "",
+      integrations: [],
+      participant_id: agent.id,
+    },
+  ];
+  const updated = (await db.updateWorkflow(wf.id, { roster })) ?? wf;
+  broadcastWorkspace(wf.workspace_id, { type: "workflow_changed", workflowId: wf.id, action: "updated" });
+  return updated;
+}
+
+// Remove a seat from a draft; its agent is deleted too when it was never provisioned (the
+// draft created it, the draft can take it back).
+export async function removeSeat(
+  wf: db.WorkflowRow,
+  participantId: string,
+): Promise<db.WorkflowRow> {
+  if (wf.status !== "draft") throw new ApiError(400, "seats can only be removed from drafts");
+  const roster = wf.roster.filter((r) => r.participant_id !== participantId);
+  if (roster.length === wf.roster.length) throw new ApiError(404, "no such seat");
+  const agent = await db.getParticipant(participantId).catch(() => null);
+  if (agent && agent.kind === "agent" && !agent.runner_meta) {
+    await db.deleteAgent(participantId);
+    broadcastWorkspace(wf.workspace_id, { type: "participant_deleted", participantId });
+  }
+  const updated = (await db.updateWorkflow(wf.id, { roster })) ?? wf;
+  broadcastWorkspace(wf.workspace_id, { type: "workflow_changed", workflowId: wf.id, action: "updated" });
+  return updated;
+}
+
+// Deleting a DRAFT takes its never-provisioned agents with it (they only ever existed for the
+// draft). Live workflows keep their agents on delete — those have history.
+export async function cleanupDraftAgents(wf: db.WorkflowRow): Promise<void> {
+  if (wf.status !== "draft") return;
+  for (const role of wf.roster) {
+    if (!role.participant_id) continue;
+    const agent = await db.getParticipant(role.participant_id).catch(() => null);
+    if (agent && agent.kind === "agent" && !agent.runner_meta) {
+      await db.deleteAgent(agent.id);
+      broadcastWorkspace(wf.workspace_id, { type: "participant_deleted", participantId: agent.id });
+    }
+  }
+}
+
+// The compile step: provision every seat's agent (create machines), create (or adopt) the home
+// channel, add members, create the backing schedule row for cron triggers, set active.
+// Idempotent-ish: rerun after a failure just fills in what's missing. Roles without agents yet
+// (Architect-made drafts) get them created here.
 export async function finalizeWorkflow(
   wf: db.WorkflowRow,
   actor: db.Participant,
   opts?: { homeChannelId?: string },
 ): Promise<db.WorkflowRow> {
   if (wf.status !== "draft") throw new ApiError(400, "workflow is already live");
-  if (!wf.roster.length) throw new ApiError(400, "add at least one role to the roster first");
+  if (!wf.roster.length) throw new ApiError(400, "add at least one agent to the team first");
 
-  // 1. Agents.
-  const taken = new Set<string>();
-  const roster: WorkflowRole[] = [];
-  for (const role of wf.roster) {
-    roster.push({ ...role, participant_id: await bindOrCreateMember(wf, role, taken) });
+  // 1. Agents: materialize any missing seats, then provision machines for all of them.
+  const materialized = await materializeSeats(wf, actor);
+  const roster = materialized.roster;
+  for (const role of roster) {
+    const agent = await db.getAgentRow(role.participant_id!);
+    if (!agent) continue;
+    // One more integration-attach pass: connections linked since the draft was made now stick.
+    await tryAttachIntegrations(actor, agent.id, role.integrations, role.repo);
+    if (!agent.runner_meta && agent.runner_token) {
+      const runnerToken = agent.runner_token;
+      void (async () => {
+        try {
+          await provisionerFor(agent).create({ id: agent.id, handle: agent.handle, runnerToken });
+          await provisionerFor(agent).start(agent.id);
+          runners.noteProvisionerStart(agent.id);
+        } catch (e) {
+          console.error(`workflow ${wf.id}: provision @${agent.handle}:`, e);
+        }
+      })();
+    }
   }
 
   // 2. Home channel: adopt the chosen one or create #<slug> (suffixing until free).
@@ -436,8 +594,8 @@ const ARCHITECT_PERSONA =
   `with workflow_draft_set after each answer the user gives you — they can literally watch the ` +
   `draft update on the Workflows page — and only call workflow_finalize when the user clearly ` +
   `says go. Finalize creates real agents and a home channel, so never do it unasked. You can ` +
-  `bind the user's EXISTING agents to seats via participant_handle. Ask at most one or two ` +
-  `crisp questions at a time; propose defaults instead of interrogating. After finalizing, tell ` +
+  `Each seat becomes a fresh agent (a Jungle animal name is assigned automatically). Ask at most ` +
+  `one or two crisp questions at a time; propose defaults instead of interrogating. After finalizing, tell ` +
   `them how it starts (trigger), where runs happen (the home channel), and that they can hit ` +
   `Run now to try it immediately.`;
 
@@ -605,24 +763,19 @@ export async function toolDraftSet(
     if (input.playbook !== undefined) patch.playbook = validatePlaybook(input.playbook);
     if (input.trigger !== undefined) patch.trigger = validateTrigger(input.trigger);
     if (input.roster !== undefined) {
-      // Resolve participant_handle -> participant_id (agents think in handles).
-      const roster: WorkflowRole[] = [];
-      for (const raw of input.roster) {
-        let participantId: string | undefined;
-        if (raw.participant_handle) {
-          const p = await db.getParticipantByHandle(agent.workspace_id, raw.participant_handle.replace(/^@/, ""));
-          if (!p || p.kind !== "agent") throw new ApiError(400, `no agent named @${raw.participant_handle} in this workspace`);
-          participantId = p.id;
-        }
-        roster.push({
+      // Seats are always fresh agents (created at finalize for the Architect path); a seat keeps
+      // its existing participant_id if the agent named a role that already has one.
+      const existingByRole = new Map(wf.roster.map((r) => [r.role, r.participant_id]));
+      patch.roster = validateRoster(
+        input.roster.map((raw) => ({
           role: String(raw.role ?? ""),
           handle_seed: String(raw.handle_seed ?? ""),
           duties: String(raw.duties ?? ""),
           integrations: raw.integrations ?? [],
-          ...(participantId ? { participant_id: participantId } : {}),
-        });
-      }
-      patch.roster = validateRoster(roster);
+          ...(raw.repo ? { repo: String(raw.repo) } : {}),
+          ...(existingByRole.get(String(raw.role ?? "")) ? { participant_id: existingByRole.get(String(raw.role ?? "")) } : {}),
+        })),
+      );
     }
     const updated = (await db.updateWorkflow(wf.id, patch)) ?? wf;
     broadcastWorkspace(wf.workspace_id, { type: "workflow_changed", workflowId: wf.id, action: "updated" });

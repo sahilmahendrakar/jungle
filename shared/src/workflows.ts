@@ -15,15 +15,24 @@ export type WorkflowTrigger =
   | { type: "manual" }
   | { type: "channel_message" };
 
-// One seat on the team. In a draft, participant_id may be unset (the agent doesn't exist yet);
-// finalize binds every role to a participant — either an existing agent the user chose or a
-// fresh one created from this seed. roster[0] is the intake role: it receives the kickoff turn.
+// One seat on the team. In a draft, participant_id is unset (the agent doesn't exist yet);
+// finalize creates a fresh agent per seat. roster[0] is the intake role: it receives the
+// kickoff turn. Seats get a Jungle animal identity (AGENT_PRESETS) when the draft is created,
+// so the builder shows the actual teammates you'll get.
 export interface WorkflowRole {
-  role: string; // human-readable seat name, e.g. "Inbox triage"
-  handle_seed: string; // suggested agent handle when creating, e.g. "scout"
-  duties: string; // prose duties, injected into the member's workflow prompt section
-  integrations: string[]; // integration keys this seat wants connected (advisory, not enforced)
-  participant_id?: string; // bound agent; unset only while status='draft'
+  role: string; // seat title, e.g. "Inbox triage"
+  name?: string; // agent display name, e.g. "Finn the Fox" (preset-assigned at draft creation)
+  handle_seed: string; // the agent handle to create, e.g. "finn-the-fox"
+  duties: string; // the seat's instructions — becomes the agent's persona
+  integrations: string[]; // integration keys attached to the created agent (gmail, github, …)
+  repo?: string; // owner/name — the GitHub repo, when integrations includes "github"
+  participant_id?: string; // the created agent; unset while status='draft'
+  // Presentation-only layout hints for the canvas — they do NOT affect execution (the playbook
+  // does). Roles sharing a stage render stacked in parallel; edge_label captions the connectors
+  // arriving at this role's stage (e.g. "assigns"). Unset stage = one stage after the previous
+  // role, so plain rosters render as a left-to-right chain.
+  stage?: number;
+  edge_label?: string;
 }
 
 export type WorkflowStatus = "draft" | "active" | "paused";

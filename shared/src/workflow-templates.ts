@@ -34,6 +34,7 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
         duties:
           "Read new mail in the support inbox since the last run. Separate real product bugs from questions and noise. File each bug (severity, repro notes, affected users) in the team's bug tracker, then hand the list to the manager.",
         integrations: ["gmail", "notion"],
+        stage: 1,
       },
       {
         role: "Manager",
@@ -41,6 +42,8 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
         duties:
           "Prioritize the bugs from triage, assign each to one fixer by @mention with a crisp brief, chase progress, and when fixes are in, post the run summary and complete the run.",
         integrations: [],
+        stage: 2,
+        edge_label: "bugs",
       },
       {
         role: "Fixer",
@@ -48,6 +51,8 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
         duties:
           "Fix assigned bugs in the team repo: reproduce, patch, add a regression test, open a PR, and report the PR link back to the manager. Raise blockers early instead of spinning.",
         integrations: ["github"],
+        stage: 3,
+        edge_label: "assigns",
       },
       {
         role: "Fixer",
@@ -55,6 +60,7 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
         duties:
           "Fix assigned bugs in the team repo: reproduce, patch, add a regression test, open a PR, and report the PR link back to the manager. Raise blockers early instead of spinning.",
         integrations: ["github"],
+        stage: 3,
       },
     ],
     playbook:
@@ -103,6 +109,7 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
         duties:
           "Take the lead from the triggering message (a name, company, email, or a forwarded thread), pull any context from the connected inbox, and hand the researcher one clear research request.",
         integrations: ["gmail"],
+        stage: 1,
       },
       {
         role: "Researcher",
@@ -110,6 +117,8 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
         duties:
           "Research the company and person — product, size, funding, recent news, likely need for us — and DM the workflow's creator a brief: who they are, why now, suggested talking points, and a fit score with one sentence of reasoning.",
         integrations: [],
+        stage: 2,
+        edge_label: "lead",
       },
     ],
     playbook:
@@ -134,6 +143,7 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
         duties:
           "Turn the idea from the triggering message into a full draft in the team's docs tool, matching any voice/style notes in this playbook. Revise per the editor's feedback until the editor approves.",
         integrations: ["notion"],
+        stage: 1,
       },
       {
         role: "Editor",
@@ -141,6 +151,8 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
         duties:
           "Hold the quality bar: critique the draft's structure, claims, and voice concretely (quote the weak parts). Approve only when you'd publish it yourself, then send the final link to the workflow's creator for sign-off.",
         integrations: [],
+        stage: 2,
+        edge_label: "draft",
       },
     ],
     playbook:

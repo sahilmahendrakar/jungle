@@ -177,6 +177,14 @@ export function initAppSocket(server: Server, hooks: AppSocketHooks): void {
 
   wss.on("connection", async (ws, req) => {
     const url = new URL(req.url ?? "/", "http://localhost");
+    // Frames can arrive the instant the socket opens — BEFORE the auth awaits below finish and
+    // the real message listener attaches — and ws drops events with no listener. Buffer them now,
+    // replay after setup. (Same lesson as the runner subsystem's synchronous accept().)
+    const early: Buffer[] = [];
+    const buffer = (raw: Buffer) => {
+      early.push(raw);
+    };
+    ws.on("message", buffer);
     // Real auth: a Firebase ID token (?token=) is verified and mapped to the user's participant in
     // the active workspace (&workspaceId=, with a single-membership fallback during rollout).
     // Dev/test: when DEV_BYPASS is on, fall back to a trusted ?participantId=.
@@ -207,7 +215,7 @@ export function initAppSocket(server: Server, hooks: AppSocketHooks): void {
     addSocket(pid, workspaceId, uid, ws);
     ws.send(JSON.stringify({ type: "connected", participantId: pid }));
 
-    ws.on("message", async (raw) => {
+    const onMessage = async (raw: Buffer) => {
       let evt: {
         type?: string;
         channelId?: string;
@@ -250,7 +258,10 @@ export function initAppSocket(server: Server, hooks: AppSocketHooks): void {
           ws.send(JSON.stringify({ type: "error", error: String((e as Error).message ?? e) }));
         }
       }
-    });
+    };
+    ws.off("message", buffer);
+    ws.on("message", (raw) => void onMessage(raw as Buffer));
+    for (const raw of early) void onMessage(raw);
 
     ws.on("close", () => removeSocket(pid, workspaceId, uid, ws));
   });

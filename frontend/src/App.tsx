@@ -49,6 +49,7 @@ import { navigate, usePath } from "./route";
 import { Home } from "./Home";
 import { Workflows } from "./Workflows";
 import { WorkflowDetail } from "./WorkflowDetail";
+import { WorkflowBuilder } from "./WorkflowBuilder";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { DmActivityView } from "./components/chat/DmActivityView";
@@ -180,7 +181,9 @@ export function App({
   // Scheduled survive as deep links (their content is absorbed into Home and Workflows).
   const homeOpen = path === "/home";
   const workflowsOpen = path === "/workflows";
-  const workflowDetailId = path.startsWith("/workflows/") ? path.slice("/workflows/".length) : null;
+  const workflowSub = path.startsWith("/workflows/") ? path.slice("/workflows/".length) : null;
+  const workflowEditId = workflowSub?.endsWith("/edit") ? workflowSub.slice(0, -"/edit".length) : null;
+  const workflowDetailId = workflowSub && !workflowEditId ? workflowSub : null;
   const approvalsOpen = path === "/approvals";
   const deliverablesOpen = path === "/deliverables";
   const agentsOpen = path === "/agents" || path === "/team";
@@ -190,6 +193,7 @@ export function App({
     homeOpen ||
     workflowsOpen ||
     !!workflowDetailId ||
+    !!workflowEditId ||
     scheduledOpen ||
     approvalsOpen ||
     deliverablesOpen ||
@@ -1055,7 +1059,7 @@ export function App({
         homeActive={homeOpen}
         homeBadge={confirms.length}
         onOpenWorkflows={() => navigate("/workflows")}
-        workflowsActive={workflowsOpen || scheduledOpen || !!workflowDetailId}
+        workflowsActive={workflowsOpen || scheduledOpen || !!workflowDetailId || !!workflowEditId}
         onOpenTeam={() => navigate("/team")}
         teamActive={agentsOpen}
         onOpenEnvironments={() => navigate("/environments")}
@@ -1137,10 +1141,18 @@ export function App({
           onOpenDrawer={() => setDrawerOpen(true)}
           onExpandSidebar={() => setSidebarOpen(true)}
           onOpenWorkflow={(w) => navigate(`/workflows/${w.id}`)}
-          onOpenBuilderDm={(dmChannelId) => {
-            goToChat();
-            selectAndClose(dmChannelId);
-          }}
+        />
+      ) : workflowEditId ? (
+        <WorkflowBuilder
+          workflowId={workflowEditId}
+          participants={others}
+          sidebarOpen={sidebarOpen}
+          onOpenDrawer={() => setDrawerOpen(true)}
+          onExpandSidebar={() => setSidebarOpen(true)}
+          // The real right-side profile panel opens NEXT TO the builder (no navigation) — same
+          // panel as everywhere else, so integrations/persona/model edits all live there.
+          onOpenAgent={openProfilePanel}
+          onParticipantsChanged={() => void listParticipants().then(setPeople).catch(() => {})}
         />
       ) : workflowDetailId ? (
         <WorkflowDetail
@@ -1149,10 +1161,7 @@ export function App({
           sidebarOpen={sidebarOpen}
           onOpenDrawer={() => setDrawerOpen(true)}
           onExpandSidebar={() => setSidebarOpen(true)}
-          onOpenAgent={(id) => {
-            goToChat();
-            openProfilePanel(id);
-          }}
+          onOpenAgent={openProfilePanel}
           onOpenRunThread={(channelId, rootMessageId) => jumpToMessage(channelId, rootMessageId)}
         />
       ) : scheduledOpen ? (

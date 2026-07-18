@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  CalendarClock,
-  Hash,
   Loader2,
   MessageSquare,
   Pause,
+  Pencil,
   Play,
   Square,
   Trash2,
@@ -23,171 +22,22 @@ import {
 import { fmtRelative } from "./lib/chat";
 import { ViewShell } from "./components/chat/ViewShell";
 import { PersonAvatar } from "./components/chat/panels";
+import {
+  ConnectionsPanel,
+  WorkflowCanvas,
+  connectedIntegrationKeys,
+  triggerSentence,
+} from "./components/workflow/WorkflowCanvas";
+import { useConnections } from "./lib/connections";
 import { navigate } from "./route";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
-// One workflow: the generated team diagram, its runs, and the playbook. Deliberately thin —
-// a run's timeline IS its thread in the home channel (chat-native), so "open a run" jumps
-// there rather than to a bespoke timeline surface.
-
-// --- Diagram: auto-layout from the roster (no canvas, no drag). Columns: trigger -> intake ->
-// second role -> remaining roles stacked -> "you". Node status dots ride participants' live
-// status. ---
-
-interface DiagNode {
-  key: string;
-  col: number;
-  row: number;
-  rows: number; // total rows in this node's column (for vertical centering)
-  kind: "trigger" | "agent" | "user";
-  label: string;
-  sub: string;
-  participant?: Participant;
-}
-
-function layout(w: Workflow, byId: Map<string, Participant>): { nodes: DiagNode[]; cols: number } {
-  const nodes: DiagNode[] = [];
-  const trig = w.trigger;
-  nodes.push({
-    key: "trigger",
-    col: 0,
-    row: 0,
-    rows: 1,
-    kind: "trigger",
-    label: trig.type === "schedule" ? "On a schedule" : trig.type === "channel_message" ? "On a message" : "Run manually",
-    sub:
-      trig.type === "schedule"
-        ? `${trig.cron} · ${trig.timezone.split("/").pop()?.replace(/_/g, " ")}`
-        : trig.type === "channel_message"
-          ? "@mention the first agent"
-          : "the Run now button",
-  });
-  // Roster columns: [0] intake, [1] second role, [2+] stacked in one column.
-  const cols: number[][] = [];
-  w.roster.forEach((_, i) => {
-    const c = Math.min(i, 2);
-    (cols[c] ??= []).push(i);
-  });
-  cols.forEach((idxs, c) => {
-    idxs.forEach((rosterIdx, row) => {
-      const r = w.roster[rosterIdx];
-      const p = r.participant_id ? byId.get(r.participant_id) : undefined;
-      nodes.push({
-        key: `role-${rosterIdx}`,
-        col: c + 1,
-        row,
-        rows: idxs.length,
-        kind: "agent",
-        label: p ? p.display_name : `@${r.handle_seed}`,
-        sub: r.role,
-        participant: p,
-      });
-    });
-  });
-  const lastCol = cols.length + 1;
-  nodes.push({ key: "you", col: lastCol, row: 0, rows: 1, kind: "user", label: "You", sub: "report / sign-off" });
-  return { nodes, cols: lastCol + 1 };
-}
-
-// Sized so the widest launch shape (5 columns: trigger + 3 roster cols + you) fits the page's
-// content width without horizontal scroll.
-const NODE_W = 120;
-const NODE_H = 56;
-const COL_GAP = 20;
-const ROW_GAP = 16;
-
-function Diagram({
-  w,
-  participants,
-  onOpenAgent,
-}: {
-  w: Workflow;
-  participants: Participant[];
-  onOpenAgent: (id: string) => void;
-}) {
-  const byId = useMemo(() => new Map(participants.map((p) => [p.id, p])), [participants]);
-  const { nodes, cols } = useMemo(() => layout(w, byId), [w, byId]);
-  const maxRows = Math.max(...nodes.map((n) => n.rows));
-  const height = maxRows * NODE_H + (maxRows - 1) * ROW_GAP + 24;
-  const width = cols * NODE_W + (cols - 1) * COL_GAP + 8;
-
-  const pos = (n: DiagNode) => {
-    const colHeight = n.rows * NODE_H + (n.rows - 1) * (ROW_GAP + 14);
-    const top = (height - colHeight) / 2 + n.row * (NODE_H + ROW_GAP + 14);
-    return { left: 4 + n.col * (NODE_W + COL_GAP), top };
-  };
-
-  // Edges: every node in column c connects to every node in column c+1 (the roster is a relay
-  // with fan-out at the stacked column — matches how the playbook reads).
-  const edges: { x1: number; y1: number; x2: number; y2: number }[] = [];
-  for (let c = 0; c < cols - 1; c++) {
-    const from = nodes.filter((n) => n.col === c);
-    const to = nodes.filter((n) => n.col === c + 1);
-    for (const f of from) {
-      for (const t of to) {
-        const fp = pos(f);
-        const tp = pos(t);
-        edges.push({ x1: fp.left + NODE_W, y1: fp.top + NODE_H / 2, x2: tp.left, y2: tp.top + NODE_H / 2 });
-      }
-    }
-  }
-
-  return (
-    <div className="overflow-x-auto rounded-xl border bg-card p-4 shadow-sm" data-testid="workflow-diagram">
-      <div className="relative mx-auto" style={{ width, height }}>
-        <svg className="pointer-events-none absolute inset-0" width={width} height={height}>
-          {edges.map((e, i) => (
-            <path
-              key={i}
-              d={`M ${e.x1} ${e.y1} C ${e.x1 + COL_GAP / 2} ${e.y1}, ${e.x2 - COL_GAP / 2} ${e.y2}, ${e.x2} ${e.y2}`}
-              fill="none"
-              className="stroke-primary/40"
-              strokeWidth="1.5"
-              strokeDasharray="5 4"
-            />
-          ))}
-        </svg>
-        {nodes.map((n) => {
-          const p = pos(n);
-          const working = n.participant?.status === "working";
-          return (
-            <div
-              key={n.key}
-              onClick={() => n.participant && onOpenAgent(n.participant.id)}
-              className={cn(
-                "absolute flex items-center gap-2.5 rounded-xl border bg-background p-2.5 shadow-sm",
-                n.kind === "trigger" && "border-dashed border-primary/50 bg-accent",
-                n.participant && "cursor-pointer transition-colors hover:border-primary/50",
-                working && "border-primary ring-2 ring-primary/15",
-              )}
-              style={{ left: p.left, top: p.top, width: NODE_W, height: NODE_H }}
-            >
-              {n.kind === "trigger" ? (
-                <CalendarClock className="size-4 shrink-0 text-accent-foreground/70" />
-              ) : n.kind === "user" ? (
-                <PersonAvatar name="You" handle="you" size="sm" />
-              ) : (
-                <PersonAvatar name={n.label} handle={n.participant?.handle ?? n.label} size="sm" />
-              )}
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-1.5">
-                  <span className="truncate text-xs font-semibold">{n.label}</span>
-                  {working && <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-primary" />}
-                </div>
-                <div className="truncate text-[10px] text-muted-foreground">{n.sub}</div>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-// --- Runs table ---
+// One workflow: the live canvas (same one the builder edits), its runs, and the playbook.
+// Deliberately thin — a run's timeline IS its thread in the home channel (chat-native), so
+// "open a run" jumps there rather than to a bespoke timeline surface.
 
 function runStatusBadge(r: WorkflowRun) {
   if (r.status === "running")
@@ -230,6 +80,10 @@ export function WorkflowDetail({
   const [playbook, setPlaybook] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const connections = useConnections(true);
+  const connectedKeys = useMemo(() => connectedIntegrationKeys(connections.connections), [connections.connections]);
+  const byId = useMemo(() => new Map(participants.map((p) => [p.id, p])), [participants]);
 
   useEffect(() => {
     let alive = true;
@@ -281,21 +135,18 @@ export function WorkflowDetail({
       onExpandSidebar={onExpandSidebar}
       testId="workflow-detail"
     >
-      {/* Header row: breadcrumb-ish back link, status, actions. */}
-      <div className="mb-4 flex flex-wrap items-center gap-2">
+      {/* Header row: back link, status, the trigger in plain English, actions. */}
+      <div className="mb-1 flex flex-wrap items-center gap-2">
         <button onClick={() => navigate("/workflows")} className="text-xs text-muted-foreground hover:text-foreground hover:underline">
           ← All workflows
         </button>
         <span className="ml-1">
           {w.status === "draft" ? <Badge variant="secondary">Draft</Badge> : w.status === "paused" ? <Badge variant="secondary">Paused</Badge> : <Badge variant="outline" className="text-primary">Active</Badge>}
         </span>
-        {w.home_channel_name && (
-          <span className="inline-flex items-center gap-0.5 text-xs text-muted-foreground">
-            <Hash className="size-3" />{w.home_channel_name}
-          </span>
-        )}
-        {w.next_run_at && <span className="text-xs text-muted-foreground">· next run {fmtRelative(w.next_run_at)}</span>}
         <div className="ml-auto flex items-center gap-2">
+          <Button size="sm" variant="outline" data-testid="detail-edit" onClick={() => navigate(`/workflows/${w.id}/edit`)} className="h-8 text-xs">
+            <Pencil className="size-3.5" /> Edit
+          </Button>
           {w.status !== "draft" && (
             <Button
               size="sm"
@@ -319,6 +170,10 @@ export function WorkflowDetail({
           )}
         </div>
       </div>
+      <p className="mb-4 text-sm text-muted-foreground" data-testid="trigger-sentence">
+        {triggerSentence(w)}
+        {w.next_run_at && <span> · next run {fmtRelative(w.next_run_at)}</span>}
+      </p>
       {error && <p className="mb-3 text-sm text-destructive">{error}</p>}
 
       {/* Tabs */}
@@ -339,11 +194,47 @@ export function WorkflowDetail({
 
       {tab === "overview" && (
         <div className="space-y-5">
-          <Diagram w={w} participants={participants} onOpenAgent={onOpenAgent} />
+          <WorkflowCanvas
+            w={w}
+            participants={participants}
+            connectedKeys={connectedKeys}
+            onSelectAgent={onOpenAgent}
+          />
           {w.description && <p className="text-sm text-muted-foreground">{w.description}</p>}
-          <div>
-            <h2 className="mb-2 px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Recent runs</h2>
-            <RunsList runs={runs.slice(0, 5)} w={w} onOpenRunThread={onOpenRunThread} />
+          <div className="grid gap-6 lg:grid-cols-3">
+            <div className="lg:col-span-2">
+              <h2 className="mb-2 px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Recent runs</h2>
+              <RunsList runs={runs.slice(0, 5)} w={w} onOpenRunThread={onOpenRunThread} />
+            </div>
+            <div className="space-y-5">
+              <div>
+                <h2 className="mb-2 px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Team</h2>
+                <div className="overflow-hidden rounded-xl border bg-card shadow-sm" data-testid="workflow-team">
+                  {w.roster.map((r, i) => {
+                    const p = r.participant_id ? byId.get(r.participant_id) : undefined;
+                    return (
+                      <div
+                        key={r.participant_id ?? i}
+                        role={p ? "button" : undefined}
+                        onClick={() => p && onOpenAgent(p.id)}
+                        className={cn("flex items-center gap-2.5 px-3 py-2", i > 0 && "border-t", p && "cursor-pointer hover:bg-accent/50")}
+                      >
+                        <PersonAvatar name={p?.display_name ?? r.name ?? r.handle_seed} handle={p?.handle ?? r.handle_seed} size="sm" />
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-sm font-medium">{p?.display_name ?? r.name ?? `@${r.handle_seed}`}</div>
+                          <div className="truncate text-xs text-muted-foreground">{r.role}</div>
+                        </div>
+                        {p?.status === "working" && <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-primary" />}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+              <div>
+                <h2 className="mb-2 px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Connections</h2>
+                <ConnectionsPanel w={w} connectedKeys={connectedKeys} onSelectAgent={onOpenAgent} />
+              </div>
+            </div>
           </div>
         </div>
       )}

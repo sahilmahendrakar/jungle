@@ -886,6 +886,24 @@ export function openWorkflowBuilder(body: { templateId?: string } = {}): Promise
   });
 }
 
+export function addWorkflowSeat(id: string, body: { role?: string } = {}): Promise<Workflow> {
+  return request<Workflow>(`/api/workflows/${id}/seats`, {
+    json: body,
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to add an agent",
+  });
+}
+
+export function removeWorkflowSeat(id: string, participantId: string): Promise<Workflow> {
+  return request<Workflow>(`/api/workflows/${id}/seats/${participantId}`, {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to remove the agent",
+  });
+}
+
 export function finalizeWorkflow(id: string, body: { homeChannelId?: string } = {}): Promise<Workflow> {
   return request<Workflow>(`/api/workflows/${id}/finalize`, {
     json: body,
