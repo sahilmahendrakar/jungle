@@ -14,6 +14,7 @@ import * as runners from "../../runners";
 import { provisionerFor } from "../../provisioner";
 import { broadcastWorkspace } from "../../ws/appSocket";
 import { listPendingConfirmsFor, resolveConfirmDecision } from "../../services/confirmations";
+import * as workflows from "../../services/workflows";
 import { wrap, ApiError } from "../errors";
 import { optInt } from "../validate";
 import { publicParticipant, requireAgent, requireRequester, accountUid } from "../guards";
@@ -222,11 +223,15 @@ router.put(
     for (const field of type.configFields) {
       if (!config[field.key]) throw new ApiError(400, `${field.label} is required`);
     }
-    const row = await db.setAgentIntegration(agent.id, key, await resolveIntegrationConfig(me, agent.id, key, config));
+    const resolved = await resolveIntegrationConfig(me, agent.id, key, config);
+    const row = await db.setAgentIntegration(agent.id, key, resolved);
     // Integration grants (git creds, MCP servers, prompt blocks) only reach the runner via
     // `configure` — push a fresh one so a connected runner picks the change up at its next turn
     // instead of silently keeping the old grants until a reconnect. No-op when offline.
     await runners.reconfigure(agent.id);
+    // Roster seats advertise the agent's integrations (canvas chips + Connections panel) —
+    // add the key everywhere this agent sits so those views follow the attach.
+    await workflows.syncRosterIntegration(agent.id, key, "attach", resolved);
     res.json(row);
   }),
 );
@@ -235,9 +240,12 @@ router.delete(
   "/api/agents/:id/integrations/:key",
   wrap(async (req, res) => {
     const { agent } = await requireAgent(req);
-    await db.removeAgentIntegration(agent.id, String(req.params.key));
+    const key = String(req.params.key);
+    await db.removeAgentIntegration(agent.id, key);
     // Revoke the grant on a live runner too (same reasoning as the PUT above).
     await runners.reconfigure(agent.id);
+    // …and scrub the key from the agent's roster seats (mirror of the PUT's sync).
+    await workflows.syncRosterIntegration(agent.id, key, "detach");
     res.json({ ok: true });
   }),
 );

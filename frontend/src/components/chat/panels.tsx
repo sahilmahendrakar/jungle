@@ -195,7 +195,9 @@ export function SelectMenu({
 // agent is real: its profile hides integrations whose connection still isn't linked.
 
 // Drop one integration key from every draft roster seat the agent occupies. Returns the updated
-// workflow list (same shape it was given), for the panel's local state.
+// workflow list (same shape it was given), for the panel's local state. This is the PENDING-key
+// path (roster-listed but never attached, so there's no agent_integrations row to DELETE) —
+// removing an attached row is scrubbed backend-side by the integration DELETE route.
 async function scrubKeyFromDraftSeats(
   workflows: Workflow[],
   participantId: string,
@@ -372,16 +374,13 @@ export function ParticipantProfilePanel({
         persona: persona.trim(),
       };
       const nextKeys = new Set(integrations.map((v) => v.key));
-      // Removed rows also drop off any draft roster seats (template agents) so the workflow
-      // canvas stops advertising an integration the agent no longer has.
-      let seats = seatWorkflows;
+      // Removed rows: the backend scrubs the key from every workflow roster the agent sits on
+      // (draft or live) and broadcasts workflow_changed, so the canvas + Connections panel stop
+      // advertising an integration the agent no longer has. (Pending unattached keys have no row
+      // to delete — those scrub via removeTemplateKey's roster PATCH instead.)
       for (const orig of origIntegrations) {
-        if (!nextKeys.has(orig.key)) {
-          await removeAgentIntegration(person.id, orig.key);
-          seats = await scrubKeyFromDraftSeats(seats, person.id, orig.key);
-        }
+        if (!nextKeys.has(orig.key)) await removeAgentIntegration(person.id, orig.key);
       }
-      if (seats !== seatWorkflows) setSeatWorkflows(seats);
       for (const entry of integrations) {
         const prev = origIntegrations.find((v) => v.key === entry.key);
         if (!prev || integrationFingerprint(prev) !== integrationFingerprint(entry)) {
