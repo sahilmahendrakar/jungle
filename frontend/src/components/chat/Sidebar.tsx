@@ -193,7 +193,9 @@ export function Sidebar({
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto">
-          <div className="px-2 py-3">
+          {/* Bottom padding ≈ the floating CTA's height, so the last list item can
+              still be scrolled clear of it. */}
+          <div className="px-2 pb-14 pt-3">
             {/* Search: the ⌘K palette (messages, channels, people). */}
             <NavItem
               testId="search-nav"
@@ -346,14 +348,15 @@ export function Sidebar({
           </div>
         </div>
 
-        {/* Create agent: the primary CTA, pinned just above the footer. It used to be the
-            "Add agent" action on the People section header; that section is going away, so
-            the entry point gets a permanent, prominent home here. */}
-        <div className="shrink-0 px-3 pb-2.5 pt-1.5">
+        {/* Create agent: the primary CTA, floating at the bottom of the sidebar. The
+            negative top margin pulls it up over the scroll area (net layout space ≈ 0),
+            so the list scrolls away behind it with no gap. pointer-events-none on the
+            wrapper keeps the list items behind the transparent margins interactive. */}
+        <div className="pointer-events-none relative z-10 -mt-[46px] shrink-0 px-3 pb-2.5">
           <Button
             data-testid="add-agent-toggle"
             onClick={onAddAgent}
-            className="h-10 w-full rounded-full text-sm font-semibold shadow-md"
+            className="pointer-events-auto h-9 w-full rounded-full text-sm font-semibold shadow-md"
           >
             <Plus />
             Create agent
