@@ -78,17 +78,37 @@ export function connectedIntegrationKeys(connections: ConnectionsApi["connection
   return out;
 }
 
-function IntegrationChip({ intKey, connected }: { intKey: string; connected: boolean }) {
+function IntegrationChip({
+  intKey,
+  connected,
+  onOpenConnections,
+}: {
+  intKey: string;
+  connected: boolean;
+  onOpenConnections?: () => void;
+}) {
   const name = getIntegrationType(intKey)?.name ?? intKey;
   return (
     <span
+      role={onOpenConnections ? "button" : undefined}
+      onClick={
+        onOpenConnections
+          ? (e) => {
+              // The chip sits inside the agent card (whose own click opens the profile) — the
+              // chip's target wins: integrations lead to the user's connections settings.
+              e.stopPropagation();
+              onOpenConnections();
+            }
+          : undefined
+      }
       className={cn(
         "inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-medium",
+        onOpenConnections && "cursor-pointer hover:border-primary/50",
         connected
           ? "border-border text-muted-foreground"
           : "border-amber-400/60 bg-amber-50/60 text-amber-700 dark:bg-amber-500/10 dark:text-amber-400",
       )}
-      title={connected ? `${name} connected` : `${name} needs connecting — click the agent to connect`}
+      title={connected ? `${name} connected — manage in Settings` : `${name} needs connecting — open your connections settings`}
     >
       <span className={cn("size-1.5 rounded-full", connected ? "bg-emerald-500" : "bg-amber-500")} />
       {name}
@@ -174,6 +194,7 @@ export function WorkflowCanvas({
   connectedKeys,
   selectedId,
   onSelectAgent,
+  onOpenConnections,
   edit,
 }: {
   w: Workflow;
@@ -181,6 +202,7 @@ export function WorkflowCanvas({
   connectedKeys: Set<string>;
   selectedId?: string | null;
   onSelectAgent?: (participantId: string) => void;
+  onOpenConnections?: () => void;
   edit?: {
     onRemoveAgent: (participantId: string) => void;
     onRoleTitle: (rosterIndex: number, title: string) => void;
@@ -329,7 +351,7 @@ export function WorkflowCanvas({
               {n.chips && n.chips.length > 0 && (
                 <div className="mt-1.5 flex gap-1 overflow-hidden">
                   {n.chips.map((k) => (
-                    <IntegrationChip key={k} intKey={k} connected={connectedKeys.has(k)} />
+                    <IntegrationChip key={k} intKey={k} connected={connectedKeys.has(k)} onOpenConnections={onOpenConnections} />
                   ))}
                 </div>
               )}
@@ -370,16 +392,16 @@ export function WorkflowCanvas({
 }
 
 // A compact "are the tools hooked up" panel: every integration the roster uses, with its
-// connection status. Clicking an unlinked row jumps to an agent that needs it (where the real
-// connect flow lives, in the profile panel).
+// connection status. Clicking any row opens the user's connections settings — that's where
+// account links live, so it's the shortest path to fixing (or checking) a connection.
 export function ConnectionsPanel({
   w,
   connectedKeys,
-  onSelectAgent,
+  onOpenConnections,
 }: {
   w: Workflow;
   connectedKeys: Set<string>;
-  onSelectAgent?: (participantId: string) => void;
+  onOpenConnections?: () => void;
 }) {
   const keys = rosterIntegrationKeys(w.roster);
   if (keys.length === 0) {
@@ -389,13 +411,12 @@ export function ConnectionsPanel({
     <div className="overflow-hidden rounded-xl border bg-card shadow-sm" data-testid="workflow-connections">
       {keys.map((k, i) => {
         const ok = connectedKeys.has(k);
-        const owner = w.roster.find((r) => r.integrations.includes(k));
-        const clickable = !ok && !!owner?.participant_id && !!onSelectAgent;
+        const clickable = !!onOpenConnections;
         return (
           <div
             key={k}
             role={clickable ? "button" : undefined}
-            onClick={() => clickable && onSelectAgent!(owner!.participant_id!)}
+            onClick={() => clickable && onOpenConnections()}
             className={cn(
               "flex items-center gap-2 px-3 py-2 text-sm",
               i > 0 && "border-t",

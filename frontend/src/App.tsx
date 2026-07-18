@@ -164,6 +164,9 @@ export function App({
   const [profileId, setProfileId] = useState<string | null>(null);
   // Self settings live in the right panel (firebase mode); mutually exclusive with a profile.
   const [settingsPanelOpen, setSettingsPanelOpen] = useState(false);
+  // One-shot scroll hint for the settings panel: integration deep-links (workflow pages) open
+  // it straight on the Connections section. Reset when the panel closes.
+  const [settingsFocusConnections, setSettingsFocusConnections] = useState(false);
 
   // Drag-resizable widths for the two sidebars (desktop only). `resizing` suppresses the
   // width transition mid-drag so the panel tracks the pointer instead of easing behind it.
@@ -607,8 +610,9 @@ export function App({
     setActivityId(null);
     setDrawerOpen(false);
   }, []);
-  function openSettingsPanel() {
+  function openSettingsPanel(opts?: { focusConnections?: boolean }) {
     setSettingsPanelOpen(true);
+    setSettingsFocusConnections(opts?.focusConnections ?? false);
     setProfileId(null);
     setThreadRootId(null);
     setThreadsListOpen(false);
@@ -991,6 +995,7 @@ export function App({
   const closeRightPanel = () => {
     setProfileId(null);
     setSettingsPanelOpen(false);
+    setSettingsFocusConnections(false);
     setThreadRootId(null);
     setThreadsListOpen(false);
     setRosterOpen(false);
@@ -1145,6 +1150,7 @@ export function App({
           // The real right-side profile panel opens NEXT TO the builder (no navigation) — same
           // panel as everywhere else, so integrations/persona/model edits all live there.
           onOpenAgent={openProfilePanel}
+          onOpenConnections={() => openSettingsPanel({ focusConnections: true })}
           onParticipantsChanged={() => void listParticipants().then(setPeople).catch(() => {})}
         />
       ) : workflowDetailId ? (
@@ -1155,6 +1161,7 @@ export function App({
           onOpenDrawer={() => setDrawerOpen(true)}
           onExpandSidebar={() => setSidebarOpen(true)}
           onOpenAgent={openProfilePanel}
+          onOpenConnections={() => openSettingsPanel({ focusConnections: true })}
           onOpenRunThread={(channelId, rootMessageId) => jumpToMessage(channelId, rootMessageId)}
         />
       ) : scheduledOpen ? (
@@ -1385,11 +1392,14 @@ export function App({
                 setPeople((ps) => ps.filter((p) => p.id !== id));
                 closeRightPanel();
               }}
+              onOpenConnections={() => openSettingsPanel({ focusConnections: true })}
             />
           )}
 
           {/* Self settings view (account + GitHub); firebase mode only */}
-          {rightMode === "settings" && <SettingsPanel onClose={closeRightPanel} />}
+          {rightMode === "settings" && (
+            <SettingsPanel onClose={closeRightPanel} focusConnections={settingsFocusConnections} />
+          )}
 
           {/* Threads view */}
           {rightMode === "threads" && (

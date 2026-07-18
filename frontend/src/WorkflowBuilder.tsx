@@ -29,6 +29,7 @@ import {
 import { useConnections } from "./lib/connections";
 import { navigate } from "./route";
 import { DeleteWorkflowDialog } from "./components/workflow/DeleteWorkflowDialog";
+import { UnconnectedIntegrationsDialog } from "./components/workflow/UnconnectedIntegrationsDialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -152,6 +153,7 @@ export function WorkflowBuilder({
   onOpenDrawer,
   onExpandSidebar,
   onOpenAgent,
+  onOpenConnections,
   onParticipantsChanged,
 }: {
   workflowId: string;
@@ -160,6 +162,7 @@ export function WorkflowBuilder({
   onOpenDrawer: () => void;
   onExpandSidebar: () => void;
   onOpenAgent: (id: string) => void; // opens the app's right-side profile panel
+  onOpenConnections: () => void; // opens the user's settings panel on the Connections section
   onParticipantsChanged: () => void; // seat agents are created server-side; ask App to refetch
 }) {
   const [w, setW] = useState<Workflow | null>(null);
@@ -170,6 +173,7 @@ export function WorkflowBuilder({
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [discarding, setDiscarding] = useState(false);
+  const [warnUnconnected, setWarnUnconnected] = useState(false);
 
   const connections = useConnections(true);
   const connectedKeys = useMemo(() => connectedIntegrationKeys(connections.connections), [connections.connections]);
@@ -206,7 +210,7 @@ export function WorkflowBuilder({
 
   const isDraft = w.status === "draft";
   // Pre-flight: which integrations the team uses but the user hasn't linked yet. A warning, not
-  // a gate — connections can be linked after launch too.
+  // a gate — connections can be linked after launch too (finalize re-attempts the attach).
   const missing = rosterIntegrationKeys(w.roster).filter((k) => !connectedKeys.has(k));
 
   async function persist(patch: Parameters<typeof updateWorkflow>[1]) {
@@ -252,6 +256,16 @@ export function WorkflowBuilder({
     }
   }
 
+  // Gate the create click on the unconnected-integrations warning; the dialog's "Create
+  // anyway" (or a clean pre-flight) falls through to the real create.
+  function maybeCreate() {
+    if (missing.length > 0) {
+      setWarnUnconnected(true);
+      return;
+    }
+    void create();
+  }
+
   async function create() {
     setCreating(true);
     setError(null);
@@ -292,7 +306,7 @@ export function WorkflowBuilder({
             </Button>
           )}
           {isDraft ? (
-            <Button data-testid="create-workflow" disabled={creating || w.roster.length === 0} onClick={create}>
+            <Button data-testid="create-workflow" disabled={creating || w.roster.length === 0} onClick={maybeCreate}>
               {creating ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
               {creating ? "Creating team…" : "Create workflow"}
             </Button>
@@ -337,6 +351,7 @@ export function WorkflowBuilder({
             connectedKeys={connectedKeys}
             selectedId={selectedId}
             onSelectAgent={selectAgent}
+            onOpenConnections={onOpenConnections}
             edit={
               isDraft
                 ? {
@@ -355,7 +370,8 @@ export function WorkflowBuilder({
               <span className="size-1.5 rounded-full bg-amber-500" />
               {missing.map((k) => getIntegrationType(k)?.name ?? k).join(", ")}{" "}
               {missing.length === 1 ? "isn't" : "aren't"} connected yet — the team can't use{" "}
-              {missing.length === 1 ? "it" : "them"} until you connect. Click an agent to connect.
+              {missing.length === 1 ? "it" : "them"} until you connect. Click any integration to
+              open your connections settings.
             </p>
           )}
         </section>
@@ -370,7 +386,7 @@ export function WorkflowBuilder({
           </section>
           <section>
             <h2 className="mb-2 px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Connections</h2>
-            <ConnectionsPanel w={w} connectedKeys={connectedKeys} onSelectAgent={selectAgent} />
+            <ConnectionsPanel w={w} connectedKeys={connectedKeys} onOpenConnections={onOpenConnections} />
           </section>
         </div>
 
@@ -403,6 +419,16 @@ export function WorkflowBuilder({
           await deleteWorkflow(w.id);
           onParticipantsChanged();
           navigate("/workflows");
+        }}
+      />
+      <UnconnectedIntegrationsDialog
+        missing={warnUnconnected ? missing : null}
+        creating={creating}
+        onOpenChange={setWarnUnconnected}
+        onOpenConnections={onOpenConnections}
+        onConfirm={() => {
+          setWarnUnconnected(false);
+          void create();
         }}
       />
     </ViewShell>
