@@ -133,6 +133,27 @@ export const newId = () =>
 export const fmtTime = (iso: string) =>
   new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 
+// Day bucket label for grouped feeds (Deliverables, Activity): "Today", "Yesterday", or a date.
+export function dayLabel(iso: string): string {
+  const d = new Date(iso);
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  if (d.toDateString() === today.toDateString()) return "Today";
+  if (d.toDateString() === yesterday.toDateString()) return "Yesterday";
+  return d.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" });
+}
+
+// One-line plain-text preview of a markdown message body (search hits, activity rows).
+export function snippet(body: string): string {
+  const line = body
+    .replace(/\[([^\]]+)\]\((?:[^)]+)\)/g, "$1") // markdown links -> their text
+    .replace(/[#*`>_]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return line.length > 90 ? `${line.slice(0, 89)}…` : line;
+}
+
 // Coarse relative time for schedule next-/last-run columns: "in 12m", "in 3h", "2d ago".
 // Beyond a week it falls back to an absolute date. null/invalid -> "—".
 export const fmtRelative = (iso: string | null | undefined): string => {

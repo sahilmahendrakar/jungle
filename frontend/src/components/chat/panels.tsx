@@ -33,8 +33,9 @@ import {
   listWorkflows,
   updateWorkflow,
   connectionForIntegration,
+  listActivity,
 } from "../../api";
-import type { Attachment, Participant, AgentStatus, AgentServiceInfo, Workflow } from "../../api";
+import type { Attachment, Participant, AgentStatus, AgentServiceInfo, Workflow, ActivityMessage } from "../../api";
 import {
   IntegrationsEditor,
   integrationFingerprint,
@@ -47,6 +48,8 @@ import {
   fmtBytes,
   EFFORT_OPTIONS,
   fmtTokens,
+  fmtRelative,
+  snippet,
   INLINE_IMAGE_MIMES,
   MODEL_OPTIONS,
   sdkModeOptionsFor,
@@ -54,6 +57,7 @@ import {
   STATUS_LABEL,
   type ToolConfirm,
 } from "../../lib/chat";
+import { navigate } from "../../route";
 import { catalogEntry, getIntegrationType } from "@jungle/shared";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -233,6 +237,7 @@ export function ParticipantProfilePanel({
   onOpenActivity,
   onDeleted,
   onOpenConnections,
+  onJumpToMessage,
 }: {
   person: Participant;
   isSelf: boolean;
@@ -242,6 +247,8 @@ export function ParticipantProfilePanel({
   onDeleted: (id: string) => void;
   // Opens the user's settings panel on Connections (template agents' pending integrations).
   onOpenConnections?: () => void;
+  // Deep-link a message into its channel/thread (the Recent messages card).
+  onJumpToMessage: (channelId: string, messageId: string, threadRootId?: string | null) => void;
 }) {
   const isAgent = person.kind === "agent";
   const [name, setName] = useState(person.display_name);
@@ -589,6 +596,7 @@ export function ParticipantProfilePanel({
             <ServicesCard person={person} />
             <MemoryCard person={person} />
             <ContextUsageCard person={person} />
+            <RecentMessagesCard person={person} onJumpToMessage={onJumpToMessage} />
             <Button
               variant="outline"
               data-testid="activity-open"
@@ -671,6 +679,75 @@ export function ParticipantProfilePanel({
           </Button>
         </div>
       )}
+    </div>
+  );
+}
+
+// The last few messages an agent sent or received (its DMs + mentions of it), shown in its
+// profile above "View activity". Rows deep-link into the channel/thread scrolled to the message;
+// "View all" opens the Activity page pre-filtered to this agent. Scoped server-side to channels
+// the viewer belongs to, so you only ever see conversations you're in.
+function RecentMessagesCard({
+  person,
+  onJumpToMessage,
+}: {
+  person: Participant;
+  onJumpToMessage: (channelId: string, messageId: string, threadRootId?: string | null) => void;
+}) {
+  const [messages, setMessages] = useState<ActivityMessage[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    listActivity({ person: person.handle, type: "messages" }, { limit: 3 })
+      .then((r) => {
+        if (cancelled) return;
+        setMessages(r.items.flatMap((it) => (it.type === "message" ? [it.message] : [])));
+      })
+      .catch(() => {
+        if (!cancelled) setMessages([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [person.handle]);
+
+  if (messages === null || messages.length === 0) return null;
+
+  return (
+    <div data-testid="recent-messages-card" className="space-y-1.5">
+      <div className="flex items-baseline justify-between">
+        <Label>Recent messages</Label>
+        <button
+          data-testid="recent-messages-view-all"
+          onClick={() => navigate(`/activity?person=@${person.handle}`)}
+          className="text-xs font-medium text-muted-foreground hover:text-foreground hover:underline"
+        >
+          View all →
+        </button>
+      </div>
+      <div className="divide-y overflow-hidden rounded-lg border bg-muted/30">
+        {messages.map((m) => (
+          <button
+            key={m.message_id}
+            data-testid="recent-message-row"
+            onClick={() => onJumpToMessage(m.channel_id, m.message_id, m.thread_root_id)}
+            className="block w-full px-3 py-2 text-left transition-colors hover:bg-accent"
+            title="Open in conversation"
+          >
+            <div className="flex items-baseline gap-2">
+              <span className="truncate text-xs font-semibold">@{m.sender_handle}</span>
+              <span className="ml-auto shrink-0 text-[11px] text-muted-foreground">
+                {fmtRelative(m.created_at)}
+              </span>
+            </div>
+            <div className="mt-0.5 truncate text-xs text-foreground/80">{snippet(m.body) || "(attachment)"}</div>
+            <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
+              {m.channel_kind === "dm" ? `@${m.dm_with ?? "dm"}` : `#${m.channel_name}`}
+              {m.thread_root_id ? " · in thread" : ""}
+            </div>
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
