@@ -318,6 +318,8 @@ export function removeAgentIntegration(agentId: string, key: string): Promise<{ 
 export interface IntegrationConnectionStatus {
   connected: boolean;
   externalAccount?: string | null;
+  // The stored OAuth grant is dead (invalid_grant) — the user must re-consent to revive it.
+  needsReconnect?: boolean;
 }
 
 // Per-integration connection status for the current user, keyed by integration key.
@@ -1074,6 +1076,8 @@ export function disconnectGoogle(): Promise<{ ok: boolean }> {
 export interface GoogleStatus {
   connected: boolean;
   email?: string;
+  // The stored OAuth grant is dead (invalid_grant) — the user must re-consent to revive it.
+  needsReconnect?: boolean;
 }
 
 export function getGoogleStatus(): Promise<GoogleStatus> {

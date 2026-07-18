@@ -1,5 +1,6 @@
 import "./env";
 import * as db from "./db";
+import { isInvalidGrantError } from "./integrations/oauth";
 
 // Google user-OAuth credentials (GOOGLE_OAUTH_CLIENT_ID / _SECRET in .env). This is the per-user
 // "connect your Google account" flow that backs the Gmail integration — the direct analog of the
@@ -116,20 +117,32 @@ export async function exchangeCodeAndStore(
 
 // Return a valid Gmail access token for the participant, refreshing if it's expired/near-expiry.
 // The Gmail-integration runner path calls this per drain (see runners.ts) — mirrors github.ts's
-// getValidToken.
+// getValidToken. When the refresh grant is permanently dead (invalid_grant from Google, or no
+// refresh token at all — e.g. testing-mode 7-day expiry or a revocation), the identity is flagged
+// needs_reconnect so the UI + agent prompts can say "reconnect" instead of failing silently; a
+// successful refresh clears the flag, so the state self-heals.
 export async function getValidGmailToken(participantId: string): Promise<string> {
   const id = await db.getGoogleIdentity(participantId);
   if (!id) throw new Error("participant has not connected Google");
   const exp = id.access_expires_at ? new Date(id.access_expires_at).getTime() : Infinity;
   if (exp - Date.now() > 60_000) return id.access_token; // still good (>60s headroom)
-  if (!id.refresh_token) throw new Error("access token expired and no refresh token; reconnect Google");
+  if (!id.refresh_token) {
+    await db.setGoogleNeedsReconnect(participantId, true);
+    throw new Error("access token expired and no refresh token; reconnect Google");
+  }
 
-  const tok = await postToken({
-    client_id: CLIENT_ID,
-    client_secret: CLIENT_SECRET,
-    grant_type: "refresh_token",
-    refresh_token: id.refresh_token,
-  });
+  let tok: TokenResponse;
+  try {
+    tok = await postToken({
+      client_id: CLIENT_ID,
+      client_secret: CLIENT_SECRET,
+      grant_type: "refresh_token",
+      refresh_token: id.refresh_token,
+    });
+  } catch (e) {
+    if (isInvalidGrantError(e)) await db.setGoogleNeedsReconnect(participantId, true);
+    throw e;
+  }
   if (!tok.access_token) throw new Error("google oauth: refresh returned no access_token");
   await db.updateGoogleTokens({
     participantId,
@@ -137,6 +150,8 @@ export async function getValidGmailToken(participantId: string): Promise<string>
     refreshToken: tok.refresh_token ?? id.refresh_token, // Google usually omits it on refresh
     accessExpiresAt: expiryDate(tok.expires_in),
   });
+  // Self-heal: a successful refresh proves the grant is alive again.
+  if (id.needs_reconnect) await db.setGoogleNeedsReconnect(participantId, false);
   return tok.access_token;
 }
 
@@ -212,10 +227,15 @@ export async function googleRefreshToken(
 export interface GoogleStatus {
   connected: boolean;
   email?: string;
+  // The stored grant is dead (invalid_grant) — the user must re-consent. Settings shows a
+  // "Reconnect needed" badge instead of a healthy "connected".
+  needsReconnect?: boolean;
 }
 
 // Connection status for the settings page.
 export async function googleStatus(participantId: string): Promise<GoogleStatus> {
   const id = await db.getGoogleIdentity(participantId);
-  return id ? { connected: true, email: id.email } : { connected: false };
+  return id
+    ? { connected: true, email: id.email, needsReconnect: id.needs_reconnect }
+    : { connected: false };
 }
