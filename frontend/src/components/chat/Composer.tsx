@@ -7,6 +7,7 @@ import {
   newId,
   type PendingAttachment,
 } from "../../lib/chat";
+import { usePersistentDraft } from "../../lib/drafts";
 import { useMentionAutocomplete, MentionPopup } from "./mentionAutocomplete";
 import { ComposerInput } from "./ComposerInput";
 import { Button } from "@/components/ui/button";
@@ -14,11 +15,15 @@ import { cn } from "@/lib/utils";
 
 // The main channel composer: @-mention autocomplete, mention badges in the input (same component
 // as chat history via ComposerInput), upload-first attachments, and an auto-growing textarea.
-// Owns its own draft / pending-attachments state; mention autocomplete lives in the shared
-// useMentionAutocomplete hook (shared with the thread composer). The parent only supplies the data
-// needed for mention candidates and an `onSend(body, attachmentIds)` that performs the actual WS
-// post and returns whether it was accepted (so the composer clears only on success).
+// The draft is persisted per channel (see lib/drafts.ts) — navigating to another screen,
+// switching channels, or reloading the page restores it, and it clears on send. Pending
+// attachments stay component-local (in-flight uploads can't survive an unmount). Mention
+// autocomplete lives in the shared useMentionAutocomplete hook (shared with the thread composer).
+// The parent only supplies the data needed for mention candidates and an
+// `onSend(body, attachmentIds)` that performs the actual WS post and returns whether it was
+// accepted (so the composer clears only on success).
 export function Composer({
+  draftKey,
   headerTitle,
   isDm,
   people,
@@ -28,6 +33,8 @@ export function Composer({
   onNotice,
   onOpenProfile,
 }: {
+  // Persistence key for the draft — the selected channel id (see lib/drafts.ts).
+  draftKey: string | null;
   headerTitle: string | null;
   isDm: boolean;
   people: Participant[];
@@ -37,7 +44,7 @@ export function Composer({
   onNotice: (msg: string) => void;
   onOpenProfile?: (id: string) => void;
 }) {
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = usePersistentDraft(draftKey);
   const [pending, setPending] = useState<PendingAttachment[]>([]);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);

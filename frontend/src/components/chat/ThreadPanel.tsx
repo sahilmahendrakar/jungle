@@ -9,6 +9,7 @@ import { ComposerInput } from "./ComposerInput";
 import { DeliverableChips } from "./deliverableCards";
 import { MessageTurnChips } from "./TurnChips";
 import type { QueuedTurn, TurnChipData } from "../../ws/useLiveTurns";
+import { usePersistentDraft } from "../../lib/drafts";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
@@ -82,9 +83,10 @@ function ThreadMessageRow({
 }
 
 // The right panel's Threads view: either the followed-threads-with-unread list, or one open thread
-// (root + replies + a reply composer). Owns the reply draft + "also send to channel" toggle, reset
-// whenever the open thread changes. `onSendReply` performs the WS post and returns whether it was
-// accepted, so the draft clears only on success.
+// (root + replies + a reply composer). The reply draft persists per thread (see lib/drafts.ts) —
+// switching threads, closing the panel, or reloading restores it — while the "also send to
+// channel" toggle resets per thread. `onSendReply` performs the WS post and returns whether it
+// was accepted, so the draft clears only on success.
 export function ThreadPanel({
   threadRootId,
   threadRoot,
@@ -126,16 +128,18 @@ export function ThreadPanel({
   members: Participant[];
   participantId: string | null;
 }) {
-  const [threadDraft, setThreadDraft] = useState("");
+  const [threadDraft, setThreadDraft] = usePersistentDraft(
+    threadRootId ? `thread:${threadRootId}` : null,
+  );
   const [alsoToChannel, setAlsoToChannel] = useState(false);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
 
   const { mention, candidates, index, setIndex, syncMention, acceptMention, clearMention, handleKey } =
     useMentionAutocomplete({ people, members, participantId, draft: threadDraft, setDraft: setThreadDraft, taRef });
 
-  // Reset the composer whenever the open thread changes (or the panel switches to the list).
+  // Reset the per-send toggle + mention state when the open thread changes (the draft itself is
+  // NOT reset — it persists per thread via usePersistentDraft).
   useEffect(() => {
-    setThreadDraft("");
     setAlsoToChannel(false);
     clearMention();
   }, [threadRootId, clearMention]);
