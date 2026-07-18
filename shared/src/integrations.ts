@@ -84,6 +84,14 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     connection: "oauth",
   },
   {
+    key: "google-calendar",
+    name: "Google Calendar",
+    description: "Read, create & update events on a connected Google Calendar.",
+    connectionKey: "google-calendar",
+    configFields: [],
+    connection: "oauth",
+  },
+  {
     key: "notion",
     name: "Notion",
     description: "Search, read & write pages and databases in a connected Notion workspace.",
@@ -123,8 +131,8 @@ export const CONNECTION_TYPES: ConnectionType[] = [
   },
   {
     key: "google",
-    name: "Google",
-    description: "Backs the Gmail integration — agents read, search & send email from this account.",
+    name: "Gmail",
+    description: "Agents read, search & send email from this Gmail account.",
     kind: "google",
   },
   ...INTEGRATION_TYPES.filter((t) => t.connection === "oauth" && !t.comingSoon).map(

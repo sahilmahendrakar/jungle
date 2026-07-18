@@ -315,6 +315,10 @@ export interface ConfigureFrame {
   // in-process MCP server (drive_* tools); the token is refreshed via IntegrationCredentialsFrame
   // keyed "google-drive".
   drive?: { accessToken: string; email: string; requireApproval: boolean };
+  // The agent's attached Google Calendar integration, if any — same shape as Drive. In-process
+  // MCP server (calendar_* tools); the token is refreshed via IntegrationCredentialsFrame keyed
+  // "google-calendar".
+  calendar?: { accessToken: string; email: string; requireApproval: boolean };
   // The agent's attached remote-MCP integrations (Linear/Notion/Granola/…), if any. Each is
   // mounted as a remote MCP server; tokens refreshed via IntegrationCredentialsFrame.
   mcpIntegrations?: McpIntegrationGrant[];

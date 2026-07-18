@@ -166,6 +166,10 @@ export async function getValidGmailToken(participantId: string): Promise<string>
 // Full Drive read+write. openid+email capture the connected account's address for display.
 export const DRIVE_SCOPES = ["openid", "email", "https://www.googleapis.com/auth/drive"];
 
+// Read + create/update/delete events on the user's calendars (events only — no calendar-list or
+// ACL management). Like Drive, openid+email are just for the display address.
+export const CALENDAR_SCOPES = ["openid", "email", "https://www.googleapis.com/auth/calendar.events"];
+
 // Authorize URL without `state` (the caller appends it) — for the per-agent integration flow.
 export function googleAuthorizeUrl(opts: { scopes: string[]; redirectUri: string }): string {
   const u = new URL(AUTHORIZE);
