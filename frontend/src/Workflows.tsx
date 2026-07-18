@@ -71,7 +71,7 @@ function WorkflowCard({
         <span className="min-w-0 flex-1 truncate text-sm font-semibold">{w.name}</span>
         <Button
           variant="outline"
-          size="icon"
+          size="sm"
           disabled={busy}
           data-testid="workflow-delete"
           onClick={(e) => {
@@ -81,9 +81,9 @@ function WorkflowCard({
           onKeyDown={(e) => e.stopPropagation()}
           aria-label="Delete workflow"
           title="Delete workflow"
-          className="ml-auto text-muted-foreground hover:border-destructive hover:bg-destructive/5 hover:text-destructive"
+          className="ml-auto size-7 px-0 text-muted-foreground opacity-0 transition-opacity hover:border-destructive hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
         >
-          <Trash2 className="size-4" />
+          <Trash2 className="size-3.5" />
         </Button>
         {statusBadge(w)}
       </div>
