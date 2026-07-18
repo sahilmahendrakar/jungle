@@ -350,9 +350,19 @@ export function WorkflowCanvas({
               </div>
               {n.chips && n.chips.length > 0 && (
                 <div className="mt-1.5 flex gap-1 overflow-hidden">
-                  {n.chips.map((k) => (
+                  {/* Node height fits one chip row — cap at two chips and fold the rest into
+                      "+N" (title lists them) so a third integration never clips mid-chip. */}
+                  {n.chips.slice(0, 2).map((k) => (
                     <IntegrationChip key={k} intKey={k} connected={connectedKeys.has(k)} onOpenConnections={onOpenConnections} />
                   ))}
+                  {n.chips.length > 2 && (
+                    <span
+                      className="inline-flex items-center rounded-md border border-border px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+                      title={n.chips.slice(2).map((k) => getIntegrationType(k)?.name ?? k).join(", ")}
+                    >
+                      +{n.chips.length - 2}
+                    </span>
+                  )}
                 </div>
               )}
               {edit && n.kind === "agent" && n.role?.participant_id && w.roster.length > 1 && (
