@@ -310,15 +310,12 @@ export function Sidebar({
           </div>
         </div>
 
-        {/* Create agent: the primary CTA, floating at the bottom of the sidebar. The
-            negative top margin pulls it up over the scroll area (net layout space ≈ 0),
-            so the list scrolls away behind it with no gap. pointer-events-none on the
-            wrapper keeps the list items behind the transparent margins interactive. */}
-        <div className="pointer-events-none relative z-10 -mt-[46px] shrink-0 px-3 pb-2.5">
+        {/* Create agent: the primary CTA at the bottom of the sidebar. */}
+        <div className="shrink-0 px-3 pb-2">
           <Button
             data-testid="add-agent-toggle"
             onClick={onAddAgent}
-            className="pointer-events-auto h-9 w-full rounded-full text-sm font-semibold shadow-md"
+            className="h-8 w-full rounded-full text-sm font-semibold"
           >
             <Plus />
             Create agent
