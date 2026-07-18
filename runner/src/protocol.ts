@@ -125,7 +125,7 @@ export interface WorkflowRoleInput {
   handle_seed: string;
   duties: string;
   integrations?: string[];
-  participant_handle?: string; // bind an EXISTING agent to this seat
+  repo?: string; // owner/name when integrations includes "github"
 }
 
 export interface WorkflowDraftInput {
