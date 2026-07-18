@@ -28,6 +28,7 @@ import {
 } from "./components/workflow/WorkflowCanvas";
 import { useConnections } from "./lib/connections";
 import { navigate } from "./route";
+import { DeleteWorkflowDialog } from "./components/workflow/DeleteWorkflowDialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -168,6 +169,7 @@ export function WorkflowBuilder({
   const [busy, setBusy] = useState(false);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [discarding, setDiscarding] = useState(false);
 
   const connections = useConnections(true);
   const connectedKeys = useMemo(() => connectedIntegrationKeys(connections.connections), [connections.connections]);
@@ -282,14 +284,8 @@ export function WorkflowBuilder({
               variant="ghost"
               size="sm"
               disabled={creating}
-              onClick={() => {
-                if (confirm("Discard this draft? Its agents haven't been created yet.")) {
-                  void deleteWorkflow(w!.id).then(() => {
-                    onParticipantsChanged();
-                    navigate("/workflows");
-                  });
-                }
-              }}
+              data-testid="discard-draft"
+              onClick={() => setDiscarding(true)}
               className="text-muted-foreground"
             >
               Discard
@@ -400,6 +396,15 @@ export function WorkflowBuilder({
           </div>
         </section>
       </div>
+      <DeleteWorkflowDialog
+        workflow={discarding ? w : null}
+        onOpenChange={setDiscarding}
+        onConfirm={async () => {
+          await deleteWorkflow(w.id);
+          onParticipantsChanged();
+          navigate("/workflows");
+        }}
+      />
     </ViewShell>
   );
 }
