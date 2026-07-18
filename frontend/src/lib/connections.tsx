@@ -8,6 +8,7 @@ import {
   CONNECTION_TYPES,
   type ConnectionType,
   type GithubStatus,
+  type GoogleStatus,
   type IntegrationStatuses,
   disconnectGithub,
   disconnectGoogle,
@@ -104,6 +105,9 @@ export interface ConnectionState extends ConnectionType {
   connected: boolean;
   // Display handle of the linked account (@login / email / workspace name), when known.
   account?: string | null;
+  // The stored OAuth grant is dead (invalid_grant) — only a fresh consent revives it.
+  // Rendered as an amber "Reconnect needed" state; the connect flow IS the reconnect flow.
+  needsReconnect?: boolean;
   // Extra GitHub detail (App installations / repo count) for the Settings expansion.
   github?: GithubStatus | null;
 }
@@ -124,7 +128,7 @@ export interface ConnectionsApi {
 
 function assemble(
   gh: GithubStatus | null,
-  google: { connected: boolean; email?: string } | null,
+  google: GoogleStatus | null,
   ints: IntegrationStatuses,
 ): ConnectionState[] {
   return CONNECTION_TYPES.map((c) => {
@@ -132,14 +136,24 @@ function assemble(
       return { ...c, connected: gh?.connected ?? false, account: gh?.login ? `@${gh.login}` : null, github: gh };
     }
     if (c.kind === "google") {
-      return { ...c, connected: google?.connected ?? false, account: google?.email ?? null };
+      return {
+        ...c,
+        connected: google?.connected ?? false,
+        account: google?.email ?? null,
+        needsReconnect: google?.needsReconnect ?? false,
+      };
     }
     const st = ints[c.key];
-    return { ...c, connected: st?.connected ?? false, account: st?.externalAccount ?? null };
+    return {
+      ...c,
+      connected: st?.connected ?? false,
+      account: st?.externalAccount ?? null,
+      needsReconnect: st?.needsReconnect ?? false,
+    };
   });
 }
 
-async function fetchAll(): Promise<[GithubStatus | null, { connected: boolean; email?: string } | null, IntegrationStatuses]> {
+async function fetchAll(): Promise<[GithubStatus | null, GoogleStatus | null, IntegrationStatuses]> {
   // Each family fails independently (e.g. dev-bypass mode has no GitHub/Google auth routes) —
   // a failed fetch just renders as "not connected" rather than breaking the whole list.
   return Promise.all([
