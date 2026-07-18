@@ -33,7 +33,7 @@ import { UnconnectedIntegrationsDialog } from "./components/workflow/Unconnected
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { cn } from "@/lib/utils";
+import { cn, browserTz } from "@/lib/utils";
 
 // The visual create/edit page for a workflow. A workflow is just existing Jungle pieces put
 // together — a trigger (schedule), a team of agents (with personas + integrations), and a
@@ -45,13 +45,6 @@ import { cn } from "@/lib/utils";
 // ---- trigger editor ----
 
 const WEEKDAY_CRON = "0 9 * * 1-5";
-function localTz(): string {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || "America/Los_Angeles";
-  } catch {
-    return "America/Los_Angeles";
-  }
-}
 
 // A tiny, friendly cron builder for the common cases (daily / weekdays at a time).
 function TriggerEditor({
@@ -63,7 +56,7 @@ function TriggerEditor({
 }) {
   const kind = trigger.type;
   const cron = trigger.type === "schedule" ? trigger.cron : WEEKDAY_CRON;
-  const tz = trigger.type === "schedule" ? trigger.timezone : localTz();
+  const tz = trigger.type === "schedule" ? trigger.timezone : browserTz();
 
   // Parse "M H * * D" into a friendly {hour, days} when it fits the simple shape.
   const parts = cron.split(" ");
@@ -86,7 +79,7 @@ function TriggerEditor({
           <button
             key={k}
             onClick={() =>
-              onChange(k === "schedule" ? { type: "schedule", cron: WEEKDAY_CRON, timezone: localTz() } : { type: k })
+              onChange(k === "schedule" ? { type: "schedule", cron: WEEKDAY_CRON, timezone: browserTz() } : { type: k })
             }
             className={cn(
               "flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors",

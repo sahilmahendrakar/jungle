@@ -3,6 +3,7 @@ import { CalendarClock, Hash, Loader2, MessageSquare, Play, Plus, Square, Users,
 import type { Workflow, WorkflowTemplate } from "./api";
 import { createWorkflowDraft, listWorkflows, listWorkflowTemplates, runWorkflow, stopWorkflowRun } from "./api";
 import { fmtRelative } from "./lib/chat";
+import { browserTz } from "./lib/utils";
 import { ViewShell } from "./components/chat/ViewShell";
 import { Scheduled } from "./Scheduled";
 import { navigate } from "./route";
@@ -164,10 +165,11 @@ export function Workflows({
   const reload = () => void listWorkflows().then(setWorkflows).catch(() => {});
 
   // Creating a draft (blank or from a template) drops you straight into the visual builder.
+  // The browser's timezone rides along so a template's default schedule runs on local time.
   async function newDraft(templateId?: string) {
     setCreating(templateId ?? "blank");
     try {
-      const draft = await createWorkflowDraft(templateId ? { templateId } : {});
+      const draft = await createWorkflowDraft({ templateId, timezone: browserTz() });
       navigate(`/workflows/${draft.id}/edit`);
     } catch (e) {
       alert((e as Error).message);

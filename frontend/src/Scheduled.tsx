@@ -16,7 +16,7 @@ import {
 } from "./api";
 import { fmtRelative } from "./lib/chat";
 import { avatarClass, initials } from "./lib/people";
-import { cn } from "./lib/utils";
+import { cn, browserTz } from "./lib/utils";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -69,14 +69,6 @@ const TIMEZONES: string[] = (() => {
   }
   return ["UTC", "America/Los_Angeles", "America/New_York", "Europe/London", "Asia/Tokyo"];
 })();
-
-function browserTz(): string {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-  } catch {
-    return "UTC";
-  }
-}
 
 // Filter chips are OR-combined derived views over a schedule, not a stored status — there's no
 // "cancelled" state in the schema (delete is permanent), so this covers the lifecycle people

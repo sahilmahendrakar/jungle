@@ -89,6 +89,9 @@ export async function createDraft(args: {
   createdBy: string | null;
   templateId?: string;
   name?: string;
+  // The builder passes the user's local (browser) timezone so a template's schedule trigger
+  // fires on their wall clock instead of the template's hardcoded one.
+  timezone?: string;
   // When set (the builder/HTTP path), template seats become real unprovisioned agents right
   // away so the builder can open real profile panels on them. The Architect's tool path omits
   // it — its seats materialize at finalize.
@@ -100,6 +103,13 @@ export async function createDraft(args: {
   }
   const template = args.templateId ? getWorkflowTemplate(args.templateId) : undefined;
   if (args.templateId && !template) throw new ApiError(400, `unknown template ${JSON.stringify(args.templateId)}`);
+  let trigger: WorkflowTrigger = template?.trigger ?? { type: "manual" };
+  if (trigger.type === "schedule" && args.timezone) {
+    if (!isValidTimeZone(args.timezone)) {
+      throw new ApiError(400, `timezone must be a valid IANA timezone (got ${JSON.stringify(args.timezone)})`);
+    }
+    trigger = { ...trigger, timezone: args.timezone };
+  }
   let row = await db.createWorkflow({
     workspaceId: args.workspaceId,
     name: args.name?.trim() || template?.name || "New workflow",
@@ -107,7 +117,7 @@ export async function createDraft(args: {
     emoji: template?.emoji ?? null,
     status: "draft",
     templateId: template?.id ?? null,
-    trigger: template?.trigger ?? { type: "manual" },
+    trigger,
     roster: template?.roster ?? [],
     playbook: template?.playbook ?? "",
     createdBy: args.createdBy,

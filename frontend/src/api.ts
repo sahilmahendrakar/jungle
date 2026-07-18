@@ -883,7 +883,7 @@ export function listWorkflowTemplates(): Promise<WorkflowTemplate[]> {
   }).then((r) => r.templates);
 }
 
-export function createWorkflowDraft(body: { templateId?: string; name?: string }): Promise<Workflow> {
+export function createWorkflowDraft(body: { templateId?: string; name?: string; timezone?: string }): Promise<Workflow> {
   return request<Workflow>(`/api/workflows`, {
     json: body,
     auth: true,

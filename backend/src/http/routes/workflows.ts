@@ -57,12 +57,13 @@ router.post(
   "/api/workflows",
   wrap(async (req, res) => {
     const me = await requireRequester(req);
-    const { templateId, name } = req.body ?? {};
+    const { templateId, name, timezone } = req.body ?? {};
     const row = await workflows.createDraft({
       workspaceId: me.workspace_id,
       createdBy: me.id,
       templateId: templateId ? String(templateId) : undefined,
       name: name ? String(name) : undefined,
+      timezone: timezone ? String(timezone) : undefined,
       materializeFor: me, // builder path: seats become real (unprovisioned) agents immediately
     });
     res.status(201).json(row);
