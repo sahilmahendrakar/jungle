@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { CalendarClock, Hash, Loader2, MessageSquare, Play, Plus, Square, Users, Workflow as WorkflowIcon, Zap } from "lucide-react";
+import { CalendarClock, Hash, Loader2, MessageSquare, Play, Plus, Square, Trash2, Users, Workflow as WorkflowIcon, Zap } from "lucide-react";
 import type { Workflow, WorkflowTemplate } from "./api";
-import { createWorkflowDraft, listWorkflows, listWorkflowTemplates, runWorkflow, stopWorkflowRun } from "./api";
+import { createWorkflowDraft, deleteWorkflow, listWorkflows, listWorkflowTemplates, runWorkflow, stopWorkflowRun } from "./api";
 import { fmtRelative } from "./lib/chat";
 import { ViewShell } from "./components/chat/ViewShell";
+import { DeleteWorkflowDialog } from "./components/workflow/DeleteWorkflowDialog";
 import { Scheduled } from "./Scheduled";
 import { navigate } from "./route";
 import { Badge } from "@/components/ui/badge";
@@ -45,12 +46,14 @@ function WorkflowCard({
   onOpen,
   onRun,
   onStop,
+  onDelete,
 }: {
   w: Workflow;
   busy: boolean;
   onOpen: (w: Workflow) => void;
   onRun: (w: Workflow) => void;
   onStop: (w: Workflow) => void;
+  onDelete: (w: Workflow) => void;
 }) {
   const trig = triggerLabel(w);
   const liveRun = w.last_run && (w.last_run.status === "running" || w.last_run.status === "stalled");
@@ -85,7 +88,7 @@ function WorkflowCard({
         )}
         {w.last_run && !liveRun && <span>Last run {fmtRelative(w.last_run.started_at)}</span>}
       </div>
-      <div className="mt-3 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+      <div className="mt-3 flex items-center gap-2" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
         {w.status === "draft" ? (
           <span className="text-xs text-muted-foreground">Draft — click to finish setting it up</span>
         ) : liveRun ? (
@@ -97,6 +100,18 @@ function WorkflowCard({
             {busy ? <Loader2 className="size-3 animate-spin" /> : <Zap className="size-3" />} Run now
           </Button>
         )}
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={busy}
+          data-testid="workflow-delete"
+          onClick={() => onDelete(w)}
+          aria-label="Delete workflow"
+          title="Delete workflow"
+          className="ml-auto size-7 px-0 text-muted-foreground hover:text-destructive"
+        >
+          <Trash2 className="size-3.5" />
+        </Button>
       </div>
     </div>
   );
@@ -142,6 +157,7 @@ export function Workflows({
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState<string | null>(null); // template id, or "blank"
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<Workflow | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -205,6 +221,20 @@ export function Workflows({
     }
   }
 
+  async function confirmDelete() {
+    if (!deleting) return;
+    setBusyId(deleting.id);
+    try {
+      await deleteWorkflow(deleting.id);
+      setDeleting(null);
+      reload();
+    } catch (e) {
+      alert((e as Error).message);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   return (
     <ViewShell
       icon={<WorkflowIcon className="size-5" />}
@@ -236,7 +266,7 @@ export function Workflows({
             ) : (
               <div className="grid gap-3 sm:grid-cols-2">
                 {workflows.map((w) => (
-                  <WorkflowCard key={w.id} w={w} busy={busyId === w.id} onOpen={openWorkflow} onRun={runNow} onStop={stopRun} />
+                  <WorkflowCard key={w.id} w={w} busy={busyId === w.id} onOpen={openWorkflow} onRun={runNow} onStop={stopRun} onDelete={setDeleting} />
                 ))}
               </div>
             )}
@@ -259,6 +289,12 @@ export function Workflows({
           )}
         </div>
       )}
+      <DeleteWorkflowDialog
+        workflow={deleting}
+        liveRun={!!deleting?.last_run && (deleting.last_run.status === "running" || deleting.last_run.status === "stalled")}
+        onOpenChange={(v) => !v && setDeleting(null)}
+        onConfirm={confirmDelete}
+      />
     </ViewShell>
   );
 }

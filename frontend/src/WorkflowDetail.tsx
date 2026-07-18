@@ -30,6 +30,7 @@ import {
 } from "./components/workflow/WorkflowCanvas";
 import { useConnections } from "./lib/connections";
 import { navigate } from "./route";
+import { DeleteWorkflowDialog } from "./components/workflow/DeleteWorkflowDialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -80,6 +81,7 @@ export function WorkflowDetail({
   const [playbook, setPlaybook] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const connections = useConnections(true);
   const connectedKeys = useMemo(() => connectedIntegrationKeys(connections.connections), [connections.connections]);
@@ -168,6 +170,18 @@ export function WorkflowDetail({
               <Zap className="size-3.5" /> Run now
             </Button>
           )}
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={busy}
+            data-testid="detail-delete"
+            onClick={() => setDeleting(true)}
+            aria-label="Delete workflow"
+            title="Delete workflow"
+            className="h-8 px-2 text-muted-foreground hover:text-destructive"
+          >
+            <Trash2 className="size-3.5" />
+          </Button>
         </div>
       </div>
       <p className="mb-4 text-sm text-muted-foreground" data-testid="trigger-sentence">
@@ -251,25 +265,19 @@ export function WorkflowDetail({
             <Button size="sm" disabled={busy || playbook === w.playbook} onClick={() => act(() => updateWorkflow(w.id, { playbook }))}>
               Save playbook
             </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={busy}
-              onClick={() => {
-                if (confirm(`Delete “${w.name}”? Its agents and channel stay; the workflow, its runs, and its trigger go away.`)) {
-                  void act(async () => {
-                    await deleteWorkflow(w.id);
-                    navigate("/workflows");
-                  });
-                }
-              }}
-              className="ml-auto text-destructive"
-            >
-              <Trash2 className="size-3.5" /> Delete workflow
-            </Button>
           </div>
         </div>
       )}
+
+      <DeleteWorkflowDialog
+        workflow={deleting ? w : null}
+        liveRun={!!liveRun}
+        onOpenChange={setDeleting}
+        onConfirm={async () => {
+          await deleteWorkflow(w.id);
+          navigate("/workflows");
+        }}
+      />
     </ViewShell>
   );
 }
