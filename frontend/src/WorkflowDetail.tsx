@@ -148,6 +148,10 @@ export function WorkflowDetail({
           {w.status === "draft" ? <Badge variant="secondary">Draft</Badge> : w.status === "paused" ? <Badge variant="secondary">Paused</Badge> : <Badge variant="outline" className="text-primary">Active</Badge>}
         </span>
         <div className="ml-auto flex items-center gap-2">
+          {/* Destructive secondary action: icon-only (universal glyph + tooltip/aria) but the
+              SAME height as the row's labeled buttons (size-8 = h-8 sm) — a shorter box floats
+              off the row's rhythm and reads as a stray element. Outline at rest, destructive
+              border + text on hover. */}
           <Button
             variant="outline"
             size="sm"
@@ -156,7 +160,7 @@ export function WorkflowDetail({
             onClick={() => setDeleting(true)}
             aria-label="Delete workflow"
             title="Delete workflow"
-            className="size-7 px-0 text-muted-foreground hover:border-destructive hover:text-destructive"
+            className="size-8 px-0 text-muted-foreground hover:border-destructive hover:text-destructive"
           >
             <Trash2 className="size-3.5" />
           </Button>
