@@ -200,6 +200,17 @@ export function groupTurns(events: AgentEvent[]): Turn[] {
   return out;
 }
 
+// A turn is worth showing only if it produces at least one renderable transcript item.
+// SDK agents emit many hidden events (thinking_tokens, task_progress, tool_result updates)
+// that merge into turns but create no visible rows, so callers can filter empty turns.
+export function turnHasVisibleItems(turn: Turn): boolean {
+  return buildItems(turn.events).length > 0;
+}
+
+export function countVisibleTurns(events: AgentEvent[]): number {
+  return groupTurns(events).filter(turnHasVisibleItems).length;
+}
+
 // System subtypes that are pure noise in a human transcript.
 const HIDDEN_SYSTEM = new Set(["thinking_tokens", "task_progress", "task_updated"]);
 
