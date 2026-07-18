@@ -1,5 +1,4 @@
 import {
-  Bot,
   Hash,
   Home,
   LogOut,
@@ -61,13 +60,12 @@ function ThemeToggle() {
   );
 }
 
-// The left nav shell: workspace header, Threads/Channels/DMs/People lists, and the user footer.
+// The left nav shell: workspace header, Threads/Channels/DMs lists, and the user footer.
 // Desktop (md+): in-flow, collapsible via a drag-resizable width. Mobile (<md): a fixed off-canvas
 // drawer toggled by `drawerOpen`. Purely presentational — every action is a callback.
 export function Sidebar({
   rooms,
   dms,
-  others,
   selected,
   me,
   threadsListOpen,
@@ -78,9 +76,7 @@ export function Sidebar({
   resizing,
   leftWidth,
   personByHandle,
-  dmChannelWith,
   onSelectChannel,
-  onOpenDm,
   onOpenThreads,
   onOpenHome,
   homeActive,
@@ -107,7 +103,6 @@ export function Sidebar({
 }: {
   rooms: Channel[];
   dms: Channel[];
-  others: Participant[];
   selected: string | null;
   me: Participant | undefined;
   threadsListOpen: boolean;
@@ -118,9 +113,7 @@ export function Sidebar({
   resizing: boolean;
   leftWidth: number;
   personByHandle: (h?: string | null) => Participant | undefined;
-  dmChannelWith: (handle: string) => Channel | undefined;
   onSelectChannel: (id: string) => void;
-  onOpenDm: (otherId: string) => void;
   onOpenThreads: () => void;
   onOpenHome: () => void;
   homeActive: boolean;
@@ -314,37 +307,6 @@ export function Sidebar({
                 })}
               </>
             )}
-
-            {/* People */}
-            <div className="h-3" />
-            <SectionHeader
-              label="People"
-              actionLabel="Add agent"
-              onAction={onAddAgent}
-              actionTestId="add-agent-toggle"
-            />
-            {others.map((p) => (
-              <NavItem
-                key={p.id}
-                testId="people-item"
-                active={false}
-                onClick={() => {
-                  const existing = dmChannelWith(p.handle);
-                  if (existing) onSelectChannel(existing.id);
-                  else onOpenDm(p.id);
-                }}
-                icon={<PersonAvatar name={p.display_name} handle={p.handle} size="sm" />}
-                label={p.display_name}
-                title={`@${p.handle}`}
-                status={p.kind === "agent" ? p.status : undefined}
-                trailing={
-                  p.kind === "agent" ? (
-                    <Bot className="size-3.5 text-sidebar-foreground/50" />
-                  ) : undefined
-                }
-              />
-            ))}
-            {others.length === 0 && <EmptyHint>No one else yet.</EmptyHint>}
           </div>
         </div>
 
