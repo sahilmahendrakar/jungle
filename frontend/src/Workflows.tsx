@@ -69,13 +69,9 @@ function WorkflowCard({
       <div className="flex items-center gap-2">
         {w.emoji && <span className="text-lg leading-none">{w.emoji}</span>}
         <span className="min-w-0 flex-1 truncate text-sm font-semibold">{w.name}</span>
-        {statusBadge(w)}
-        {/* Destructive lives at the card's corner, revealed on hover/focus — never next to the
-            primary Run button (misclick territory). The whole card is one big click target, so
-            the button stops propagation on both click and keys. */}
         <Button
-          size="sm"
-          variant="ghost"
+          variant="outline"
+          size="icon"
           disabled={busy}
           data-testid="workflow-delete"
           onClick={(e) => {
@@ -85,10 +81,11 @@ function WorkflowCard({
           onKeyDown={(e) => e.stopPropagation()}
           aria-label="Delete workflow"
           title="Delete workflow"
-          className="-mr-1 size-6 shrink-0 px-0 text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100"
+          className="ml-auto text-muted-foreground hover:border-destructive hover:bg-destructive/5 hover:text-destructive"
         >
-          <Trash2 className="size-3.5" />
+          <Trash2 className="size-4" />
         </Button>
+        {statusBadge(w)}
       </div>
       {w.description && (
         <p className="mt-1.5 line-clamp-2 text-xs leading-relaxed text-muted-foreground">{w.description}</p>
