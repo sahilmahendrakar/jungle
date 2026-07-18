@@ -1315,8 +1315,9 @@ export function App({
           </div>
         )}
 
-        {/* Composer */}
+        {/* Composer — draft persists per channel across navigation (draftKey = channel id) */}
         <Composer
+          draftKey={selected}
           headerTitle={headerTitle}
           isDm={sel?.kind === "dm"}
           people={people}
