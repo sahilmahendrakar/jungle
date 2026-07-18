@@ -1063,6 +1063,7 @@ export function App({
         }}
         workingChannelIds={workingChannelIds}
         onNewChannel={() => setShowNew(true)}
+        onAddAgent={() => setShowAddAgent(true)}
         onCollapse={() => {
           setSidebarOpen(false); // desktop: collapse
           setDrawerOpen(false); // mobile: close the off-canvas drawer

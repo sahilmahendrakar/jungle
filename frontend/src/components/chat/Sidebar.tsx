@@ -90,6 +90,7 @@ export function Sidebar({
   onOpenSearch,
   workingChannelIds,
   onNewChannel,
+  onAddAgent,
   onCollapse,
   onOpenProfile,
   onOpenSettings,
@@ -126,6 +127,7 @@ export function Sidebar({
   onOpenSearch: () => void;
   workingChannelIds: Set<string>; // channels with a turn currently running (pulsing dot)
   onNewChannel: () => void;
+  onAddAgent: () => void;
   onCollapse: () => void;
   onOpenProfile: (id: string) => void;
   onOpenSettings: () => void;
