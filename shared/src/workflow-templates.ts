@@ -77,23 +77,23 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
     name: "Daily standup digest",
     emoji: "📋",
     description:
-      "One agent collects yesterday's PRs, tracker movement, and blockers into a single morning digest posted to a channel.",
+      "One agent collects yesterday's activity across connected tools and posts a single morning brief to a channel.",
     trigger: { type: "schedule", cron: "30 7 * * 1-5", timezone: "America/Los_Angeles" },
     roster: [
       {
         role: "Reporter",
         handle_seed: "daily",
         duties:
-          "Collect what changed since yesterday — merged/open PRs, issue tracker movement, anything that looks blocked — and post one tight digest to the destination channel.",
-        integrations: ["github", "linear"],
+          "Collect what happened since yesterday across the connected tools — key updates, progress, and anything blocked or needing attention — and post one tight brief to the destination channel.",
+        integrations: ["gmail", "github", "linear", "granola", "x"],
       },
     ],
     playbook:
-      "Each run: gather yesterday's activity from the connected tools and post ONE digest " +
+      "Each run: gather yesterday's activity from the connected tools and post ONE brief " +
       "message to the destination channel named in your instructions (default: this workflow's " +
-      "home channel). Lead with what shipped, then what's in flight, then blockers. No filler — " +
-      "if nothing happened, one line saying so. Then post \"Run complete:\" plus a one-line " +
-      "summary in the run thread.",
+      "home channel). Summarize what happened since yesterday, what's moving, and anything stuck " +
+      "or needing attention. No filler — if nothing happened, one line saying so. Then post " +
+      "\"Run complete:\" plus a one-line summary in the run thread.",
   },
   {
     id: "lead-research",
