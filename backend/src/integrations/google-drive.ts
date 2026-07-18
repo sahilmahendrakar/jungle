@@ -2,6 +2,7 @@ import type { ConfigureFrame } from "@jungle/shared";
 import * as db from "../db";
 import * as google from "../google";
 import { ApiError } from "../http/errors";
+import { isInvalidGrantError } from "./oauth";
 import type { IntegrationAdapter } from "./types";
 
 // Google Drive integration: the agent can search, read, and (with approval) create/update files in
@@ -18,13 +19,24 @@ function requireApprovalOf(config: Record<string, unknown>): boolean {
 
 // A valid access token for a user's Drive connection, refreshing from the stored refresh token if
 // near expiry (mirrors google.ts:getValidGmailToken but reads/writes integration_connections).
+// A permanently-dead grant (invalid_grant / no refresh token) flags the connection
+// needs_reconnect; a successful refresh clears it (see migration 027).
 async function getValidDriveToken(participantId: string): Promise<string> {
   const row = await db.getIntegrationConnection(participantId, KEY);
   if (!row) throw new Error(`participant ${participantId} has no Google Drive connection`);
   const exp = row.access_expires_at ? new Date(row.access_expires_at).getTime() : Infinity;
   if (exp - Date.now() > 60_000) return row.access_token;
-  if (!row.refresh_token) throw new Error("Drive token expired and no refresh token; reconnect");
-  const tok = await google.googleRefreshToken(row.refresh_token);
+  if (!row.refresh_token) {
+    await db.setIntegrationNeedsReconnect(participantId, KEY, true);
+    throw new Error("Drive token expired and no refresh token; reconnect");
+  }
+  let tok: Awaited<ReturnType<typeof google.googleRefreshToken>>;
+  try {
+    tok = await google.googleRefreshToken(row.refresh_token);
+  } catch (e) {
+    if (isInvalidGrantError(e)) await db.setIntegrationNeedsReconnect(participantId, KEY, true);
+    throw e;
+  }
   await db.updateIntegrationTokens({
     participantId,
     key: KEY,
@@ -32,6 +44,8 @@ async function getValidDriveToken(participantId: string): Promise<string> {
     refreshToken: tok.refreshToken ?? row.refresh_token,
     accessExpiresAt: tok.accessExpiresAt,
   });
+  // Self-heal: a successful refresh proves the grant is alive again.
+  if (row.needs_reconnect) await db.setIntegrationNeedsReconnect(participantId, KEY, false);
   return tok.accessToken;
 }
 
@@ -48,6 +62,20 @@ function promptBlock(email: string, requireApproval: boolean): string {
       : `creating and updating run without a separate approval, so be careful. `) +
     `Only touch this Drive when you're actually asked to; never create or change files as an ` +
     `incidental side effect.`
+  );
+}
+
+// Shown when the integration is attached but the backing connection is permanently dead
+// (needs_reconnect) or gone — so the agent can name the problem instead of silently having no
+// drive_* tools (mirrors gmail.ts's disconnectedBlock).
+function disconnectedBlock(email: string): string {
+  return (
+    `\n\n— Google Drive: connection expired —\n` +
+    `Your Google Drive integration (${email}) is attached, but the backing Google authorization ` +
+    `has expired or been revoked, so the drive_* tools are NOT available this session. Do NOT ` +
+    `silently skip Drive work because of this. If the task at hand involves Drive, tell the user: ` +
+    `your Google Drive connection expired and needs to be reconnected in Settings → Connections — ` +
+    `then you can pick the work back up.`
   );
 }
 
@@ -76,6 +104,10 @@ export const googleDriveAdapter: IntegrationAdapter = {
       accessToken = await getValidDriveToken(backing);
     } catch (e) {
       console.error(`runner[${agent.id}] configure: could not mint Drive token:`, e);
+      // Permanently dead or disconnected → tell the agent (see gmail.ts); transient → silent.
+      const row = await db.getIntegrationConnection(backing, KEY).catch(() => null);
+      const email = typeof config.email === "string" && config.email ? config.email : "your Drive";
+      if (!row || row.needs_reconnect) return disconnectedBlock(email);
       return null;
     }
     const email = typeof config.email === "string" && config.email ? config.email : "your Drive";

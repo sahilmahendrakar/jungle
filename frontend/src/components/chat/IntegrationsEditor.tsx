@@ -101,6 +101,11 @@ function rowSummary(
   if (conn && !conn.connected && connectionRequired(type)) {
     return { text: `Connect ${conn.name} to use`, warn: true };
   }
+  // Attached, but the backing connection's grant died (invalid_grant) — the agent's prompt tells
+  // it to say so, and this warns the human viewing the profile (mirrors the Settings badge).
+  if (conn && conn.connected && conn.needsReconnect && connectionRequired(type)) {
+    return { text: `${conn.name} connection expired — reconnect in Settings`, warn: true };
+  }
   if (type.key === "github") {
     return config.repo ? { text: config.repo, warn: false } : { text: "Choose a repository", warn: true };
   }

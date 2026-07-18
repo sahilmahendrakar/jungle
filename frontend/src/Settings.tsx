@@ -31,7 +31,8 @@ import {
 
 // One thin connection row: brand tile + name + live status, expanding on click to the
 // connect/disconnect controls (and, for GitHub, the App-installation details).
-function ConnectionRow({
+// Exported for the connections mocks/tests.
+export function ConnectionRow({
   conn,
   expanded,
   onToggle,
@@ -59,7 +60,12 @@ function ConnectionRow({
         <BrandTile brand={conn.key} />
         <span className="min-w-0 flex-1">
           <span className="block text-sm font-medium leading-tight">{conn.name}</span>
-          {conn.connected ? (
+          {conn.connected && conn.needsReconnect ? (
+            <span className="flex items-center gap-1 text-xs text-amber-600">
+              <span className="size-1.5 rounded-full bg-amber-500" />
+              <span className="truncate">Reconnect needed{conn.account ? ` · ${conn.account}` : ""}</span>
+            </span>
+          ) : conn.connected ? (
             <span className="flex items-center gap-1 text-xs text-emerald-600">
               <span className="size-1.5 rounded-full bg-emerald-500" />
               <span className="truncate">{conn.account || "Connected"}</span>
@@ -68,11 +74,18 @@ function ConnectionRow({
             <span className="text-xs text-muted-foreground">Not connected</span>
           )}
         </span>
-        {!conn.connected && (
+        {!conn.connected ? (
           <span className="rounded-full border px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
             Connect
           </span>
-        )}
+        ) : conn.needsReconnect ? (
+          <span
+            data-testid={`connection-reconnect-badge-${conn.key}`}
+            className="rounded-full border border-amber-500/50 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-600"
+          >
+            Reconnect
+          </span>
+        ) : null}
         <ChevronDown
           className={cn("size-4 shrink-0 text-muted-foreground transition-transform", expanded && "rotate-180")}
         />
@@ -81,6 +94,30 @@ function ConnectionRow({
       {expanded && (
         <div className="space-y-3 border-t bg-muted/30 px-3 py-3">
           <p className="text-xs leading-relaxed text-muted-foreground">{conn.description}</p>
+
+          {/* A dead OAuth grant (invalid_grant) looks "connected" but agents can't use it —
+              reconnecting rides the same consent flow as connecting and revives the grant. */}
+          {conn.connected && conn.needsReconnect && (
+            <div
+              className="space-y-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3"
+              data-testid={`settings-reconnect-${conn.key}`}
+            >
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                This connection's authorization expired, so agents can't use it right now.
+                Reconnect to restore access — it takes a few seconds.
+              </p>
+              <Button
+                data-testid={`settings-reconnect-button-${conn.key}`}
+                size="sm"
+                onClick={onConnect}
+                disabled={connecting}
+                className="gap-1.5"
+              >
+                {connecting ? <Loader2 className="size-3.5 animate-spin" /> : null}
+                {connecting ? "Waiting for authorization…" : `Reconnect ${conn.name}`}
+              </Button>
+            </div>
+          )}
 
           {/* GitHub also surfaces its App installation state — repo access rides the App, not
               just the account link. */}

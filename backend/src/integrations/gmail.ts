@@ -36,6 +36,22 @@ function promptBlock(gmail: GmailIntegrationConfig): string {
   );
 }
 
+// Shown when the integration is attached but the backing Google grant is permanently dead
+// (needs_reconnect) or gone entirely. Without this the agent just loses the gmail_* tools with
+// no explanation and silently skips email work its persona told it to do — the user sees
+// "nothing happened" and nobody knows why. This block lets the agent name the problem and the fix.
+function disconnectedBlock(email: string): string {
+  return (
+    `\n\n— Gmail: connection expired —\n` +
+    `Your Gmail integration (${email}) is attached, but the backing Google authorization has ` +
+    `expired or been revoked, so the gmail_* tools are NOT available this session — you have no ` +
+    `way to read or send email right now. Do NOT silently skip email work or report "no activity" ` +
+    `because of this. If the task at hand involves email, tell the user: your Gmail connection ` +
+    `expired and needs to be reconnected in Settings → Connections — then you can pick the work ` +
+    `back up.`
+  );
+}
+
 export const gmailAdapter: IntegrationAdapter = {
   key: "gmail",
 
@@ -56,7 +72,8 @@ export const gmailAdapter: IntegrationAdapter = {
 
   // Mint the Gmail token up front so the prompt only advertises Gmail when it's actually usable
   // (e.g. not when the backing user disconnected Google) — otherwise the agent would see gmail_*
-  // instructions with no tools behind them.
+  // instructions with no tools behind them. When the grant is permanently dead we don't stay
+  // silent either: the prompt gets a "connection expired" block so the agent can tell the user.
   async buildGrant(frame: ConfigureFrame, agent, config): Promise<string | null> {
     const gmail = parseGmailConfig(config);
     if (!gmail || !google.isConfigured()) return null;
@@ -66,6 +83,11 @@ export const gmailAdapter: IntegrationAdapter = {
       return promptBlock(gmail);
     } catch (e) {
       console.error(`runner[${agent.id}] configure: could not mint gmail token:`, e);
+      // Permanently dead (flagged needs_reconnect by getValidGmailToken) or disconnected
+      // entirely → say so. A transient failure (network blip, Google 5xx) stays silent —
+      // the flag is deliberately not set for those.
+      const id = await db.getGoogleIdentity(gmail.backingParticipantId).catch(() => null);
+      if (!id || id.needs_reconnect) return disconnectedBlock(gmail.email);
       return null;
     }
   },
