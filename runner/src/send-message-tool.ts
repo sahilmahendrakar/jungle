@@ -419,14 +419,14 @@ export function createJungleMcpServer(bridges: JungleBridges) {
     .array(
       z.object({
         role: z.string().describe('Seat name, e.g. "Inbox triage" or "Manager"'),
-        handle_seed: z.string().describe('Suggested handle if a NEW agent is created, e.g. "scout"'),
+        handle_seed: z.string().describe('Handle hint for the new agent, e.g. "scout" (an animal name is assigned if omitted)'),
         duties: z.string().describe("Prose duties for this seat (becomes the agent's persona)"),
-        integrations: z.array(z.string()).optional().describe('Integration keys this seat wants, e.g. ["gmail","github"]'),
-        participant_handle: z.string().optional().describe("Bind an EXISTING agent to this seat by @handle instead of creating one"),
+        integrations: z.array(z.string()).optional().describe('Integration keys this seat needs, e.g. ["gmail"] or ["github"]'),
+        repo: z.string().optional().describe('owner/name of the GitHub repo, when integrations includes "github"'),
       }),
     )
     .max(8)
-    .describe("The team, in order. roster[0] is the intake seat — it receives each run's kickoff.");
+    .describe("The team, in order. roster[0] is the intake seat — it receives each run's kickoff. Every seat becomes a fresh agent.");
 
   const workflowListTemplatesTool = tool(
     "workflow_list_templates",

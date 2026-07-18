@@ -151,7 +151,12 @@ async function main() {
       fin.json.roster[0].participant_id,
     ])
   ).rows[0];
-  ok("member agent created (@daily)", agentRow?.handle === "daily", agentRow?.handle);
+  // Seats get a Jungle animal preset identity at draft creation (not the template handle_seed).
+  ok(
+    "member agent created with preset identity",
+    !!agentRow && agentRow.handle === fin.json.roster[0].handle_seed,
+    agentRow?.handle,
+  );
 
   const backing = (
     await pool.query(`select * from schedules where workflow_id = $1`, [draft.id])
@@ -319,11 +324,12 @@ async function main() {
     trigger: { type: "manual" },
     roster: [
       { role: "Solo", handle_seed: "solo", duties: "Do the thing." },
-      { role: "Helper", handle_seed: "helper", duties: "Help.", participant_handle: `@${agentRow.handle}` },
+      { role: "Helper", handle_seed: "helper", duties: "Help." },
     ],
     playbook: "Do the thing, then post Run complete.",
   });
-  ok("draft shaped via tool (incl. binding existing agent by handle)", set.ok && /@daily/.test(set.text ?? ""), set.error ?? set.text);
+  // Workflows always create fresh agents per seat (no binding of existing agents).
+  ok("draft shaped via tool", set.ok && /Solo/.test(set.text ?? "") && /Helper/.test(set.text ?? ""), set.error ?? set.text);
 
   const finTool = await toolCall("workflow_finalize", "t4", { draftId: created.draftId });
   ok("finalized via tool", finTool.ok && !!finTool.workflowId, JSON.stringify(finTool));

@@ -63,8 +63,26 @@ router.post(
       createdBy: me.id,
       templateId: templateId ? String(templateId) : undefined,
       name: name ? String(name) : undefined,
+      materializeFor: me, // builder path: seats become real (unprovisioned) agents immediately
     });
     res.status(201).json(row);
+  }),
+);
+
+// Builder seat management (drafts only): seats are real unprovisioned agents.
+router.post(
+  "/api/workflows/:id/seats",
+  wrap(async (req, res) => {
+    const { me, row } = await requireWorkflow(req);
+    res.status(201).json(await workflows.addSeat(row, me, req.body?.role ? String(req.body.role) : undefined));
+  }),
+);
+
+router.delete(
+  "/api/workflows/:id/seats/:participantId",
+  wrap(async (req, res) => {
+    const { row } = await requireWorkflow(req);
+    res.json(await workflows.removeSeat(row, String(req.params.participantId)));
   }),
 );
 
@@ -156,6 +174,9 @@ router.delete(
   "/api/workflows/:id",
   wrap(async (req, res) => {
     const { me, row } = await requireWorkflow(req);
+    // A draft's agents only ever existed for the draft — delete them too. A live workflow keeps
+    // its agents (they have run history); only the workflow object + runs + schedule cascade.
+    await workflows.cleanupDraftAgents(row);
     await db.deleteWorkflow(row.id);
     broadcastWorkspace(me.workspace_id, { type: "workflow_changed", workflowId: row.id, action: "deleted" });
     res.json({ ok: true });

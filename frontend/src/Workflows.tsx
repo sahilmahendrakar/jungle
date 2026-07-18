@@ -1,49 +1,17 @@
 import { useEffect, useState } from "react";
-import {
-  Bot,
-  CalendarClock,
-  Hash,
-  Loader2,
-  MessageSquare,
-  Play,
-  Square,
-  Trash2,
-  Users,
-  Workflow as WorkflowIcon,
-  Zap,
-} from "lucide-react";
-import type { Participant, Workflow, WorkflowRole, WorkflowTemplate } from "./api";
-import {
-  createWorkflowDraft,
-  finalizeWorkflow,
-  listParticipants,
-  listWorkflows,
-  listWorkflowTemplates,
-  openWorkflowBuilder,
-  runWorkflow,
-  stopWorkflowRun,
-  updateWorkflow,
-} from "./api";
+import { CalendarClock, Hash, Loader2, MessageSquare, Play, Plus, Square, Users, Workflow as WorkflowIcon, Zap } from "lucide-react";
+import type { Workflow, WorkflowTemplate } from "./api";
+import { createWorkflowDraft, listWorkflows, listWorkflowTemplates, runWorkflow, stopWorkflowRun } from "./api";
 import { fmtRelative } from "./lib/chat";
 import { ViewShell } from "./components/chat/ViewShell";
 import { Scheduled } from "./Scheduled";
+import { navigate } from "./route";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 
-// The Workflows page: your workflows (teams of agents on a trigger), the template gallery, and
-// the workspace's plain scheduled tasks (this page absorbed the old /scheduled destination — a
-// schedule is just a one-agent workflow without the ceremony). Workflow detail/builder routes
-// hang off /workflows/:id.
+// The Workflows page: your workflows, the template gallery, and the workspace's plain scheduled
+// tasks (this page absorbed the old /scheduled destination). Creating or editing a workflow
+// happens on the visual builder page (/workflows/:id/edit); this page only lists and launches.
 
 function triggerLabel(w: Workflow): { icon: React.ReactNode; text: string } {
   const t = w.trigger;
@@ -53,9 +21,7 @@ function triggerLabel(w: Workflow): { icon: React.ReactNode; text: string } {
       text: w.next_run_at ? `Next run ${fmtRelative(w.next_run_at)}` : "On a schedule",
     };
   }
-  if (t.type === "channel_message") {
-    return { icon: <MessageSquare className="size-3" />, text: "Starts from a message" };
-  }
+  if (t.type === "channel_message") return { icon: <MessageSquare className="size-3" />, text: "Starts from a message" };
   return { icon: <Zap className="size-3" />, text: "Run manually" };
 }
 
@@ -121,26 +87,13 @@ function WorkflowCard({
       </div>
       <div className="mt-3 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
         {w.status === "draft" ? (
-          <span className="text-xs text-muted-foreground">Click to review &amp; create the team</span>
+          <span className="text-xs text-muted-foreground">Draft — click to finish setting it up</span>
         ) : liveRun ? (
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={busy}
-            data-testid="workflow-stop"
-            onClick={() => onStop(w)}
-            className="h-7 text-xs"
-          >
+          <Button size="sm" variant="outline" disabled={busy} data-testid="workflow-stop" onClick={() => onStop(w)} className="h-7 text-xs">
             <Square className="size-3" /> Stop run
           </Button>
         ) : (
-          <Button
-            size="sm"
-            disabled={busy || w.status === "paused"}
-            data-testid="workflow-run"
-            onClick={() => onRun(w)}
-            className="h-7 text-xs"
-          >
+          <Button size="sm" disabled={busy || w.status === "paused"} data-testid="workflow-run" onClick={() => onRun(w)} className="h-7 text-xs">
             {busy ? <Loader2 className="size-3 animate-spin" /> : <Zap className="size-3" />} Run now
           </Button>
         )}
@@ -149,163 +102,9 @@ function WorkflowCard({
   );
 }
 
-// Review & create: the draft -> active step. Shows the team (with per-role "create new" vs an
-// existing agent), the trigger, and the editable playbook — one Create button does the rest
-// (agents, home channel, schedule). The conversational builder replaces most of this later; the
-// dialog IS the fallback editor.
-function FinalizeDialog({
-  workflow,
-  onClose,
-  onCreated,
-}: {
-  workflow: Workflow;
-  onClose: () => void;
-  onCreated: (w: Workflow) => void;
-}) {
-  const [roster, setRoster] = useState<WorkflowRole[]>(workflow.roster);
-  const [playbook, setPlaybook] = useState(workflow.playbook);
-  const [agents, setAgents] = useState<Participant[]>([]);
-  const [creating, setCreating] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    void listParticipants()
-      .then((ps) => setAgents(ps.filter((p) => p.kind === "agent")))
-      .catch(() => {});
-  }, []);
-
-  const trig = workflow.trigger;
-  const trigText =
-    trig.type === "schedule"
-      ? `On a schedule (${trig.cron}, ${trig.timezone})`
-      : trig.type === "channel_message"
-        ? "When someone @mentions the first agent in the home channel"
-        : "Run manually";
-
-  async function create() {
-    setCreating(true);
-    setError(null);
-    try {
-      await updateWorkflow(workflow.id, { roster, playbook });
-      const created = await finalizeWorkflow(workflow.id);
-      onCreated(created);
-    } catch (e) {
-      setError((e as Error).message);
-      setCreating(false);
-    }
-  }
-
+function TemplateCard({ t, busy, onUse }: { t: WorkflowTemplate; busy: boolean; onUse: (t: WorkflowTemplate) => void }) {
   return (
-    <Dialog open onOpenChange={(v) => !v && !creating && onClose()}>
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>
-            {workflow.emoji} {workflow.name}
-          </DialogTitle>
-          <DialogDescription>
-            Creating this workflow sets up the team below, a home channel for its runs, and the
-            trigger. Nothing runs until the trigger fires (or you hit Run now).
-          </DialogDescription>
-        </DialogHeader>
-
-        {/* min-w-0: DialogContent is a grid; without it these rows' nowrap text refuses to
-            shrink and overflows the dialog's right edge. */}
-        <div className="min-w-0 space-y-4">
-          <div className="min-w-0">
-            <Label className="text-xs uppercase tracking-wide text-muted-foreground">Team</Label>
-            <div className="mt-1.5 space-y-2">
-              {roster.map((r, i) => (
-                <div key={i} className="flex min-w-0 items-center gap-2.5 rounded-lg border p-2.5">
-                  <Bot className="size-4 shrink-0 text-muted-foreground" />
-                  <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium">
-                      {r.role}
-                      {i === 0 && (
-                        <span className="ml-1.5 text-[10px] font-semibold uppercase text-primary">goes first</span>
-                      )}
-                    </div>
-                    <div className="truncate text-xs text-muted-foreground" title={r.duties}>
-                      {r.duties}
-                    </div>
-                  </div>
-                  <select
-                    data-testid="role-binding"
-                    className="h-8 shrink-0 rounded-md border bg-background px-2 text-xs"
-                    value={r.participant_id ?? ""}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      setRoster((prev) =>
-                        prev.map((role, j) =>
-                          j === i
-                            ? v
-                              ? { ...role, participant_id: v }
-                              : (({ participant_id: _drop, ...rest }) => rest)(role)
-                            : role,
-                        ),
-                      );
-                    }}
-                  >
-                    <option value="">New agent (@{r.handle_seed})</option>
-                    {agents.map((a) => (
-                      <option key={a.id} value={a.id}>
-                        @{a.handle}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div>
-            <Label className="text-xs uppercase tracking-wide text-muted-foreground">Trigger</Label>
-            <p className="mt-1 text-sm">{trigText}</p>
-          </div>
-
-          <div>
-            <Label htmlFor="wf-playbook" className="text-xs uppercase tracking-wide text-muted-foreground">
-              Playbook — how the team runs
-            </Label>
-            <Textarea
-              id="wf-playbook"
-              value={playbook}
-              onChange={(e) => setPlaybook(e.target.value)}
-              rows={5}
-              className="mt-1.5 text-xs leading-relaxed"
-            />
-          </div>
-
-          {error && <p className="text-sm text-destructive">{error}</p>}
-        </div>
-
-        <DialogFooter>
-          <Button variant="outline" disabled={creating} onClick={onClose}>
-            Cancel
-          </Button>
-          <Button data-testid="workflow-create" disabled={creating} onClick={create}>
-            {creating ? <Loader2 className="size-4 animate-spin" /> : null}
-            {creating ? "Creating team…" : "Create workflow"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function TemplateCard({
-  t,
-  busy,
-  onUse,
-}: {
-  t: WorkflowTemplate;
-  busy: boolean;
-  onUse: (t: WorkflowTemplate) => void;
-}) {
-  return (
-    <div
-      data-testid="workflow-template-card"
-      className="flex flex-col rounded-xl border bg-card p-4 shadow-sm"
-    >
+    <div data-testid="workflow-template-card" className="flex flex-col rounded-xl border bg-card p-4 shadow-sm">
       <div className="flex items-center gap-2">
         <span className="text-lg leading-none">{t.emoji}</span>
         <span className="text-sm font-semibold">{t.name}</span>
@@ -316,14 +115,7 @@ function TemplateCard({
           <Users className="size-3" />
           {t.roster.length} agent{t.roster.length === 1 ? "" : "s"}
         </span>
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={busy}
-          onClick={() => onUse(t)}
-          className="ml-auto h-7 text-xs"
-          data-testid="use-template"
-        >
+        <Button size="sm" variant="outline" disabled={busy} onClick={() => onUse(t)} className="ml-auto h-7 text-xs" data-testid="use-template">
           {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Play className="size-3.5" />}
           Use template
         </Button>
@@ -338,20 +130,17 @@ export function Workflows({
   onOpenDrawer,
   onExpandSidebar,
   onOpenWorkflow,
-  onOpenBuilderDm,
 }: {
   workspaceId: string;
   sidebarOpen: boolean;
   onOpenDrawer: () => void;
   onExpandSidebar: () => void;
   onOpenWorkflow: (w: Workflow) => void;
-  onOpenBuilderDm: (dmChannelId: string) => void;
 }) {
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [templates, setTemplates] = useState<WorkflowTemplate[]>([]);
   const [loading, setLoading] = useState(true);
-  const [usingTemplate, setUsingTemplate] = useState<string | null>(null);
-  const [finalizing, setFinalizing] = useState<Workflow | null>(null);
+  const [creating, setCreating] = useState<string | null>(null); // template id, or "blank"
   const [busyId, setBusyId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -372,18 +161,26 @@ export function Workflows({
     };
   }, [workspaceId]);
 
-  async function useTemplate(t: WorkflowTemplate) {
-    setUsingTemplate(t.id);
+  const reload = () => void listWorkflows().then(setWorkflows).catch(() => {});
+
+  // Creating a draft (blank or from a template) drops you straight into the visual builder.
+  async function newDraft(templateId?: string) {
+    setCreating(templateId ?? "blank");
     try {
-      const draft = await createWorkflowDraft({ templateId: t.id });
-      setWorkflows((prev) => [draft, ...prev]);
-      setFinalizing(draft); // straight into review & create — the draft alone does nothing
+      const draft = await createWorkflowDraft(templateId ? { templateId } : {});
+      navigate(`/workflows/${draft.id}/edit`);
+    } catch (e) {
+      alert((e as Error).message);
     } finally {
-      setUsingTemplate(null);
+      setCreating(null);
     }
   }
 
-  const reload = () => void listWorkflows().then(setWorkflows).catch(() => {});
+  function openWorkflow(w: Workflow) {
+    // Drafts open the builder to finish setup; live workflows open their detail page.
+    navigate(w.status === "draft" ? `/workflows/${w.id}/edit` : `/workflows/${w.id}`);
+    if (w.status !== "draft") onOpenWorkflow(w);
+  }
 
   async function runNow(w: Workflow) {
     setBusyId(w.id);
@@ -408,26 +205,6 @@ export function Workflows({
     }
   }
 
-  function openWorkflow(w: Workflow) {
-    if (w.status === "draft") setFinalizing(w);
-    else onOpenWorkflow(w);
-  }
-
-  const [openingBuilder, setOpeningBuilder] = useState(false);
-  // "New workflow" = a DM with the Architect: it drafts while you talk; the Workflows page and
-  // the draft's detail page update live as it works. Templates keep the quick dialog path.
-  async function newWorkflow() {
-    setOpeningBuilder(true);
-    try {
-      const r = await openWorkflowBuilder({});
-      onOpenBuilderDm(r.dmChannelId);
-    } catch (e) {
-      alert((e as Error).message);
-    } finally {
-      setOpeningBuilder(false);
-    }
-  }
-
   return (
     <ViewShell
       icon={<WorkflowIcon className="size-5" />}
@@ -443,79 +220,44 @@ export function Workflows({
         </div>
       ) : (
         <div className="space-y-8">
-          {/* Your workflows */}
           <section data-testid="your-workflows">
             <div className="mb-2 flex items-center px-1">
-              <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                Your workflows
-              </h2>
-              <Button
-                size="sm"
-                data-testid="new-workflow"
-                disabled={openingBuilder}
-                onClick={newWorkflow}
-                className="ml-auto h-7 text-xs"
-              >
-                {openingBuilder ? <Loader2 className="size-3.5 animate-spin" /> : <Bot className="size-3.5" />}
-                New workflow — chat with the Architect
+              <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Your workflows</h2>
+              <Button size="sm" data-testid="new-workflow" disabled={creating === "blank"} onClick={() => newDraft()} className="ml-auto h-7 text-xs">
+                {creating === "blank" ? <Loader2 className="size-3.5 animate-spin" /> : <Plus className="size-3.5" />}
+                New workflow
               </Button>
             </div>
             {workflows.length === 0 ? (
               <div className="rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground">
-                A workflow is a small team of agents with a trigger and a playbook — pick a
-                template below to see how one fits together.
+                A workflow is a small team of agents with a trigger and a playbook. Start from a
+                template below, or build one from scratch.
               </div>
             ) : (
               <div className="grid gap-3 sm:grid-cols-2">
                 {workflows.map((w) => (
-                  <WorkflowCard
-                    key={w.id}
-                    w={w}
-                    busy={busyId === w.id}
-                    onOpen={openWorkflow}
-                    onRun={runNow}
-                    onStop={stopRun}
-                  />
+                  <WorkflowCard key={w.id} w={w} busy={busyId === w.id} onOpen={openWorkflow} onRun={runNow} onStop={stopRun} />
                 ))}
               </div>
             )}
           </section>
 
-          {/* Templates */}
           <section data-testid="workflow-templates">
-            <h2 className="mb-2 px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-              Start from a template
-            </h2>
+            <h2 className="mb-2 px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Start from a template</h2>
             <div className="grid gap-3 sm:grid-cols-2">
               {templates.map((t) => (
-                <TemplateCard key={t.id} t={t} busy={usingTemplate === t.id} onUse={useTemplate} />
+                <TemplateCard key={t.id} t={t} busy={creating === t.id} onUse={(tt) => newDraft(tt.id)} />
               ))}
             </div>
           </section>
 
-          {/* Plain scheduled tasks (the old /scheduled page, embedded). Workspace-scoped, so it
-              only renders in Firebase mode — same gate the standalone /scheduled page had. */}
           {workspaceId && (
             <section data-testid="workflows-scheduled">
-              <h2 className="mb-2 px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                Scheduled tasks
-              </h2>
+              <h2 className="mb-2 px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Scheduled tasks</h2>
               <Scheduled workspaceId={workspaceId} embedded />
             </section>
           )}
         </div>
-      )}
-
-      {finalizing && (
-        <FinalizeDialog
-          workflow={finalizing}
-          onClose={() => setFinalizing(null)}
-          onCreated={(w) => {
-            setFinalizing(null);
-            setWorkflows((prev) => prev.map((x) => (x.id === w.id ? { ...x, ...w } : x)));
-            reload();
-          }}
-        />
       )}
     </ViewShell>
   );

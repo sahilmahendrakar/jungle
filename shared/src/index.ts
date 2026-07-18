@@ -10,3 +10,4 @@ export * from "./workflows.js";
 export * from "./workflow-templates.js";
 export * from "./deliverables.js";
 export * from "./slack.js";
+export * from "./agent-presets.js";
