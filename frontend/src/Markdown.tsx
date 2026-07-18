@@ -7,7 +7,7 @@ import type { Root, Text } from "mdast";
 // Fenced-code token colors come from the token-driven .hljs theme in index.css (light + dark).
 import { cn } from "@/lib/utils";
 import type { Participant } from "./api";
-import { AgentHoverCard } from "./components/chat/AgentHoverCard";
+import { MentionBadge } from "./components/chat/MentionBadge";
 
 // Same charset as the backend's resolveMentions regex (handles may contain hyphens), so a
 // mention badge renders for exactly the text that would have @mentioned/triggered someone.
@@ -121,18 +121,7 @@ export function Markdown({
             ) : (
               <>{children}</>
             );
-          return (
-            <AgentHoverCard agentId={person.id}>
-              <button
-                type="button"
-                data-testid="mention-badge"
-                onClick={() => onOpenProfile?.(person.id)}
-                className="rounded px-1 py-0.5 align-baseline font-medium text-primary bg-primary/10 hover:bg-primary/20"
-              >
-                @{person.display_name}
-              </button>
-            </AgentHoverCard>
-          );
+          return <MentionBadge person={person} onOpenProfile={onOpenProfile} />;
         }
         return (
           <a

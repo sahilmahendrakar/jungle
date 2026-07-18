@@ -465,7 +465,7 @@ export class Runner {
         break;
       }
       case "git_credentials":
-        void applyGitCredentials(frame.token, frame.login);
+        void applyGitCredentials(frame.token, frame.login, { name: frame.authorName, email: frame.authorEmail });
         break;
       case "gmail_credentials":
         // A running turn's gmail server reads this via getToken on its next call — no rebuild.
@@ -500,7 +500,10 @@ export class Runner {
       // agent the repo is already in its workspace, so it must actually be there. Items
       // enqueued meanwhile just wait (maybeStartTurn no-ops until `configured`). On
       // reconnects the clone is a fast already-present check.
-      await applyGitCredentials(frame.git.token, frame.git.login);
+      await applyGitCredentials(frame.git.token, frame.git.login, {
+        name: frame.git.authorName,
+        email: frame.git.authorEmail,
+      });
       if (frame.git.repoUrl) await cloneRepoIfNeeded(frame.git.repoUrl);
     }
     // Gmail needs no filesystem setup — just hold the token/settings; the gmail MCP server is

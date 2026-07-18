@@ -5,12 +5,12 @@ import { fmtTime } from "../../lib/chat";
 import { Markdown } from "../../Markdown";
 import { AgentBadge, AttachmentList, EmptyState, PersonAvatar } from "./panels";
 import { useMentionAutocomplete, MentionPopup } from "./mentionAutocomplete";
+import { ComposerInput } from "./ComposerInput";
 import { DeliverableChips } from "./deliverableCards";
 import { MessageTurnChips } from "./TurnChips";
 import type { QueuedTurn, TurnChipData } from "../../ws/useLiveTurns";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
 // Compact message row for the thread panel (root + replies), not sender-grouped. Every reply
@@ -275,8 +275,10 @@ export function ThreadPanel({
                 />
               )}
               <div className="flex items-end gap-2">
-                <Textarea
-                  ref={taRef}
+                <ComposerInput
+                  taRef={taRef}
+                  people={people}
+                  onOpenProfile={onOpenProfile}
                   data-testid="thread-composer-input"
                   value={threadDraft}
                   onChange={(e) => {
@@ -296,7 +298,7 @@ export function ThreadPanel({
                   }}
                   rows={1}
                   placeholder="Reply in thread…"
-                  className="max-h-32 min-h-9 resize-none overflow-y-auto border-0 bg-transparent px-2 py-1.5 shadow-none focus-visible:ring-0"
+                  className="max-h-32"
                 />
                 <Button
                   data-testid="thread-send-button"
