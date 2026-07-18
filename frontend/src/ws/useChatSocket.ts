@@ -58,6 +58,9 @@ export function useChatSocket(opts: {
   // Desktop-notification decisions live in App (it knows channels, mentions, prefs); the
   // dispatch just reports what happened.
   onNotifiableMessage: (m: Message, isOpen: boolean) => void;
+  // Fired for every message frame and every deliverable_created frame, whoever they're for —
+  // feeds the Activity page's "new activity" nudge. Keep it cheap (a counter bump).
+  onAnyActivity?: () => void;
   onConfirmRequested: (c: ToolConfirm) => void;
   // Fired on every (re)connect, after the message backfill kicks off — used to re-sync state
   // that only fans out live (pending confirmations).
@@ -86,6 +89,7 @@ export function useChatSocket(opts: {
     ingestLiveEvent,
     ingestQueued,
     onNotifiableMessage,
+    onAnyActivity,
     onConfirmRequested,
     onConnected,
   } = opts;
@@ -274,10 +278,12 @@ export function useChatSocket(opts: {
         if (evt.type === "deliverable_created") {
           const d = evt.deliverable;
           setDeliverables((ds) => (ds.some((x) => x.id === d.id) ? ds : [d, ...ds]));
+          onAnyActivity?.();
           return;
         }
         if (evt.type !== "message") return;
         const m: Message = evt.message;
+        onAnyActivity?.();
         const isOpen = m.channel_id === selectedRef.current;
         const isMine = m.sender_id === participantId;
         // Desktop-notification decision (DMs / mentions of me, tab not looking) lives in App.

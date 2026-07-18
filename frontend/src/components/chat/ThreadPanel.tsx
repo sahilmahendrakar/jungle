@@ -39,7 +39,7 @@ function ThreadMessageRow({
   const isAgent = sender?.kind === "agent";
   const hasChips = (turns?.length ?? 0) > 0 || (queued?.length ?? 0) > 0;
   return (
-    <div className="flex gap-2.5">
+    <div data-message-id={m.id} className="flex gap-2.5 rounded-md">
       <button
         onClick={() => sender && onOpenProfile(sender.id)}
         disabled={!sender}
@@ -105,6 +105,8 @@ export function ThreadPanel({
   people,
   members,
   participantId,
+  jumpToId,
+  onJumpDone,
 }: {
   threadRootId: string | null;
   threadRoot: Message | null;
@@ -127,12 +129,29 @@ export function ThreadPanel({
   people: Participant[];
   members: Participant[];
   participantId: string | null;
+  // Deep-link target (Activity page / search hit on a thread reply): once this reply renders,
+  // scroll it into view with a flash highlight, then report done so the parent clears it.
+  jumpToId?: string | null;
+  onJumpDone?: () => void;
 }) {
   const [threadDraft, setThreadDraft] = usePersistentDraft(
     threadRootId ? `thread:${threadRootId}` : null,
   );
   const [alsoToChannel, setAlsoToChannel] = useState(false);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  // Jump-to-reply: runs after replies render; retries harmlessly until the target exists (the
+  // jump path seeds the thread's messages before opening, so it's usually immediate).
+  useEffect(() => {
+    if (!jumpToId || !threadRootId) return;
+    const el = scrollRef.current?.querySelector(`[data-message-id="${jumpToId}"]`);
+    if (!el) return;
+    el.scrollIntoView({ block: "center" });
+    el.classList.add("animate-msg-flash");
+    setTimeout(() => el.classList.remove("animate-msg-flash"), 2000);
+    onJumpDone?.();
+  }, [jumpToId, threadRootId, threadReplies, onJumpDone]);
 
   const { mention, candidates, index, setIndex, syncMention, acceptMention, clearMention, handleKey } =
     useMentionAutocomplete({ people, members, participantId, draft: threadDraft, setDraft: setThreadDraft, taRef });
@@ -217,7 +236,7 @@ export function ThreadPanel({
       {/* Open-thread mode */}
       {threadRootId && (
         <>
-          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+          <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
             {threadRoot ? (
               <div className="flex flex-col gap-4">
                 <ThreadMessageRow

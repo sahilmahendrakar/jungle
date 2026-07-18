@@ -1,4 +1,5 @@
 import {
+  Activity,
   Hash,
   Home,
   LogOut,
@@ -81,6 +82,9 @@ export function Sidebar({
   onOpenHome,
   homeActive,
   homeBadge,
+  onOpenActivity,
+  activityActive,
+  activityBadge,
   onOpenWorkflows,
   workflowsActive,
   onOpenTeam,
@@ -118,6 +122,9 @@ export function Sidebar({
   onOpenHome: () => void;
   homeActive: boolean;
   homeBadge: number; // things waiting on the user (pending approvals + stalled runs)
+  onOpenActivity: () => void;
+  activityActive: boolean;
+  activityBadge: number; // channels holding an unread @mention of me
   onOpenWorkflows: () => void;
   workflowsActive: boolean;
   onOpenTeam: () => void;
@@ -213,6 +220,18 @@ export function Sidebar({
               unread={homeBadge > 0}
               badgeCount={homeBadge}
               badgeMention={homeBadge > 0}
+            />
+            {/* Activity: your unified feed — messages, mentions, thread replies, deliverables —
+                composably filtered. The badge counts channels holding an unread mention of you. */}
+            <NavItem
+              testId="activity-nav"
+              active={activityActive}
+              onClick={onOpenActivity}
+              icon={<Activity className="size-4 opacity-70" />}
+              label="Activity"
+              unread={activityBadge > 0}
+              badgeCount={activityBadge}
+              badgeMention={activityBadge > 0}
             />
             {/* Workflows: teams of agents on a trigger, plus scheduled tasks (absorbs Scheduled). */}
             <NavItem
