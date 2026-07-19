@@ -14,6 +14,11 @@ import * as push from "../services/push";
 // agents stop auto-replying until a human speaks again. Bounds loops + cost.
 export const DEFAULT_CASCADE_BUDGET = 3;
 
+// A socket tags itself mobile via ?client=mobile at connect (the phone apps); web/other clients
+// leave it unset. Used to decide push suppression: only the phone being connected suppresses a
+// phone push — desktop presence should not.
+type WsWithMeta = WebSocket & { __mobile?: boolean };
+
 // participantId -> open sockets (a participant may be connected from several devices).
 const sockets = new Map<string, Set<WebSocket>>();
 // workspaceId -> open sockets in that workspace (for workspace-scoped broadcasts). A socket lives
@@ -49,8 +54,8 @@ function removeSocket(pid: string, workspaceId: string, uid: string | null, ws: 
 
 // Fan out a payload to every connected device of every member of a channel. Channel-scoped
 // events also drive mobile push (fire-and-forget): DMs/mentions on `message`, and
-// tool_confirmation_request to every human member — suppressed for anyone with a live socket
-// (the in-app UI already carries the signal).
+// tool_confirmation_request to every human member — suppressed only for recipients whose phone
+// app is actively connected (see phoneConnected); desktop presence does not suppress.
 export async function fanOut(channelId: string, payload: unknown): Promise<void> {
   const data = JSON.stringify(payload);
   const memberIds = await db.channelMemberIds(channelId);
@@ -74,10 +79,16 @@ async function pushForFanOut(channelId: string, memberIds: string[], payload: un
   };
   if (evt.type !== "message" && evt.type !== "tool_confirmation_request") return;
 
-  // A recipient with ANY open socket is looking at the app — no push.
-  const offline = (pid: string) => {
+  // Suppress a phone push only when the recipient's PHONE is actively connected (the app in the
+  // foreground holds an open ?client=mobile socket) — desktop/web presence must NOT suppress it,
+  // so a DM you glanced at on desktop still buzzes your phone. Clients that don't tag themselves
+  // mobile (web, and app builds predating the tag) never suppress: those recipients just always
+  // get the push.
+  const phoneConnected = (pid: string) => {
     const set = sockets.get(pid);
-    return !set || ![...set].some((ws) => ws.readyState === WebSocket.OPEN);
+    return !!set && [...set].some(
+      (ws) => ws.readyState === WebSocket.OPEN && (ws as WsWithMeta).__mobile === true,
+    );
   };
 
   const channel = await db.getChannel(channelId);
@@ -91,7 +102,7 @@ async function pushForFanOut(channelId: string, memberIds: string[], payload: un
     for (const pid of memberIds) {
       if (pid === m.sender_id) continue;
       if (!isDM && !mentioned.has(pid)) continue;
-      if (!offline(pid)) continue;
+      if (phoneConnected(pid)) continue;
       const p = await db.getParticipant(pid);
       if (p?.kind === "human" && p.firebase_uid) uids.push(p.firebase_uid);
     }
@@ -114,7 +125,7 @@ async function pushForFanOut(channelId: string, memberIds: string[], payload: un
   if (evt.type === "tool_confirmation_request" && evt.confirmId) {
     const uids: string[] = [];
     for (const pid of memberIds) {
-      if (!offline(pid)) continue;
+      if (phoneConnected(pid)) continue;
       const p = await db.getParticipant(pid);
       if (p?.kind === "human" && p.firebase_uid) uids.push(p.firebase_uid);
     }
@@ -212,6 +223,7 @@ export function initAppSocket(server: Server, hooks: AppSocketHooks): void {
     const pid = participant.id;
     const workspaceId = participant.workspace_id;
     const uid = participant.firebase_uid;
+    (ws as WsWithMeta).__mobile = url.searchParams.get("client") === "mobile";
     addSocket(pid, workspaceId, uid, ws);
     ws.send(JSON.stringify({ type: "connected", participantId: pid }));
 
