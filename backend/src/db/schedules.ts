@@ -21,6 +21,9 @@ export interface ScheduleRow {
   last_status: "pending" | "success" | "failure" | null;
   last_error: string | null;
   failure_count: number;
+  // Non-null = this row backs a workflow's schedule trigger: the ticker fires workflow dispatch
+  // instead of a normal agent turn, and the row is hidden from schedule lists/caps.
+  workflow_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -35,13 +38,14 @@ export async function createSchedule(s: {
   timezone: string | null;
   runAt: string | null;
   nextRunAt: string;
+  workflowId?: string; // backing row for a workflow's schedule trigger
 }): Promise<ScheduleRow> {
   const { rows } = await pool.query<ScheduleRow>(
     `insert into schedules
-       (workspace_id, agent_id, channel_id, created_by, prompt, cron, timezone, run_at, next_run_at)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       (workspace_id, agent_id, channel_id, created_by, prompt, cron, timezone, run_at, next_run_at, workflow_id)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      returning *`,
-    [s.workspaceId, s.agentId, s.channelId, s.createdBy, s.prompt, s.cron, s.timezone, s.runAt, s.nextRunAt],
+    [s.workspaceId, s.agentId, s.channelId, s.createdBy, s.prompt, s.cron, s.timezone, s.runAt, s.nextRunAt, s.workflowId ?? null],
   );
   return rows[0];
 }
@@ -60,7 +64,7 @@ export async function listWorkspaceSchedules(
      from schedules s
      join participants p on p.id = s.agent_id
      join channels c on c.id = s.channel_id
-     where s.workspace_id = $1
+     where s.workspace_id = $1 and s.workflow_id is null
      order by s.created_at desc`,
     [workspaceId],
   );
@@ -69,7 +73,7 @@ export async function listWorkspaceSchedules(
 
 export async function listAgentSchedules(agentId: string): Promise<ScheduleRow[]> {
   const { rows } = await pool.query<ScheduleRow>(
-    `select * from schedules where agent_id = $1 order by created_at desc`,
+    `select * from schedules where agent_id = $1 and workflow_id is null order by created_at desc`,
     [agentId],
   );
   return rows;
@@ -80,7 +84,8 @@ export async function listAgentSchedules(agentId: string): Promise<ScheduleRow[]
 export async function countLiveAgentSchedules(agentId: string): Promise<number> {
   const { rows } = await pool.query<{ n: string }>(
     `select count(*) as n from schedules
-     where agent_id = $1 and (next_run_at is not null or paused_at is not null)`,
+     where agent_id = $1 and workflow_id is null
+       and (next_run_at is not null or paused_at is not null)`,
     [agentId],
   );
   return Number(rows[0]?.n ?? 0);
@@ -148,6 +153,15 @@ export async function setSchedulePaused(
 export async function deleteSchedule(id: string): Promise<boolean> {
   const { rowCount } = await pool.query(`delete from schedules where id = $1`, [id]);
   return (rowCount ?? 0) > 0;
+}
+
+// The backing row for a workflow's schedule trigger, if any.
+export async function getWorkflowBackingSchedule(workflowId: string): Promise<ScheduleRow | null> {
+  const { rows } = await pool.query<ScheduleRow>(
+    `select * from schedules where workflow_id = $1 limit 1`,
+    [workflowId],
+  );
+  return rows[0] ?? null;
 }
 
 // --- Ticker (run inside withTransaction; SKIP LOCKED so overlapping tickers claim disjoint rows) ---

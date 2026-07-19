@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, Copy, Loader2, MonitorSmartphone, Plus, ShieldAlert, Trash2, Wifi, WifiOff } from "lucide-react";
+import { Check, Copy, Loader2, MonitorSmartphone, Plus, Trash2, Wifi, WifiOff } from "lucide-react";
 import { listDevices, updateDevice, removeDevice, type RunnerHost } from "./api";
 import { supportsUnsandboxed } from "@jungle/shared";
 import { fmtRelative } from "./lib/chat";
@@ -7,6 +7,7 @@ import { ViewShell } from "./components/chat/ViewShell";
 import { SelectMenu } from "./components/chat/panels";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 
 // The Environments (Devices) page: the account's registered machines that can run agents. A
 // machine appears here after `jungle-agents connect`; from then on it's a selectable environment
@@ -40,10 +41,11 @@ const ASSIGN_OPTIONS = [
 
 // Whether agents on this device run in an isolated per-agent workspace (sandboxed) or directly in
 // the directory `jungle-agents connect` was run from (unsandboxed — the agent edits your real
-// project files in place).
+// project files in place). The trigger shows the short label; the hint spells out the effect in
+// the dropdown so the card stays compact.
 const SANDBOX_OPTIONS = [
-  { id: "true", label: "Sandboxed (isolated workspace)" },
-  { id: "false", label: "Not sandboxed (runs in connect directory)" },
+  { id: "true", label: "Sandboxed", hint: "Isolated per-agent workspace" },
+  { id: "false", label: "Not sandboxed", hint: "Runs in the connect directory" },
 ];
 
 function DeviceCard({
@@ -93,12 +95,15 @@ function DeviceCard({
     device.hostname,
     device.platform && device.arch ? `${device.platform}/${device.arch}` : device.platform,
     device.last_seen_at ? `seen ${fmtRelative(device.last_seen_at)}` : null,
+    device.running_agents > 0
+      ? `${device.running_agents} agent${device.running_agents === 1 ? "" : "s"} running`
+      : null,
   ].filter(Boolean);
 
   // A device whose reported CLI version is known to be too old to honor `sandboxed` can't run
   // unsandboxed, so don't offer that option (the backend would reject it anyway). An unknown
   // version (never connected) is allowed through; the provisioner downgrades at run time if it
-  // turns out old, and the warning below surfaces that.
+  // turns out old, and the note below surfaces that.
   const cliTooOld = device.runner_version !== null && !supportsUnsandboxed(device.runner_version);
   const sandboxOptions = cliTooOld ? SANDBOX_OPTIONS.filter((o) => o.id === "true") : SANDBOX_OPTIONS;
 
@@ -117,10 +122,10 @@ function DeviceCard({
                 onChange={(e) => setName(e.target.value)}
                 onBlur={saveName}
                 onKeyDown={(e) => e.key === "Enter" && saveName()}
-                className="h-7 max-w-56 text-sm"
+                className="h-7 max-w-56 text-sm font-semibold"
               />
             ) : (
-              <button className="truncate text-sm font-medium hover:underline" onClick={() => setEditing(true)}>
+              <button className="truncate text-sm font-semibold hover:underline" onClick={() => setEditing(true)}>
                 {device.name}
               </button>
             )}
@@ -133,45 +138,33 @@ function DeviceCard({
               {device.online ? <Wifi className="size-3" /> : <WifiOff className="size-3" />}
               {device.online ? "Online" : "Offline"}
             </span>
-          </div>
-          {meta.length > 0 && <div className="mt-0.5 truncate text-xs text-muted-foreground">{meta.join(" · ")}</div>}
-          <div className="mt-1 text-xs text-muted-foreground">
-            {device.running_agents === 1 ? "1 agent running" : `${device.running_agents} agents running`}
-          </div>
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <span className="text-xs text-muted-foreground">Who can run agents here:</span>
-            <div className="w-56">
-              <SelectMenu value={device.assign_policy} onChange={setPolicy} options={ASSIGN_OPTIONS} />
-            </div>
             {busy && <Loader2 className="size-3.5 animate-spin text-muted-foreground" />}
           </div>
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <span className="text-xs text-muted-foreground">Sandboxing:</span>
-            <div className="w-64">
+          {meta.length > 0 && (
+            <div className="mt-1 truncate text-xs text-muted-foreground">{meta.join(" · ")}</div>
+          )}
+          <div className="mt-3 grid gap-3 border-t pt-3 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label className="text-xs text-muted-foreground">Access</Label>
+              <SelectMenu
+                value={device.assign_policy}
+                onChange={setPolicy}
+                options={ASSIGN_OPTIONS}
+                testId="device-access"
+                disabled={busy}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs text-muted-foreground">Sandboxing</Label>
               <SelectMenu
                 value={String(device.sandboxed)}
                 onChange={(v) => setSandboxed(v === "true")}
                 options={sandboxOptions}
                 testId="device-sandboxed"
+                disabled={busy}
               />
             </div>
           </div>
-          {!device.sandboxed && (
-            <p className="mt-1.5 flex items-start gap-1.5 text-[11px] leading-snug text-amber-600">
-              <ShieldAlert className="mt-0.5 size-3.5 shrink-0" />
-              Agents run in the directory where <code>jungle-agents connect</code> was run, with your
-              real files and privileges. GitHub repo cloning is disabled (the agent uses the repo
-              already in that directory).
-            </p>
-          )}
-          {!device.sandboxed && !supportsUnsandboxed(device.runner_version) && (
-            <p className="mt-1.5 flex items-start gap-1.5 text-[11px] leading-snug text-amber-600">
-              <ShieldAlert className="mt-0.5 size-3.5 shrink-0" />
-              This device's CLI (version {device.runner_version ?? "unknown"}) is too old to run
-              unsandboxed — agents will run sandboxed until you run{" "}
-              <code>npx jungle-agents@latest up</code> here.
-            </p>
-          )}
         </div>
         <Button variant="ghost" size="icon" className="shrink-0 text-muted-foreground" onClick={remove} disabled={busy}>
           <Trash2 className="size-4" />

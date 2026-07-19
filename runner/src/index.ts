@@ -21,14 +21,16 @@ async function main() {
 
   const runner = new Runner({ agentId, wsUrl, token });
 
-  process.on("SIGTERM", () => {
-    log.info("received SIGTERM, exiting");
+  // SIGTERM/SIGINT = the agent (or its whole host) is being stopped ON PURPOSE (daemon
+  // stop_agent, container stop) — tear down managed services too. A runner crash skips this
+  // path by design: detached services survive it and the restarted runner re-adopts them.
+  const shutdown = (sig: string) => {
+    log.info(`received ${sig}, exiting`);
+    runner.shutdown();
     process.exit(0);
-  });
-  process.on("SIGINT", () => {
-    log.info("received SIGINT, exiting");
-    process.exit(0);
-  });
+  };
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("uncaughtException", (err) => {
     log.error("uncaught exception", { err: String(err), stack: (err as Error)?.stack });
     try {

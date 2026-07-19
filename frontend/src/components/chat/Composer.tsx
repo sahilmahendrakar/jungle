@@ -1,23 +1,29 @@
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Bot, FileText, Loader2, Paperclip, SendHorizonal, X } from "lucide-react";
+import { useLayoutEffect, useRef, useState } from "react";
+import { FileText, Loader2, Paperclip, SendHorizonal, X } from "lucide-react";
 import { uploadAttachment, type Participant } from "../../api";
 import {
   MAX_ATTACHMENTS_PER_MESSAGE,
   MAX_ATTACHMENT_BYTES,
-  detectMention,
   newId,
   type PendingAttachment,
 } from "../../lib/chat";
-import { PersonAvatar } from "./panels";
+import { usePersistentDraft } from "../../lib/drafts";
+import { useMentionAutocomplete, MentionPopup } from "./mentionAutocomplete";
+import { ComposerInput } from "./ComposerInput";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
-// The main channel composer: @-mention autocomplete, upload-first attachments, and an auto-growing
-// textarea. Owns its own draft / pending-attachments / mention state; the parent only supplies the
-// data needed for mention candidates and an `onSend(body, attachmentIds)` that performs the actual
-// WS post and returns whether it was accepted (so the composer clears only on success).
+// The main channel composer: @-mention autocomplete, mention badges in the input (same component
+// as chat history via ComposerInput), upload-first attachments, and an auto-growing textarea.
+// The draft is persisted per channel (see lib/drafts.ts) — navigating to another screen,
+// switching channels, or reloading the page restores it, and it clears on send. Pending
+// attachments stay component-local (in-flight uploads can't survive an unmount). Mention
+// autocomplete lives in the shared useMentionAutocomplete hook (shared with the thread composer).
+// The parent only supplies the data needed for mention candidates and an
+// `onSend(body, attachmentIds)` that performs the actual WS post and returns whether it was
+// accepted (so the composer clears only on success).
 export function Composer({
+  draftKey,
   headerTitle,
   isDm,
   people,
@@ -25,7 +31,10 @@ export function Composer({
   participantId,
   onSend,
   onNotice,
+  onOpenProfile,
 }: {
+  // Persistence key for the draft — the selected channel id (see lib/drafts.ts).
+  draftKey: string | null;
   headerTitle: string | null;
   isDm: boolean;
   people: Participant[];
@@ -33,13 +42,15 @@ export function Composer({
   participantId: string | null;
   onSend: (body: string, attachmentIds: string[]) => boolean;
   onNotice: (msg: string) => void;
+  onOpenProfile?: (id: string) => void;
 }) {
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = usePersistentDraft(draftKey);
   const [pending, setPending] = useState<PendingAttachment[]>([]);
-  const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
-  const [mentionIndex, setMentionIndex] = useState(0);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
+
+  const { mention, candidates, index, setIndex, syncMention, acceptMention, clearMention, handleKey } =
+    useMentionAutocomplete({ people, members, participantId, draft, setDraft, taRef });
 
   // Auto-grow: match the textarea height to its content up to the CSS max (max-h-40), keyed on
   // draft so it also shrinks back after sending or accepting a mention.
@@ -49,59 +60,6 @@ export function Composer({
     ta.style.height = "auto";
     ta.style.height = `${ta.scrollHeight}px`;
   }, [draft]);
-
-  // Candidates for the @-mention popup: everyone but me, matching the typed query, with current
-  // channel members surfaced first, then handle-prefix matches.
-  const mentionCandidates = useMemo(() => {
-    if (!mention) return [];
-    const q = mention.query.toLowerCase();
-    const memberIds = new Set(members.map((m) => m.id));
-    return people
-      .filter((p) => p.id !== participantId)
-      .filter(
-        (p) =>
-          !q ||
-          p.handle.toLowerCase().includes(q) ||
-          p.display_name.toLowerCase().includes(q),
-      )
-      .sort((a, b) => {
-        const am = memberIds.has(a.id) ? 0 : 1;
-        const bm = memberIds.has(b.id) ? 0 : 1;
-        if (am !== bm) return am - bm;
-        const asw = a.handle.toLowerCase().startsWith(q) ? 0 : 1;
-        const bsw = b.handle.toLowerCase().startsWith(q) ? 0 : 1;
-        if (asw !== bsw) return asw - bsw;
-        return a.display_name.localeCompare(b.display_name);
-      })
-      .slice(0, 8);
-  }, [mention, people, members, participantId]);
-
-  // Recompute the active mention token from the textarea's current value + caret.
-  function syncMention(value: string, caret: number) {
-    setMention(detectMention(value, caret));
-    setMentionIndex(0);
-  }
-
-  // Replace the in-progress "@query" token with "@handle " and drop the popup.
-  function acceptMention(p: Participant) {
-    const m = mention;
-    const ta = taRef.current;
-    if (!m) return;
-    const caret = ta?.selectionStart ?? m.start + 1 + m.query.length;
-    const before = draft.slice(0, m.start);
-    const after = draft.slice(caret);
-    const insert = `@${p.handle} `;
-    const next = before + insert + after;
-    setDraft(next);
-    setMention(null);
-    const pos = (before + insert).length;
-    requestAnimationFrame(() => {
-      if (ta) {
-        ta.focus();
-        ta.setSelectionRange(pos, pos);
-      }
-    });
-  }
 
   // Stage files in the composer and start uploading each immediately (upload-first). Shared by the
   // paperclip picker and paste-into-textarea.
@@ -168,7 +126,7 @@ export function Composer({
     setDraft("");
     for (const p of pending) if (p.previewUrl) URL.revokeObjectURL(p.previewUrl);
     setPending([]);
-    setMention(null);
+    clearMention();
   }
 
   // Anything ready to send? Drives the send button's enabled/dimmed affordance.
@@ -179,36 +137,13 @@ export function Composer({
     <div className="px-3 pb-3 pt-1 md:px-5 md:pb-5">
       <div className="relative rounded-2xl border bg-card p-2 shadow-sm transition-shadow focus-within:border-ring focus-within:shadow-md focus-within:ring-[3px] focus-within:ring-ring/20">
         {/* @-mention autocomplete */}
-        {mention && mentionCandidates.length > 0 && (
-          <div
-            data-testid="mention-popup"
-            className="absolute bottom-full left-0 z-20 mb-2 w-72 overflow-hidden rounded-lg border bg-popover text-popover-foreground shadow-lg"
-          >
-            <div className="max-h-64 overflow-y-auto p-1">
-              {mentionCandidates.map((p, i) => (
-                <button
-                  key={p.id}
-                  data-testid="mention-option"
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    acceptMention(p);
-                  }}
-                  onMouseEnter={() => setMentionIndex(i)}
-                  className={cn(
-                    "flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm",
-                    i === mentionIndex ? "bg-accent" : "hover:bg-accent/60",
-                  )}
-                >
-                  <PersonAvatar name={p.display_name} handle={p.handle} size="sm" />
-                  <span className="flex min-w-0 items-center gap-1">
-                    <span className="truncate font-medium">{p.display_name}</span>
-                    <span className="truncate text-muted-foreground">@{p.handle}</span>
-                    {p.kind === "agent" && <Bot className="size-3.5 shrink-0 text-primary" />}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
+        {mention && candidates.length > 0 && (
+          <MentionPopup
+            candidates={candidates}
+            index={index}
+            onSelect={acceptMention}
+            onHover={setIndex}
+          />
         )}
         {/* Staged attachments (upload-first): thumbnails for images, a file icon otherwise. */}
         {pending.length > 0 && (
@@ -278,8 +213,10 @@ export function Composer({
           >
             <Paperclip className="size-4" />
           </Button>
-          <Textarea
-            ref={taRef}
+          <ComposerInput
+            taRef={taRef}
+            people={people}
+            onOpenProfile={onOpenProfile}
             data-testid="composer-input"
             value={draft}
             onChange={(e) => {
@@ -297,30 +234,7 @@ export function Composer({
               syncMention(t.value, t.selectionStart ?? 0);
             }}
             onKeyDown={(e) => {
-              if (mention && mentionCandidates.length > 0) {
-                if (e.key === "ArrowDown") {
-                  e.preventDefault();
-                  setMentionIndex((i) => (i + 1) % mentionCandidates.length);
-                  return;
-                }
-                if (e.key === "ArrowUp") {
-                  e.preventDefault();
-                  setMentionIndex(
-                    (i) => (i - 1 + mentionCandidates.length) % mentionCandidates.length,
-                  );
-                  return;
-                }
-                if (e.key === "Enter" || e.key === "Tab") {
-                  e.preventDefault();
-                  acceptMention(mentionCandidates[mentionIndex]);
-                  return;
-                }
-                if (e.key === "Escape") {
-                  e.preventDefault();
-                  setMention(null);
-                  return;
-                }
-              }
+              if (handleKey(e)) return;
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 send();
@@ -332,7 +246,6 @@ export function Composer({
                 ? `Message ${isDm ? headerTitle : "#" + headerTitle}`
                 : "Select or create a channel"
             }
-            className="max-h-40 min-h-9 resize-none overflow-y-auto border-0 bg-transparent px-2 py-1.5 shadow-none focus-visible:ring-0"
           />
           <Button
             data-testid="send-button"

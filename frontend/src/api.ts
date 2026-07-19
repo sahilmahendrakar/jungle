@@ -17,8 +17,20 @@ import type {
   Deliverable,
   DeliverableKind,
   SearchResult,
+  ActivityItem,
+  ActivityMessage,
+  ActivityFilters,
   ExtractedLink,
   RunnerHost,
+  SlackStatus,
+  SlackChannelInfo,
+  SlackChannelLink,
+  AgentServiceInfo,
+  Workflow,
+  WorkflowRole,
+  WorkflowRun,
+  WorkflowTrigger,
+  WorkflowTemplate,
 } from "@jungle/shared";
 export {
   INTEGRATION_TYPES,
@@ -30,9 +42,12 @@ export {
 } from "@jungle/shared";
 export type { IntegrationType, ConnectionType } from "@jungle/shared";
 export type { ExtractedLink };
+export type { SlackStatus, SlackChannelInfo, SlackChannelLink };
 
 export type { Participant, Attachment, UnreadThread, AgentEvent, AgentStatus, AgentIntegration, RunnerHost };
-export type { Schedule, Deliverable, DeliverableKind, SearchResult };
+export type { AgentServiceInfo };
+export type { Schedule, Deliverable, DeliverableKind, SearchResult, ActivityItem, ActivityMessage, ActivityFilters };
+export type { Workflow, WorkflowRole, WorkflowRun, WorkflowTrigger, WorkflowTemplate };
 export type { Me, GoogleProfile, Workspace, Membership, InviteInfo };
 // A message as delivered to the client (attachments carry signed download urls).
 export type Message = WireMessage;
@@ -188,6 +203,8 @@ export function createParticipant(p: {
   integrations?: Array<{ key: string; config: Record<string, unknown> }>;
   model?: string;
   mode?: string;
+  // Creator-written instructions/persona injected into the agent's system prompt (optional).
+  persona?: string;
   // Environment: omitted = cloud default; "self_hosted" + hostId runs the agent on a registered
   // device (see listDevices).
   runnerProvider?: string;
@@ -202,6 +219,7 @@ export function createParticipant(p: {
           ...(p.integrations?.length ? { integrations: p.integrations } : {}),
           ...(p.model ? { model: p.model } : {}),
           ...(p.mode ? { mode: p.mode } : {}),
+          ...(p.persona ? { persona: p.persona } : {}),
           ...(p.runnerProvider ? { runnerProvider: p.runnerProvider } : {}),
           ...(p.hostId ? { hostId: p.hostId } : {}),
         }
@@ -303,6 +321,8 @@ export function removeAgentIntegration(agentId: string, key: string): Promise<{ 
 export interface IntegrationConnectionStatus {
   connected: boolean;
   externalAccount?: string | null;
+  // The stored OAuth grant is dead (invalid_grant) — the user must re-consent to revive it.
+  needsReconnect?: boolean;
 }
 
 // Per-integration connection status for the current user, keyed by integration key.
@@ -338,6 +358,70 @@ export function disconnectIntegration(key: string): Promise<{ ok: boolean }> {
   });
 }
 
+// --- Slack integration (workspace-scoped install + per-channel mirroring) ---
+
+export function getSlackStatus(): Promise<SlackStatus> {
+  return request<SlackStatus>(`/api/slack/status`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load Slack status",
+  });
+}
+
+export function slackInstallUrl(opts?: { popup?: boolean }): Promise<{ url: string }> {
+  return request(`/api/slack/install-url`, {
+    method: "POST",
+    json: { popup: opts?.popup === true },
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to start Slack install",
+  });
+}
+
+export function disconnectSlack(): Promise<{ ok: boolean }> {
+  return request(`/api/slack/install`, {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to disconnect Slack",
+  });
+}
+
+export function listSlackChannels(): Promise<SlackChannelInfo[]> {
+  return request<SlackChannelInfo[]>(`/api/slack/channels`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to list Slack channels",
+  });
+}
+
+export function getChannelSlackLink(channelId: string): Promise<{ link: SlackChannelLink | null }> {
+  return request(`/api/channels/${channelId}/slack-link`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load Slack link",
+  });
+}
+
+export function linkChannelToSlack(channelId: string, slackChannelId: string): Promise<{ link: SlackChannelLink }> {
+  return request(`/api/channels/${channelId}/slack-link`, {
+    method: "POST",
+    json: { slackChannelId },
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to link channel to Slack",
+  });
+}
+
+export function unlinkChannelFromSlack(channelId: string): Promise<{ ok: boolean }> {
+  return request(`/api/channels/${channelId}/slack-link`, {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to unlink channel from Slack",
+  });
+}
+
 // The agent's long-term memory (its MEMORY.md mirror, reported by the runner after turns that
 // change it). Fetched on demand — it doesn't ride in participant payloads.
 export function getAgentMemory(
@@ -347,6 +431,29 @@ export function getAgentMemory(
     auth: true,
     devAuth: true,
     errorMessage: "failed to load memory",
+  });
+}
+
+// The agent's managed services (service_* tools: dev servers, watchers), as last reported by
+// its runner. Fetched on demand like memory.
+export function getAgentServices(
+  id: string,
+): Promise<{ services: AgentServiceInfo[]; updatedAt: string | null }> {
+  return request(`/api/agents/${id}/services`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load services",
+  });
+}
+
+// Stop one of an agent's managed services. The fresh list arrives via an
+// agent_services_changed broadcast once the runner has killed the process group.
+export function stopAgentService(id: string, name: string): Promise<{ ok: boolean }> {
+  return request(`/api/agents/${id}/services/${encodeURIComponent(name)}/stop`, {
+    method: "POST",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to stop service",
   });
 }
 
@@ -602,14 +709,49 @@ export function listDeliverables(opts: { before?: number; limit?: number } = {})
   }).then((r) => r.deliverables);
 }
 
-// Full-text message search across my channels (the ⌘K palette).
-export function searchMessages(q: string, limit = 20): Promise<SearchResult[]> {
+// Full-text message search across my channels (the ⌘K palette). The query may carry the shared
+// filter tokens (from:/to:/in:/is:); a `type:deliverables` token switches the search to the
+// deliverables index, and then `deliverables` comes back instead of `results`.
+export function searchMessages(
+  q: string,
+  limit = 20,
+): Promise<{ results: SearchResult[]; deliverables: Deliverable[] }> {
   const qs = new URLSearchParams({ q, limit: String(limit) });
-  return request<{ results: SearchResult[] }>(`/api/search?${qs.toString()}`, {
+  return request<{ results?: SearchResult[]; deliverables?: Deliverable[] }>(
+    `/api/search?${qs.toString()}`,
+    {
+      auth: true,
+      devAuth: true,
+      errorMessage: "search failed",
+    },
+  ).then((r) => ({ results: r.results ?? [], deliverables: r.deliverables ?? [] }));
+}
+
+// The unified activity feed (sidebar Activity page + agent-profile "recent messages"): messages
+// and deliverables, composably filtered. Page backwards with `before` = the oldest item's
+// created_at. Filters map 1:1 to the backend's query params; `q` may itself carry tokens.
+export function listActivity(
+  filters: ActivityFilters & { q?: string },
+  opts: { before?: string; limit?: number } = {},
+): Promise<{ items: ActivityItem[]; hasMore: boolean }> {
+  const qs = new URLSearchParams();
+  if (filters.q) qs.set("q", filters.q);
+  if (filters.type && filters.type !== "all") qs.set("type", filters.type);
+  if (filters.direction) qs.set("direction", filters.direction);
+  if (filters.from) qs.set("from", filters.from);
+  if (filters.to) qs.set("to", filters.to);
+  if (filters.person) qs.set("person", filters.person);
+  if (filters.inChannel) qs.set("in", filters.inChannel);
+  if (filters.inDm) qs.set("in", `@${filters.inDm}`);
+  if (filters.kind) qs.set("kind", filters.kind);
+  if (opts.before) qs.set("before", opts.before);
+  if (opts.limit != null) qs.set("limit", String(opts.limit));
+  const s = qs.toString();
+  return request<{ items: ActivityItem[]; hasMore: boolean }>(`/api/activity${s ? `?${s}` : ""}`, {
     auth: true,
     devAuth: true,
-    errorMessage: "search failed",
-  }).then((r) => r.results);
+    errorMessage: "failed to load activity",
+  });
 }
 
 // --- Channel members + delete ---
@@ -704,6 +846,137 @@ export function deleteSchedule(id: string): Promise<{ ok: boolean }> {
     auth: true,
     devAuth: true,
     errorMessage: "failed to delete schedule",
+  });
+}
+
+// --- Workflows (teams of agents on a trigger; see shared/src/workflows.ts) ---
+
+export function listWorkflows(): Promise<Workflow[]> {
+  return request<{ workflows: Workflow[] }>(`/api/workflows`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load workflows",
+  }).then((r) => r.workflows);
+}
+
+export function getWorkflow(id: string): Promise<Workflow> {
+  return request<Workflow>(`/api/workflows/${id}`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load workflow",
+  });
+}
+
+export function listWorkflowRuns(id: string): Promise<WorkflowRun[]> {
+  return request<{ runs: WorkflowRun[] }>(`/api/workflows/${id}/runs`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load runs",
+  }).then((r) => r.runs);
+}
+
+export function listWorkflowTemplates(): Promise<WorkflowTemplate[]> {
+  return request<{ templates: WorkflowTemplate[] }>(`/api/workflow-templates`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load templates",
+  }).then((r) => r.templates);
+}
+
+export function createWorkflowDraft(body: { templateId?: string; name?: string }): Promise<Workflow> {
+  return request<Workflow>(`/api/workflows`, {
+    json: body,
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to create workflow",
+  });
+}
+
+export function updateWorkflow(
+  id: string,
+  patch: {
+    name?: string;
+    description?: string;
+    emoji?: string | null;
+    playbook?: string;
+    roster?: WorkflowRole[];
+    trigger?: WorkflowTrigger;
+    paused?: boolean;
+  },
+): Promise<Workflow> {
+  return request<Workflow>(`/api/workflows/${id}`, {
+    method: "PATCH",
+    json: patch,
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to update workflow",
+  });
+}
+
+export function openWorkflowBuilder(body: { templateId?: string } = {}): Promise<{
+  architectId: string;
+  dmChannelId: string;
+  draftId: string;
+}> {
+  return request(`/api/workflows/builder`, {
+    json: body,
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to open the builder",
+  });
+}
+
+export function addWorkflowSeat(id: string, body: { role?: string } = {}): Promise<Workflow> {
+  return request<Workflow>(`/api/workflows/${id}/seats`, {
+    json: body,
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to add an agent",
+  });
+}
+
+export function removeWorkflowSeat(id: string, participantId: string): Promise<Workflow> {
+  return request<Workflow>(`/api/workflows/${id}/seats/${participantId}`, {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to remove the agent",
+  });
+}
+
+export function finalizeWorkflow(id: string, body: { homeChannelId?: string } = {}): Promise<Workflow> {
+  return request<Workflow>(`/api/workflows/${id}/finalize`, {
+    json: body,
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to create the workflow",
+  });
+}
+
+export function runWorkflow(id: string): Promise<WorkflowRun> {
+  return request<WorkflowRun>(`/api/workflows/${id}/run`, {
+    json: {},
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to start a run",
+  });
+}
+
+export function stopWorkflowRun(id: string, runId: string): Promise<WorkflowRun> {
+  return request<WorkflowRun>(`/api/workflows/${id}/runs/${runId}/stop`, {
+    json: {},
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to stop the run",
+  });
+}
+
+export function deleteWorkflow(id: string): Promise<{ ok: boolean }> {
+  return request(`/api/workflows/${id}`, {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to delete workflow",
   });
 }
 
@@ -841,6 +1114,8 @@ export function disconnectGoogle(): Promise<{ ok: boolean }> {
 export interface GoogleStatus {
   connected: boolean;
   email?: string;
+  // The stored OAuth grant is dead (invalid_grant) — the user must re-consent to revive it.
+  needsReconnect?: boolean;
 }
 
 export function getGoogleStatus(): Promise<GoogleStatus> {

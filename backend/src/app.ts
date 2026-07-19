@@ -12,10 +12,12 @@ import githubRouter from "./http/routes/github";
 import googleRouter from "./http/routes/google";
 import integrationsRouter from "./http/routes/integrations";
 import schedulesRouter from "./http/routes/schedules";
+import workflowsRouter from "./http/routes/workflows";
 import workfeedRouter from "./http/routes/workfeed";
 import devicesRouter from "./http/routes/devices";
 import pushRouter from "./http/routes/push";
 import llmRouter from "./http/routes/llm";
+import { slackEventsRouter, slackRouter } from "./http/routes/slack";
 
 // Build the Express app: global middleware, the per-domain routers, and the terminal error
 // handler. The http server + WebSocket wiring live in index.ts (boot).
@@ -24,6 +26,9 @@ export function createApp(): express.Express {
   // The LLM inference proxy for self-hosted runners must see the RAW request body (it forwards the
   // Anthropic request verbatim + streams the response), so it is mounted BEFORE express.json().
   app.use(llmRouter);
+  // The Slack events webhook verifies its signature over the RAW body, so like the LLM proxy it
+  // must be mounted BEFORE express.json(). The rest of the Slack routes are ordinary JSON below.
+  app.use(slackEventsRouter);
   app.use(express.json());
   app.use(auth.attachAuth); // populates req.auth when a valid Firebase token is present
 
@@ -57,9 +62,11 @@ export function createApp(): express.Express {
   app.use(googleRouter);
   app.use(integrationsRouter);
   app.use(schedulesRouter);
+  app.use(workflowsRouter);
   app.use(workfeedRouter);
   app.use(devicesRouter);
   app.use(pushRouter);
+  app.use(slackRouter);
 
   app.use(errorHandler);
   return app;

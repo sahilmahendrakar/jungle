@@ -1,10 +1,13 @@
 import { useEffect, useState } from "react";
-import { Bot, Cloud, MonitorSmartphone } from "lucide-react";
-import { createParticipant, listDevices, type RunnerHost } from "../../api";
-import { MODEL_OPTIONS, SDK_MODE_OPTIONS } from "../../lib/chat";
+import { Cloud, MonitorSmartphone } from "lucide-react";
+import { createParticipant, listDevices, listParticipants, type Participant, type RunnerHost } from "../../api";
+import { MODEL_OPTIONS, SDK_MODE_OPTIONS, DEFAULT_SDK_MODE } from "../../lib/chat";
+import { randomFreePreset, toKebab } from "../../lib/agent-presets";
+import { avatarClass, initials } from "@/lib/people";
 import { SelectMenu } from "./panels";
 import { IntegrationsEditor, validateIntegrations, type IntegrationDraft } from "./IntegrationsEditor";
 import { useConnections } from "@/lib/connections";
+import { cn } from "@/lib/utils";
 import {
   Dialog,
   DialogContent,
@@ -16,9 +19,37 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 
 // The create-agent dialog: a persistent cloud agent (kind "agent", sdk runtime). Owns its own
 // form state; tells the parent to refresh People on success, and to surface any notice.
+
+// The creator's last-used environment / model / permissions, saved on every successful create
+// and prefilled the next time the dialog opens — most people run a stable setup and shouldn't
+// have to re-pick it per agent. Per-browser (localStorage), not synced to the account.
+const AGENT_DEFAULTS_KEY = "jungle:add-agent-defaults:v1";
+
+interface AgentDefaults {
+  env?: string;
+  model?: string;
+  mode?: string;
+}
+
+function loadAgentDefaults(): AgentDefaults {
+  try {
+    return JSON.parse(localStorage.getItem(AGENT_DEFAULTS_KEY) ?? "{}") as AgentDefaults;
+  } catch {
+    return {};
+  }
+}
+
+function saveAgentDefaults(d: Required<AgentDefaults>) {
+  try {
+    localStorage.setItem(AGENT_DEFAULTS_KEY, JSON.stringify(d));
+  } catch {
+    /* storage unavailable — defaults just won't persist */
+  }
+}
 export function AddAgentDialog({
   open,
   onOpenChange,
@@ -30,11 +61,18 @@ export function AddAgentDialog({
   onCreated: () => void;
   onNotice: (msg: string) => void;
 }) {
-  const [agHandle, setAgHandle] = useState("");
-  const [agName, setAgName] = useState("");
+  // Pre-fill with a random playful preset so a user can create an agent in one click; refined to a
+  // free handle (one not already taken in this workspace) when the dialog opens.
+  const [preset0] = useState(() => randomFreePreset(new Set()));
+  const [agHandle, setAgHandle] = useState(preset0.handle);
+  const [agName, setAgName] = useState(preset0.name);
+  // Whether the user has manually edited the handle. Once they have, typing in Name no longer
+  // overwrites it — only auto-derives until first manual touch.
+  const [handleTouched, setHandleTouched] = useState(false);
   const [integrations, setIntegrations] = useState<IntegrationDraft[]>([]);
+  const [agPersona, setAgPersona] = useState("");
   const [agModel, setAgModel] = useState(MODEL_OPTIONS[0].id);
-  const [agMode, setAgMode] = useState(SDK_MODE_OPTIONS[0].id); // new agents are sdk runtime
+  const [agMode, setAgMode] = useState(DEFAULT_SDK_MODE); // new agents are sdk runtime
   const [addingAgent, setAddingAgent] = useState(false);
   // Environment: "cloud" (default) or `self:<hostId>` for one of the account's registered devices.
   const [env, setEnv] = useState("cloud");
@@ -45,7 +83,34 @@ export function AddAgentDialog({
 
   useEffect(() => {
     if (!open) return;
-    listDevices().then(setDevices).catch(() => setDevices([]));
+    // Prefill environment/model/permissions from the creator's last successful create (falling
+    // back to the global defaults on first use). A saved self-host env is validated against the
+    // devices that still exist once they load — a since-removed device falls back to Cloud.
+    const defaults = loadAgentDefaults();
+    setAgModel(MODEL_OPTIONS.some((o) => o.id === defaults.model) ? defaults.model! : MODEL_OPTIONS[0].id);
+    setAgMode(SDK_MODE_OPTIONS.some((o) => o.id === defaults.mode) ? defaults.mode! : DEFAULT_SDK_MODE);
+    const wantEnv = defaults.env ?? "cloud";
+    listDevices()
+      .then((ds) => {
+        setDevices(ds);
+        setEnv(wantEnv === "cloud" || ds.some((d) => `self:${d.id}` === wantEnv) ? wantEnv : "cloud");
+      })
+      .catch(() => {
+        setDevices([]);
+        setEnv("cloud");
+      });
+    // Pick a fresh playful preset whose handle isn't already taken in this workspace.
+    listParticipants()
+      .then((ps: Participant[]) => {
+        const taken = new Set(ps.map((p) => p.handle));
+        const preset = randomFreePreset(taken);
+        setAgName(preset.name);
+        setAgHandle(preset.handle);
+        setHandleTouched(false);
+      })
+      .catch(() => {
+        /* can't read participants — leave the existing preset */
+      });
   }, [open]);
 
   const envOptions = [
@@ -98,15 +163,17 @@ export function AddAgentDialog({
         integrations,
         model: agModel,
         mode: agMode,
+        ...(agPersona.trim() ? { persona: agPersona.trim() } : {}),
         ...(selfHost ? { runnerProvider: "self_hosted", hostId: selfHost } : {}),
       });
       onOpenChange(false);
-      setAgHandle("");
-      setAgName("");
+      // Remember this setup as the prefill for the next create. Name/handle are re-preset (to a
+      // fresh free animal) the next time the dialog opens; env/model/mode are left in place and
+      // re-applied from storage on open, so the dialog always starts from the last-used defaults.
+      saveAgentDefaults({ env, model: agModel, mode: agMode });
+      setHandleTouched(false);
       setIntegrations([]);
-      setAgModel(MODEL_OPTIONS[0].id);
-      setAgMode(SDK_MODE_OPTIONS[0].id);
-      setEnv("cloud");
+      setAgPersona("");
       onCreated();
     } catch (e) {
       onNotice(String((e as Error).message ?? e));
@@ -119,34 +186,73 @@ export function AddAgentDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Bot className="size-5 text-primary" /> Add an agent
+          <DialogTitle className="flex items-center gap-3">
+            {/* Avatar defaults to the agent's initials (colored by handle, like the rest of the app).
+                Upload-your-own is a follow-up. */}
+            <span
+              className={cn(
+                "flex size-11 shrink-0 items-center justify-center rounded-full text-sm font-semibold",
+                avatarClass(agHandle || agName),
+              )}
+            >
+              {initials(agName)}
+            </span>
+            <span>Add an agent</span>
           </DialogTitle>
-          <DialogDescription>
-            A persistent, cloud-living assistant. Agents can just chat, or be given
-            integrations for extra tools &amp; context.
-          </DialogDescription>
+          <DialogDescription>New teammate — ready in a click.</DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
           <div className="space-y-1.5">
-            <Label htmlFor="agent-handle">Handle</Label>
-            <Input
-              id="agent-handle"
-              data-testid="agent-handle"
-              value={agHandle}
-              onChange={(e) => setAgHandle(e.target.value)}
-              placeholder="e.g. deploy-bot"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="agent-name">Display name</Label>
+            <Label htmlFor="agent-name">Name</Label>
             <Input
               id="agent-name"
               data-testid="agent-name"
               value={agName}
-              onChange={(e) => setAgName(e.target.value)}
+              onChange={(e) => {
+                const v = e.target.value;
+                setAgName(v);
+                // Auto-derive the handle from the name (lowercase kebab) until the user edits the
+                // handle themselves.
+                if (!handleTouched) setAgHandle(toKebab(v));
+              }}
               placeholder="e.g. Deploy Bot"
             />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="agent-handle">Handle</Label>
+            <div className="relative">
+              <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">@</span>
+              <Input
+                id="agent-handle"
+                data-testid="agent-handle"
+                value={agHandle}
+                onChange={(e) => {
+                  setAgHandle(e.target.value);
+                  setHandleTouched(true);
+                }}
+                placeholder="handle"
+                className="pl-7"
+              />
+            </div>
+          </div>
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-2">
+              <Label htmlFor="agent-instructions">Instructions</Label>
+              <span className="rounded-full border bg-muted px-1.5 text-[10px] font-medium text-muted-foreground">
+                Optional
+              </span>
+            </div>
+            <Textarea
+              id="agent-instructions"
+              data-testid="agent-instructions"
+              value={agPersona}
+              onChange={(e) => setAgPersona(e.target.value)}
+              placeholder={`What should this agent do? e.g. "You're a careful release engineer who summarizes PRs and flags risky changes."`}
+              className="min-h-[72px] resize-none"
+            />
+            <p className="text-[11px] text-muted-foreground">
+              Added to the agent's system prompt. Edit anytime from its profile.
+            </p>
           </div>
           <IntegrationsEditor
             value={integrations}
@@ -154,24 +260,11 @@ export function AddAgentDialog({
             connections={connections}
             disabledKeys={integrationDisabledKeys}
           />
-          <div className="space-y-1.5">
-            <Label>Environment</Label>
-            <SelectMenu value={env} onChange={setEnv} options={envOptions} testId="agent-environment" />
-            {selectedDevice ? (
-              <p className="text-xs text-muted-foreground">
-                Runs on <span className="font-medium">{selectedDevice.name}</span> with that machine's
-                access. Anyone in this workspace can message it, and tool approvals apply — review the
-                permission mode below.
-                {!selectedDevice.online && " This device is offline; the agent will start when it reconnects."}
-              </p>
-            ) : (
-              <p className="text-xs text-muted-foreground">
-                Runs in a managed cloud sandbox. To run an agent on your own machine, connect a device
-                from the Environments page first.
-              </p>
-            )}
-          </div>
           <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <Label>Environment</Label>
+              <SelectMenu value={env} onChange={setEnv} options={envOptions} testId="agent-environment" />
+            </div>
             <div className="space-y-1.5">
               <Label>Model</Label>
               <SelectMenu
@@ -181,7 +274,7 @@ export function AddAgentDialog({
                 testId="agent-model"
               />
             </div>
-            <div className="space-y-1.5">
+            <div className="col-span-2 space-y-1.5">
               <Label>Tool permissions</Label>
               <SelectMenu
                 value={agMode}
@@ -191,6 +284,11 @@ export function AddAgentDialog({
               />
             </div>
           </div>
+          {selectedDevice && !selectedDevice.online && (
+            <p className="text-[11px] text-muted-foreground">
+              This device is offline; the agent will start when it reconnects.
+            </p>
+          )}
         </div>
         <DialogFooter>
           <Button data-testid="add-agent-button" onClick={submitAddAgent} disabled={addingAgent}>

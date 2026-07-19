@@ -50,6 +50,20 @@ function promptBlock(spec: McpAdapterSpec, requireApproval: boolean): string {
   );
 }
 
+// Shown when the integration is attached but the backing connection is permanently dead
+// (needs_reconnect) or gone — so the agent can name the problem instead of silently having no
+// mcp__<key>__* tools (mirrors gmail.ts's disconnectedBlock).
+function disconnectedBlock(spec: McpAdapterSpec): string {
+  return (
+    `\n\n— ${spec.displayName}: connection expired —\n` +
+    `Your ${spec.displayName} integration is attached, but the backing authorization has expired ` +
+    `or been revoked, so the mcp__${spec.key}__* tools are NOT available this session. Do NOT ` +
+    `silently skip ${spec.displayName} work because of this. If the task at hand involves ` +
+    `${spec.displayName}, tell the user: your ${spec.displayName} connection expired and needs to ` +
+    `be reconnected in Settings → Connections — then you can pick the work back up.`
+  );
+}
+
 export function createMcpRemoteAdapter(spec: McpAdapterSpec): IntegrationAdapter {
   return {
     key: spec.key,
@@ -78,6 +92,11 @@ export function createMcpRemoteAdapter(spec: McpAdapterSpec): IntegrationAdapter
         accessToken = await getValidMcpToken(spec, backing);
       } catch (e) {
         console.error(`runner[${agent.id}] configure: could not mint ${spec.key} token:`, e);
+        // Permanently dead (flagged needs_reconnect by getValidMcpToken) or disconnected
+        // entirely → tell the agent so it can tell the user (mirrors gmail.ts). Transient
+        // failures stay silent.
+        const row = await db.getIntegrationConnection(backing, spec.key).catch(() => null);
+        if (!row || row.needs_reconnect) return disconnectedBlock(spec);
         return null;
       }
       const requireApproval = requireApprovalOf(spec, config);

@@ -13,6 +13,7 @@ import { catalogEntry, type ModelProvider, type ProviderConfig } from "@jungle/s
 // the first-party default (container ANTHROPIC_API_KEY) and never needs routing.
 const PROVIDER_ENV: Record<Exclude<ModelProvider, "anthropic">, { baseUrl: string; envVar: string }> = {
   zai: { baseUrl: "https://api.z.ai/api/anthropic", envVar: "Z_AI_API_KEY" },
+  moonshot: { baseUrl: "https://api.moonshot.ai/anthropic", envVar: "MOONSHOT_API_KEY" },
 };
 
 // True when the model can actually run: Anthropic/default models always can; a routed provider's

@@ -1,11 +1,13 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
   Activity as ActivityIcon,
   Bot,
   ExternalLink,
   MessageSquare,
   Plus,
+  Search,
   ShieldQuestion,
+  Users,
 } from "lucide-react";
 import type { Deliverable, Participant } from "./api";
 import { STATUS_DOT, STATUS_LABEL, fmtRelative, fmtTokens, type ToolConfirm } from "./lib/chat";
@@ -15,11 +17,31 @@ import { shortDeliverableUrl } from "./components/chat/deliverableCards";
 import { ViewShell } from "./components/chat/ViewShell";
 import { PersonAvatar } from "./components/chat/panels";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
-// Mission control: every agent at a glance — live status, what it's doing right now, what's
-// waiting on you, and the last thing it shipped. The landing view when no conversation is open:
-// the product is a team of workers, and this is the floor you walk in onto.
+// Mission control: the whole team at a glance — humans and agents. Agents show live status, what
+// they're doing right now, what's waiting on you, and the last thing they shipped; humans show
+// who they are and a quick DM path. The landing view when no conversation is open: the product
+// is a team of workers, and this is the floor you walk in onto.
+
+type KindFilter = "all" | "human" | "agent";
+
+const KIND_TABS: { value: KindFilter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "human", label: "Humans" },
+  { value: "agent", label: "Agents" },
+];
+
+function matchesQuery(p: Participant, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+  return (
+    p.display_name.toLowerCase().includes(q) ||
+    p.handle.toLowerCase().includes(q) ||
+    `@${p.handle}`.toLowerCase().includes(q)
+  );
+}
 
 function AgentCard({
   agent,
@@ -164,8 +186,63 @@ function AgentCard({
   );
 }
 
+// A human teammate: identity + a DM path. None of the agent machinery (status, context, runs).
+function PersonCard({
+  person,
+  onOpenDm,
+  onOpenProfile,
+}: {
+  person: Participant;
+  onOpenDm: (personId: string) => void;
+  onOpenProfile: (personId: string) => void;
+}) {
+  return (
+    <div
+      data-testid="person-card"
+      className="flex flex-col rounded-xl border bg-card p-4 shadow-sm transition-colors hover:border-primary/30"
+    >
+      <div className="flex items-start gap-3">
+        <button onClick={() => onOpenProfile(person.id)} className="shrink-0 transition-opacity hover:opacity-80">
+          <PersonAvatar name={person.display_name} handle={person.handle} />
+        </button>
+        <div className="min-w-0 flex-1">
+          <button
+            onClick={() => onOpenProfile(person.id)}
+            className="block max-w-full truncate text-sm font-semibold hover:underline"
+          >
+            {person.display_name}
+          </button>
+          <div className="truncate text-xs text-muted-foreground">@{person.handle}</div>
+        </div>
+        <span className="inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+          Human
+        </span>
+      </div>
+
+      <div className="mt-3 min-h-10 space-y-1.5 text-xs text-muted-foreground/60">
+        <div className="truncate">
+          {person.role === "admin" ? "Admin" : "Member"}
+          {person.email ? ` · ${person.email}` : ""}
+        </div>
+      </div>
+
+      <div className="mt-3 flex items-center gap-2 border-t pt-3">
+        <Button
+          size="sm"
+          variant="outline"
+          data-testid="person-card-dm"
+          onClick={() => onOpenDm(person.id)}
+          className="h-7 gap-1.5 text-xs"
+        >
+          <MessageSquare className="size-3.5" /> Message
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export function AgentsHome({
-  agents,
+  participants,
   liveTurns,
   confirms,
   deliverables,
@@ -178,7 +255,7 @@ export function AgentsHome({
   onOpenApprovals,
   onAddAgent,
 }: {
-  agents: Participant[];
+  participants: Participant[];
   liveTurns: Map<string, LiveTurn>;
   confirms: ToolConfirm[];
   deliverables: Deliverable[];
@@ -191,18 +268,41 @@ export function AgentsHome({
   onOpenApprovals: () => void;
   onAddAgent: () => void;
 }) {
-  // Working agents float to the top; then those with something waiting; then the rest by name.
-  const sorted = useMemo(() => {
-    const confirmsByAgent = new Map<string, number>();
+  const [query, setQuery] = useState("");
+  const [kindFilter, setKindFilter] = useState<KindFilter>("all");
+
+  const confirmsByAgent = useMemo(() => {
+    const m = new Map<string, number>();
     for (const c of confirms) {
-      if (c.agentId) confirmsByAgent.set(c.agentId, (confirmsByAgent.get(c.agentId) ?? 0) + 1);
+      if (c.agentId) m.set(c.agentId, (m.get(c.agentId) ?? 0) + 1);
     }
-    const rank = (a: Participant) =>
-      a.status === "working" || a.status === "waking" ? 0 : (confirmsByAgent.get(a.id) ?? 0) > 0 ? 1 : 2;
-    return [...agents].sort(
-      (a, b) => rank(a) - rank(b) || a.display_name.localeCompare(b.display_name),
-    );
-  }, [agents, confirms]);
+    return m;
+  }, [confirms]);
+
+  const kindCounts = useMemo(() => {
+    let humans = 0;
+    let agents = 0;
+    for (const p of participants) {
+      if (p.kind === "agent") agents++;
+      else humans++;
+    }
+    return { all: participants.length, human: humans, agent: agents };
+  }, [participants]);
+
+  // Kind filter + name/handle search, then working agents float to the top; then those with
+  // something waiting; then the rest by name.
+  const visible = useMemo(() => {
+    const rank = (p: Participant) =>
+      p.kind === "agent" && (p.status === "working" || p.status === "waking")
+        ? 0
+        : (confirmsByAgent.get(p.id) ?? 0) > 0
+          ? 1
+          : 2;
+    return participants
+      .filter((p) => (kindFilter === "all" ? true : p.kind === kindFilter))
+      .filter((p) => matchesQuery(p, query))
+      .sort((a, b) => rank(a) - rank(b) || a.display_name.localeCompare(b.display_name));
+  }, [participants, kindFilter, query, confirmsByAgent]);
 
   const lastShippedByAgent = useMemo(() => {
     const m = new Map<string, Deliverable>();
@@ -210,10 +310,12 @@ export function AgentsHome({
     return m;
   }, [deliverables]);
 
+  const searching = query.trim().length > 0 || kindFilter !== "all";
+
   return (
     <ViewShell
-      icon={<Bot className="size-5" />}
-      title="Agents"
+      icon={<Users className="size-5" />}
+      title="Team"
       sidebarOpen={sidebarOpen}
       onOpenDrawer={onOpenDrawer}
       onExpandSidebar={onExpandSidebar}
@@ -224,7 +326,43 @@ export function AgentsHome({
         </Button>
       }
     >
-      {agents.length === 0 ? (
+      {/* Search by name or handle, with a humans/agents filter on the right. */}
+      <div className="mb-4 flex items-center gap-2">
+        <div className="relative min-w-0 flex-1">
+          <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground/60" />
+          <Input
+            data-testid="team-search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search by name or handle…"
+            className="pl-9"
+          />
+        </div>
+        <div
+          data-testid="team-kind-filter"
+          className="flex shrink-0 items-center rounded-lg border bg-muted/40 p-0.5"
+        >
+          {KIND_TABS.map((tab) => (
+            <button
+              key={tab.value}
+              data-testid={`team-filter-${tab.value}`}
+              data-active={kindFilter === tab.value || undefined}
+              onClick={() => setKindFilter(tab.value)}
+              className={cn(
+                "rounded-md px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground",
+                kindFilter === tab.value && "bg-background text-foreground shadow-sm",
+              )}
+            >
+              {tab.label}
+              <span className="ml-1 text-[10px] tabular-nums text-muted-foreground/60">
+                {kindCounts[tab.value]}
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {participants.length === 0 ? (
         <div className="rounded-xl border border-dashed p-10 text-center">
           <Bot className="mx-auto size-8 text-muted-foreground/50" />
           <p className="mt-3 text-sm font-medium">No agents yet</p>
@@ -236,21 +374,52 @@ export function AgentsHome({
             <Plus className="size-4" /> Add your first agent
           </Button>
         </div>
+      ) : visible.length === 0 ? (
+        <div className="rounded-xl border border-dashed p-10 text-center" data-testid="team-no-results">
+          <Search className="mx-auto size-8 text-muted-foreground/50" />
+          <p className="mt-3 text-sm font-medium">No one matches</p>
+          <p className="mx-auto mt-1 max-w-sm text-sm text-muted-foreground">
+            Try a different name or handle
+            {kindFilter !== "all" ? ", or widen the filter to everyone" : ""}.
+          </p>
+          {searching && (
+            <Button
+              variant="outline"
+              className="mt-4"
+              data-testid="team-clear-search"
+              onClick={() => {
+                setQuery("");
+                setKindFilter("all");
+              }}
+            >
+              Clear search
+            </Button>
+          )}
+        </div>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2">
-          {sorted.map((a) => (
-            <AgentCard
-              key={a.id}
-              agent={a}
-              turn={liveTurns.get(a.id)}
-              pendingConfirms={confirms.filter((c) => c.agentId === a.id).length}
-              lastShipped={lastShippedByAgent.get(a.id)}
-              onOpenDm={onOpenDm}
-              onOpenActivity={onOpenActivity}
-              onOpenProfile={onOpenProfile}
-              onOpenApprovals={onOpenApprovals}
-            />
-          ))}
+          {visible.map((p) =>
+            p.kind === "agent" ? (
+              <AgentCard
+                key={p.id}
+                agent={p}
+                turn={liveTurns.get(p.id)}
+                pendingConfirms={confirmsByAgent.get(p.id) ?? 0}
+                lastShipped={lastShippedByAgent.get(p.id)}
+                onOpenDm={onOpenDm}
+                onOpenActivity={onOpenActivity}
+                onOpenProfile={onOpenProfile}
+                onOpenApprovals={onOpenApprovals}
+              />
+            ) : (
+              <PersonCard
+                key={p.id}
+                person={p}
+                onOpenDm={onOpenDm}
+                onOpenProfile={onOpenProfile}
+              />
+            ),
+          )}
         </div>
       )}
     </ViewShell>

@@ -8,6 +8,7 @@ import {
   CONNECTION_TYPES,
   type ConnectionType,
   type GithubStatus,
+  type GoogleStatus,
   type IntegrationStatuses,
   disconnectGithub,
   disconnectGoogle,
@@ -41,6 +42,11 @@ const BRAND_PATHS: Record<string, string> = {
   // Granola: simple meeting-notes glyph (no official mark in simple-icons).
   granola:
     "M5 2.5h14a1 1 0 0 1 1 1v17a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-17a1 1 0 0 1 1-1zm2.5 4.75a.75.75 0 0 0 0 1.5h9a.75.75 0 0 0 0-1.5zm0 4a.75.75 0 0 0 0 1.5h9a.75.75 0 0 0 0-1.5zm0 4a.75.75 0 0 0 0 1.5h5.5a.75.75 0 0 0 0-1.5z",
+  slack:
+    "M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312zM18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312zM15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z",
+  // X (formerly Twitter): official monochrome mark — black in light mode, white in dark.
+  x:
+    "M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z",
 };
 
 // Brand accent per connection/integration key, used for the glyph on a neutral tile so the
@@ -53,6 +59,7 @@ const BRAND_COLORS: Record<string, string> = {
   notion: "", // black/white mark
   "google-drive": "#34A853",
   granola: "#D97706",
+  x: "", // black/white mark — uses text-foreground
 };
 
 // The raw brand glyph (an SVG path on a 24×24 viewBox).
@@ -102,6 +109,9 @@ export interface ConnectionState extends ConnectionType {
   connected: boolean;
   // Display handle of the linked account (@login / email / workspace name), when known.
   account?: string | null;
+  // The stored OAuth grant is dead (invalid_grant) — only a fresh consent revives it.
+  // Rendered as an amber "Reconnect needed" state; the connect flow IS the reconnect flow.
+  needsReconnect?: boolean;
   // Extra GitHub detail (App installations / repo count) for the Settings expansion.
   github?: GithubStatus | null;
 }
@@ -122,7 +132,7 @@ export interface ConnectionsApi {
 
 function assemble(
   gh: GithubStatus | null,
-  google: { connected: boolean; email?: string } | null,
+  google: GoogleStatus | null,
   ints: IntegrationStatuses,
 ): ConnectionState[] {
   return CONNECTION_TYPES.map((c) => {
@@ -130,14 +140,24 @@ function assemble(
       return { ...c, connected: gh?.connected ?? false, account: gh?.login ? `@${gh.login}` : null, github: gh };
     }
     if (c.kind === "google") {
-      return { ...c, connected: google?.connected ?? false, account: google?.email ?? null };
+      return {
+        ...c,
+        connected: google?.connected ?? false,
+        account: google?.email ?? null,
+        needsReconnect: google?.needsReconnect ?? false,
+      };
     }
     const st = ints[c.key];
-    return { ...c, connected: st?.connected ?? false, account: st?.externalAccount ?? null };
+    return {
+      ...c,
+      connected: st?.connected ?? false,
+      account: st?.externalAccount ?? null,
+      needsReconnect: st?.needsReconnect ?? false,
+    };
   });
 }
 
-async function fetchAll(): Promise<[GithubStatus | null, { connected: boolean; email?: string } | null, IntegrationStatuses]> {
+async function fetchAll(): Promise<[GithubStatus | null, GoogleStatus | null, IntegrationStatuses]> {
   // Each family fails independently (e.g. dev-bypass mode has no GitHub/Google auth routes) —
   // a failed fetch just renders as "not connected" rather than breaking the whole list.
   return Promise.all([

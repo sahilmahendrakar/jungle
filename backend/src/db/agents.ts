@@ -117,6 +117,9 @@ export interface DispatchContext {
   // fires). Lets the UI anchor live work under the message that asked for it.
   messageId?: string;
   scheduleId?: string;
+  // The workflow run this turn belongs to: set on the kickoff dispatch and on any turn
+  // triggered from inside a run's thread. Read back (jsonb) for run timelines/quiescence.
+  workflowRunId?: string;
 }
 
 export interface InboxItem {

@@ -1,113 +1,58 @@
-// Push-notification dispatcher (Expo Push Service). Called fire-and-forget from the single
-// fan-out site in ws/appSocket.ts (messages) and services/confirmations.ts (approval requests),
-// so every place a message or confirmation reaches a user's other devices also reaches their
-// phone. Notification rules mirror the web notify logic: a message notifies non-sender HUMAN
-// members when it's a DM or an @mention; a confirmation request notifies all human members.
-// Recipients already looking at the app on a live socket are NOT suppressed here (the client
-// suppresses the banner for the channel it's actively viewing) — keeping this stateless.
-import { Expo, type ExpoPushMessage, type ExpoPushTicket } from "expo-server-sdk";
+import { getMessaging } from "firebase-admin/messaging";
 import * as db from "../db";
-import type { PersistedMessage } from "../db";
+import { firebaseApp } from "../auth";
 
-const expo = new Expo();
+// Mobile push via FCM (firebase-admin is already the auth dependency; its messaging API sends
+// to APNs through the Firebase project the iOS app registers with). No-op when Firebase isn't
+// configured (dev bypass) or the recipients have no registered tokens.
 
-const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
-
-// Send a batch, then prune any tokens Expo immediately rejected as unregistered.
-async function send(messages: ExpoPushMessage[]): Promise<void> {
-  if (messages.length === 0) return;
-  const chunks = expo.chunkPushNotifications(messages);
-  const dead: string[] = [];
-  for (const chunk of chunks) {
-    let tickets: ExpoPushTicket[] = [];
-    try {
-      tickets = await expo.sendPushNotificationsAsync(chunk);
-    } catch (err) {
-      console.error("[push] send failed:", err);
-      continue;
-    }
-    tickets.forEach((t, i) => {
-      if (t.status === "error" && t.details?.error === "DeviceNotRegistered") {
-        const to = chunk[i].to;
-        if (typeof to === "string") dead.push(to);
-      }
-    });
-  }
-  if (dead.length) await db.deletePushTokens(dead).catch(() => {});
+export interface PushPayload {
+  title: string;
+  body: string;
+  // Deep-link/context data (all values must be strings for FCM).
+  data?: Record<string, string>;
+  // iOS notification category (e.g. "CONFIRM" carries Allow/Deny actions).
+  category?: string;
+  // Collapse/group key: channel id, so a conversation's pushes thread together.
+  threadId?: string;
 }
 
-// Collect the Expo tokens for a set of human participants (by their accounts), excluding the
-// sender. Returns [] when nobody's eligible.
-async function tokensForHumans(members: db.Participant[], excludeId: string): Promise<string[]> {
-  const uids = members
-    .filter((m) => m.kind === "human" && m.id !== excludeId && m.firebase_uid)
-    .map((m) => m.firebase_uid as string);
-  return db.listPushTokensByUids([...new Set(uids)]);
-}
+// Send to every registered device of the given accounts. Fire-and-forget from call sites —
+// never lets a push failure break the message path.
+export async function sendPush(uids: string[], payload: PushPayload): Promise<void> {
+  const app = firebaseApp();
+  if (!app || !uids.length) return;
+  const tokens = await db.pushTokensForUids([...new Set(uids)]);
+  if (!tokens.length) return;
 
-// A newly-posted message. Notify non-sender human members when it's a DM or mentions them.
-export async function pushMessage(message: PersistedMessage): Promise<void> {
-  try {
-    const channel = await db.getChannel(message.channel_id);
-    if (!channel) return;
-    const members = await db.channelMembers(message.channel_id);
-    const isDm = channel.kind === "dm";
-    const mentionedIds = new Set((message.mentions ?? []).map((m) => m.id));
-
-    // Eligible human recipients: not the sender, and either a DM or mentioned.
-    const recipients = members.filter(
-      (m) => m.kind === "human" && m.id !== message.sender_id && (isDm || mentionedIds.has(m.id)),
-    );
-    const uids = [...new Set(recipients.map((r) => r.firebase_uid).filter(Boolean) as string[])];
-    const tokens = await db.listPushTokensByUids(uids);
-    if (tokens.length === 0) return;
-
-    const sender = members.find((m) => m.id === message.sender_id);
-    const who = sender ? `@${sender.handle}` : "New message";
-    const title = isDm ? who : `${who} in #${channel.name}`;
-    const body = message.body?.trim() ? clip(message.body, 180) : "Sent an attachment";
-
-    await send(
-      tokens.map((to) => ({
-        to,
-        title,
-        body,
-        sound: "default",
-        data: {
-          url: `jungle:///channel/${channel.id}`,
-          channelId: channel.id,
-          threadRootId: message.thread_root_id ?? undefined,
-          workspaceId: channel.workspace_id,
+  const response = await getMessaging(app).sendEachForMulticast({
+    tokens: tokens.map((t) => t.token),
+    notification: { title: payload.title, body: payload.body },
+    data: payload.data,
+    apns: {
+      payload: {
+        aps: {
+          ...(payload.category ? { category: payload.category } : {}),
+          ...(payload.threadId ? { threadId: payload.threadId } : {}),
+          sound: "default",
         },
-      })),
-    );
-  } catch (err) {
-    console.error("[push] pushMessage error:", err);
-  }
+      },
+    },
+  });
+
+  // Prune tokens FCM says are gone so we stop paying for dead sends.
+  const dead: string[] = [];
+  response.responses.forEach((r, i) => {
+    const code = r.error?.code;
+    if (code === "messaging/registration-token-not-registered" || code === "messaging/invalid-argument") {
+      dead.push(tokens[i].token);
+    }
+  });
+  if (dead.length) await db.removePushTokens(dead);
 }
 
-// A tool-call approval request. Notify all human members (minus the agent, which isn't human).
-export async function pushApproval(opts: {
-  channelId: string;
-  agentName: string;
-  tool: string;
-}): Promise<void> {
-  try {
-    const channel = await db.getChannel(opts.channelId);
-    if (!channel) return;
-    const members = await db.channelMembers(opts.channelId);
-    const tokens = await tokensForHumans(members, "");
-    if (tokens.length === 0) return;
-    await send(
-      tokens.map((to) => ({
-        to,
-        title: "Approval needed",
-        body: clip(`${opts.agentName} wants to run ${opts.tool}`, 180),
-        sound: "default",
-        data: { url: "jungle:///activity", channelId: channel.id, workspaceId: channel.workspace_id },
-      })),
-    );
-  } catch (err) {
-    console.error("[push] pushApproval error:", err);
-  }
+// One-line body preview for a message push.
+export function preview(body: string, max = 140): string {
+  const line = body.replace(/\s+/g, " ").trim();
+  return line.length > max ? `${line.slice(0, max)}…` : line;
 }

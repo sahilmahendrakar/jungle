@@ -49,12 +49,13 @@ export interface ParticipantBase {
 }
 
 // A participant as sent to clients: the public row plus a live `status` (agents only, computed
-// from the runner connection at serialization time — not persisted). `memory_changed_at` is
-// client-side only: stamped when an agent_memory_changed broadcast lands, so an open profile's
-// Memory section knows to refetch.
+// from the runner connection at serialization time — not persisted). `memory_changed_at` /
+// `services_changed_at` are client-side only: stamped when the matching agent_*_changed
+// broadcast lands, so an open profile's Memory/Services section knows to refetch.
 export interface Participant extends ParticipantBase {
   status?: AgentStatus;
   memory_changed_at?: string;
+  services_changed_at?: string;
 }
 
 // --- Self-hosted devices (a registered machine that can run agents) ---
@@ -270,3 +271,42 @@ export interface SearchResult {
   body: string;
   created_at: string;
 }
+
+// --- Activity feed (GET /api/activity) ---
+
+// The composable filter vocabulary shared by the Activity page and message search. All fields
+// are optional; unset fields don't constrain. `from`/`to`/`person`/`inDm` carry HANDLES (no @),
+// `inChannel` a channel name (no #). `to` = mentioned them or in their DM; `person` = from OR to
+// (the profile "recent messages" view). `direction` is relative to the requester.
+export interface ActivityFilters {
+  type: "all" | "messages" | "deliverables";
+  direction?: "sent" | "received" | "mentions";
+  from?: string;
+  to?: string;
+  person?: string;
+  inChannel?: string; // channel name
+  inDm?: string; // DM-with handle (from `in:@handle`)
+  kind?: string; // deliverable kind (DeliverableKind value)
+  text?: string; // free-text remainder, full-text matched
+}
+
+// One message row in the activity feed. Same labelling shape as SearchResult, plus `mentions_me`
+// so the feed can flag "mentioned you" without the client resolving the mentions table.
+export interface ActivityMessage {
+  message_id: string;
+  channel_id: string;
+  channel_name: string;
+  channel_kind: string;
+  dm_with: string | null;
+  thread_root_id: string | null;
+  sender_handle: string;
+  body: string;
+  created_at: string;
+  mentions_me: boolean;
+}
+
+// A feed entry: a message, or a deliverable (nested so Deliverable.kind doesn't collide with the
+// discriminator).
+export type ActivityItem =
+  | { type: "message"; message: ActivityMessage }
+  | { type: "deliverable"; deliverable: Deliverable };

@@ -9,6 +9,7 @@ import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { log } from "./log.js";
 import { MAX_FILES_PER_MESSAGE, type UploadedAttachment } from "./files.js";
+import { createServiceTools, type ServiceOps } from "./service-tools.js";
 
 export interface SendMessageResult {
   ok: boolean;
@@ -78,13 +79,22 @@ export type ScheduleCancelBridge = (
   input: { scheduleId: string },
 ) => Promise<ScheduleCancelResult>;
 
+// Injected by the runner: forward one workflow_* builder frame (list_templates/draft_create/
+// draft_get/draft_set/finalize) and await its correlated workflow_tool_result.
+export type WorkflowToolBridge = (
+  frameType: string,
+  id: string,
+  input: Record<string, unknown>,
+) => Promise<{ ok: boolean; error?: string; text?: string; draftId?: string; workflowId?: string }>;
+
 // Injected by the runner: uploads one workspace file to the backend, returning its
 // attachment id. Throws with a human-readable message on failure.
 export type FileUploader = (filePath: string) => Promise<UploadedAttachment>;
 
 const SEND_TIMEOUT_MS = 60_000;
 
-// All the backend round-trips the jungle tools need, injected by the runner.
+// All the backend round-trips the jungle tools need, injected by the runner. `services` is the
+// one purely-local member: the runner's ServiceManager (no backend round-trip involved).
 export interface JungleBridges {
   sendMessage: SendMessageBridge;
   uploadFile: FileUploader;
@@ -92,6 +102,8 @@ export interface JungleBridges {
   scheduleCreate: ScheduleCreateBridge;
   scheduleList: ScheduleListBridge;
   scheduleCancel: ScheduleCancelBridge;
+  workflowTool: WorkflowToolBridge;
+  services: ServiceOps;
 }
 
 export function createJungleMcpServer(bridges: JungleBridges) {
@@ -385,6 +397,92 @@ export function createJungleMcpServer(bridges: JungleBridges) {
     },
   );
 
+  // --- workflow_* builder tools (used mainly by the workspace's Architect agent) ---
+  // One shared executor: forward the frame, read back the rendered result text.
+  const runWorkflowTool = async (frameType: string, input: Record<string, unknown>) => {
+    try {
+      const r = await withTimeout(bridges.workflowTool(frameType, randomUUID(), input), SEND_TIMEOUT_MS);
+      if (!r.ok) return { content: [{ type: "text" as const, text: `Failed: ${r.error ?? "unknown error"}` }], isError: true };
+      const ids = [r.draftId ? `draftId: ${r.draftId}` : null, r.workflowId ? `workflowId: ${r.workflowId}` : null]
+        .filter(Boolean)
+        .join(", ");
+      return { content: [{ type: "text" as const, text: [r.text, ids].filter(Boolean).join("\n") || "Done." }] };
+    } catch (err) {
+      return {
+        content: [{ type: "text" as const, text: `Failed: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  };
+
+  const rosterSchema = z
+    .array(
+      z.object({
+        role: z.string().describe('Seat name, e.g. "Inbox triage" or "Manager"'),
+        handle_seed: z.string().describe('Handle hint for the new agent, e.g. "scout" (an animal name is assigned if omitted)'),
+        duties: z.string().describe("Prose duties for this seat (becomes the agent's persona)"),
+        integrations: z.array(z.string()).optional().describe('Integration keys this seat needs, e.g. ["gmail"] or ["github"]'),
+        repo: z.string().optional().describe('owner/name of the GitHub repo, when integrations includes "github"'),
+      }),
+    )
+    .max(8)
+    .describe("The team, in order. roster[0] is the intake seat — it receives each run's kickoff. Every seat becomes a fresh agent.");
+
+  const workflowListTemplatesTool = tool(
+    "workflow_list_templates",
+    "List the available workflow templates (id, shape, trigger) to start a draft from.",
+    {},
+    async () => runWorkflowTool("workflow_list_templates", {}),
+  );
+  const workflowDraftCreateTool = tool(
+    "workflow_draft_create",
+    "Create a workflow DRAFT — blank or pre-filled from a template id. Drafts are visible to the " +
+      "user on the Workflows page and cost nothing until finalized.",
+    {
+      templateId: z.string().optional().describe("Template to pre-fill from (see workflow_list_templates)"),
+      name: z.string().optional().describe("Workflow name"),
+    },
+    async (args) => runWorkflowTool("workflow_draft_create", args as Record<string, unknown>),
+  );
+  const workflowDraftGetTool = tool(
+    "workflow_draft_get",
+    "Read a workflow draft (team, trigger, playbook) by draftId.",
+    { draftId: z.string() },
+    async (args) => runWorkflowTool("workflow_draft_get", args as Record<string, unknown>),
+  );
+  const workflowDraftSetTool = tool(
+    "workflow_draft_set",
+    "Update a workflow draft. Provide only the fields you're changing; roster replaces the whole " +
+      "team when given. The user sees the draft update live on the Workflows page.",
+    {
+      draftId: z.string(),
+      name: z.string().optional(),
+      description: z.string().optional().describe("One human-facing sentence: what this workflow does"),
+      emoji: z.string().optional(),
+      trigger: z
+        .union([
+          z.object({ type: z.literal("schedule"), cron: z.string(), timezone: z.string() }),
+          z.object({ type: z.literal("manual") }),
+          z.object({ type: z.literal("channel_message") }),
+        ])
+        .optional()
+        .describe('How runs start: {"type":"schedule",cron,timezone} | {"type":"manual"} | {"type":"channel_message"} (@mention of the intake seat in the home channel)'),
+      roster: rosterSchema.optional(),
+      playbook: z.string().optional().describe("Prose: who does what in a run, who reports, and that the reporter ends with a 'Run complete: …' thread message"),
+    },
+    async (args) => runWorkflowTool("workflow_draft_set", args as Record<string, unknown>),
+  );
+  const workflowFinalizeTool = tool(
+    "workflow_finalize",
+    "Turn a draft into a LIVE workflow: creates any new agents, the home channel, and the " +
+      "trigger. Real machines get created — only call this when the user clearly says go.",
+    {
+      draftId: z.string(),
+      homeChannel: z.string().optional().describe('Adopt an existing channel as home, e.g. "#ops" (default: a new channel named after the workflow)'),
+    },
+    async (args) => runWorkflowTool("workflow_finalize", args as Record<string, unknown>),
+  );
+
   return createSdkMcpServer({
     name: "jungle",
     version: "1.0.0",
@@ -398,7 +496,19 @@ export function createJungleMcpServer(bridges: JungleBridges) {
     // stale transport surfaces as a "Stream closed" tool_result that re-arms the reconnect. Cost is
     // trivial (5 tools) and worth it for the agent's sole communication path.
     alwaysLoad: true,
-    tools: [sendMessage, readHistoryTool, scheduleCreateTool, scheduleListTool, scheduleCancelTool],
+    tools: [
+      sendMessage,
+      readHistoryTool,
+      scheduleCreateTool,
+      scheduleListTool,
+      scheduleCancelTool,
+      workflowListTemplatesTool,
+      workflowDraftCreateTool,
+      workflowDraftGetTool,
+      workflowDraftSetTool,
+      workflowFinalizeTool,
+      ...createServiceTools(bridges.services),
+    ],
   });
 }
 

@@ -14,6 +14,7 @@ import * as runners from "../../runners";
 import { provisionerFor } from "../../provisioner";
 import { broadcastWorkspace } from "../../ws/appSocket";
 import { listPendingConfirmsFor, resolveConfirmDecision } from "../../services/confirmations";
+import * as workflows from "../../services/workflows";
 import { wrap, ApiError } from "../errors";
 import { optInt } from "../validate";
 import { publicParticipant, requireAgent, requireRequester, accountUid } from "../guards";
@@ -70,6 +71,15 @@ router.post(
     const me = await requireRequester(req);
     const { handle, displayName } = req.body ?? {};
     if (!handle || !displayName) throw new ApiError(400, "handle, displayName required");
+    // Optional creator-written instructions/persona, injected into the agent's system prompt. Same
+    // length cap as the profile-page edit; empty string clears it (stored as null).
+    let persona: string | null = null;
+    if (req.body?.persona !== undefined) {
+      persona = String(req.body.persona ?? "").trim() || null;
+      if (persona && persona.length > PERSONA_MAX_LENGTH) {
+        throw new ApiError(400, `instructions must be at most ${PERSONA_MAX_LENGTH} characters`);
+      }
+    }
     const model = req.body?.model ? String(req.body.model) : null;
     if (model && !isAllowedModel(model)) throw new ApiError(400, `unsupported model: ${model}`);
     if (model && !providerConfigured(model)) {
@@ -101,7 +111,7 @@ router.post(
       if (count >= cap) throw new ApiError(409, `this workspace has reached its agent limit (${cap})`);
       return db.createParticipant({
         kind: "agent", workspaceId: me.workspace_id, handle, displayName, runtime: "sdk", runnerToken,
-        model, mode, runnerProvider,
+        model, mode, runnerProvider, persona,
       }, client);
     });
     // Bind the agent to its device before provisioning reads runner_meta.hostId.
@@ -213,11 +223,15 @@ router.put(
     for (const field of type.configFields) {
       if (!config[field.key]) throw new ApiError(400, `${field.label} is required`);
     }
-    const row = await db.setAgentIntegration(agent.id, key, await resolveIntegrationConfig(me, agent.id, key, config));
+    const resolved = await resolveIntegrationConfig(me, agent.id, key, config);
+    const row = await db.setAgentIntegration(agent.id, key, resolved);
     // Integration grants (git creds, MCP servers, prompt blocks) only reach the runner via
     // `configure` — push a fresh one so a connected runner picks the change up at its next turn
     // instead of silently keeping the old grants until a reconnect. No-op when offline.
     await runners.reconfigure(agent.id);
+    // Roster seats advertise the agent's integrations (canvas chips + Connections panel) —
+    // add the key everywhere this agent sits so those views follow the attach.
+    await workflows.syncRosterIntegration(agent.id, key, "attach", resolved);
     res.json(row);
   }),
 );
@@ -226,9 +240,12 @@ router.delete(
   "/api/agents/:id/integrations/:key",
   wrap(async (req, res) => {
     const { agent } = await requireAgent(req);
-    await db.removeAgentIntegration(agent.id, String(req.params.key));
+    const key = String(req.params.key);
+    await db.removeAgentIntegration(agent.id, key);
     // Revoke the grant on a live runner too (same reasoning as the PUT above).
     await runners.reconfigure(agent.id);
+    // …and scrub the key from the agent's roster seats (mirror of the PUT's sync).
+    await workflows.syncRosterIntegration(agent.id, key, "detach");
     res.json({ ok: true });
   }),
 );
@@ -263,6 +280,33 @@ router.get(
     const { agent } = await requireAgent(req);
     const row = await db.getAgentMemory(agent.id);
     res.json({ memory: row?.memory ?? null, updatedAt: row?.memory_updated_at ?? null });
+  }),
+);
+
+// The agent's managed services (service_* tools: dev servers, watchers), as last reported by
+// its runner — the profile panel's Services section. On-demand like memory; live updates are
+// signalled by agent_services_changed broadcasts.
+router.get(
+  "/api/agents/:id/services",
+  wrap(async (req, res) => {
+    const { agent } = await requireAgent(req);
+    const { services, updatedAt } = await db.getAgentServices(agent.id);
+    res.json({ services, updatedAt });
+  }),
+);
+
+// Stop one of the agent's managed services (the profile panel's stop button). Forwards a
+// service_stop frame to the connected runner; the runner kills the process group and reports
+// the fresh list (which lands as an agent_services_changed broadcast).
+router.post(
+  "/api/agents/:id/services/:name/stop",
+  wrap(async (req, res) => {
+    const { agent } = await requireAgent(req);
+    const name = String(req.params.name ?? "");
+    if (!runners.stopService(agent.id, name)) {
+      throw new ApiError(409, "agent is not connected — nothing to stop right now");
+    }
+    res.json({ ok: true });
   }),
 );
 

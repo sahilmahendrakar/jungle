@@ -64,6 +64,11 @@ alter table participants add column if not exists memory             text;
 alter table participants add column if not exists memory_updated_at  timestamptz;
 alter table participants add column if not exists persona            text;
 
+-- Managed services (the runner's service_* tools): snapshot of the agent's service list as
+-- last reported via the `services` runner frame. See migrations/025_runner_services.sql.
+alter table participants add column if not exists runner_services            jsonb;
+alter table participants add column if not exists runner_services_updated_at timestamptz;
+
 -- Per-agent runner provider (gradual Docker -> Fly rollout). 'docker' keeps today's behavior;
 -- 'fly' routes provisioner calls to FlyProvisioner. runner_meta holds provider handles
 -- (Fly: {machineId, volumeId}); null for docker. See migrations/007_fly_provisioner.sql.
@@ -413,12 +418,131 @@ create table if not exists device_auth_requests (
   claimed_at    timestamptz
 );
 
--- Expo push tokens for the mobile app (024_push_tokens.sql). Account-scoped (firebase_uid).
+-- === Slack integration (migrations/023_slack.sql) ===
+-- Two-way channel mirroring via a single "Jungle" Slack app. See services/slackBridge.ts.
+
+-- One Slack workspace (team) install per Jungle workspace (PK enforces 1:1; team_id unique so an
+-- inbound event routes to exactly one install). Bot token plaintext (MVP, like integration_connections).
+create table if not exists slack_installs (
+  workspace_id  uuid primary key references workspaces(id) on delete cascade,
+  team_id       text not null unique,
+  team_name     text,
+  bot_token     text not null,          -- xoxb-…
+  bot_user_id   text not null,          -- U… bot user id (echo-drop on event.user)
+  bot_id        text,                   -- B… id on our own posted messages (echo-drop)
+  scopes        text,
+  installed_by  uuid references participants(id) on delete set null,
+  status        text not null default 'active' check (status in ('active', 'revoked')),
+  created_at    timestamptz not null default now()
+);
+
+-- One Slack channel <-> one Jungle channel (both sides unique).
+create table if not exists slack_channel_links (
+  id                 uuid primary key default gen_random_uuid(),
+  workspace_id       uuid not null references slack_installs(workspace_id) on delete cascade,
+  jungle_channel_id  uuid not null unique references channels(id) on delete cascade,
+  slack_team_id      text not null,
+  slack_channel_id   text not null,
+  slack_channel_name text,
+  status             text not null default 'active' check (status in ('active', 'error')),
+  last_error         text,
+  created_by         uuid references participants(id) on delete set null,
+  created_at         timestamptz not null default now(),
+  unique (slack_team_id, slack_channel_id)
+);
+
+-- Slack user -> Jungle participant ('shadow' placeholder human, or 'linked' to a real account by email).
+create table if not exists slack_user_links (
+  slack_team_id   text not null,
+  slack_user_id   text not null,
+  participant_id  uuid not null references participants(id) on delete cascade,
+  kind            text not null check (kind in ('shadow', 'linked')),
+  created_at      timestamptz not null default now(),
+  primary key (slack_team_id, slack_user_id)
+);
+
+-- Message identity map both directions. slack_ts is a STRING (never parse as a number).
+create table if not exists slack_message_links (
+  jungle_message_id  uuid primary key references messages(id) on delete cascade,
+  slack_team_id      text not null,
+  slack_channel_id   text not null,
+  slack_ts           text not null,
+  slack_thread_ts    text,
+  origin             text not null check (origin in ('slack', 'jungle'))
+);
+create unique index if not exists slack_message_links_slack_idx
+  on slack_message_links (slack_team_id, slack_channel_id, slack_ts);
+
+-- Events API at-least-once dedupe (pruned >24h by the outbox ticker).
+create table if not exists slack_events (
+  event_id    text primary key,
+  received_at timestamptz not null default now()
+);
+
+-- Transactional outbox for Jungle -> Slack delivery (enqueued inside persistMessage's txn).
+create table if not exists slack_outbox (
+  id                 bigserial primary key,
+  link_id            uuid not null references slack_channel_links(id) on delete cascade,
+  jungle_message_id  uuid not null references messages(id) on delete cascade,
+  status             text not null default 'pending' check (status in ('pending', 'delivered', 'failed')),
+  attempts           int not null default 0,
+  next_attempt_at    timestamptz not null default now(),
+  last_error         text,
+  created_at         timestamptz not null default now()
+);
+create index if not exists slack_outbox_pending_idx
+  on slack_outbox (link_id, id) where status = 'pending';
+
+-- Mobile push tokens (FCM registration tokens; iOS today). Account-scoped like devices — one
+-- account's phone gets pushes from all of its workspaces. Kept in sync with
+-- migrations/024_push_tokens.sql.
 create table if not exists push_tokens (
-  token         text primary key,
-  firebase_uid  text not null,
-  platform      text not null default 'ios',
-  created_at    timestamptz not null default now(),
-  last_seen_at  timestamptz not null default now()
+  token        text primary key,
+  firebase_uid text not null,
+  platform     text not null default 'ios',
+  created_at   timestamptz not null default now(),
+  last_seen_at timestamptz not null default now()
 );
 create index if not exists push_tokens_uid_idx on push_tokens (firebase_uid);
+
+-- Workflows: a team of agents + a trigger + a prose playbook, observable as runs. Roster is
+-- jsonb (no members table); a run's transcript is derived (the thread under root_message_id +
+-- member turns whose agent_inbox.context carries workflowRunId). Cron triggers reuse the
+-- schedules ticker via schedules.workflow_id (added below). Kept in sync with
+-- migrations/026_workflows.sql.
+create table if not exists workflows (
+  id              uuid primary key default gen_random_uuid(),
+  workspace_id    uuid not null references workspaces(id) on delete cascade,
+  name            text not null,
+  description     text not null default '',
+  emoji           text,
+  status          text not null default 'draft' check (status in ('draft','active','paused')),
+  template_id     text,
+  home_channel_id uuid references channels(id) on delete set null,
+  trigger         jsonb not null default '{"type":"manual"}'::jsonb,
+  roster          jsonb not null default '[]'::jsonb,
+  playbook        text not null default '',
+  created_by      uuid references participants(id) on delete set null,
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now()
+);
+create index if not exists workflows_ws_idx on workflows (workspace_id);
+
+create table if not exists workflow_runs (
+  id              uuid primary key default gen_random_uuid(),
+  workflow_id     uuid not null references workflows(id) on delete cascade,
+  workspace_id    uuid not null references workspaces(id) on delete cascade,
+  trigger         text not null check (trigger in ('schedule','manual','channel_message')),
+  status          text not null default 'running' check (status in ('running','done','stalled','stopped')),
+  root_message_id uuid references messages(id) on delete set null,
+  summary         text,
+  started_at      timestamptz not null default now(),
+  ended_at        timestamptz
+);
+create index if not exists workflow_runs_wf_idx on workflow_runs (workflow_id, started_at desc);
+create index if not exists workflow_runs_live_idx on workflow_runs (status)
+  where status in ('running','stalled');
+
+-- Backing rows for workflow schedule triggers (hidden from schedule lists/caps; the ticker
+-- fires workflow dispatch instead of a normal agent turn).
+alter table schedules add column if not exists workflow_id uuid references workflows(id) on delete cascade;

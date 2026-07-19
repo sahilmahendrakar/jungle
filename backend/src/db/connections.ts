@@ -15,15 +15,20 @@ export interface IntegrationConnectionRow {
   access_expires_at: string | null;
   scopes: string | null;
   extra: Record<string, unknown>;
+  // True when the refresh grant is permanently dead (invalid_grant) — see migration 027.
+  needs_reconnect: boolean;
 }
+
+const COLUMNS =
+  `participant_id, integration_key, external_account, access_token, refresh_token,
+   access_expires_at, scopes, extra, needs_reconnect`;
 
 export async function getIntegrationConnection(
   participantId: string,
   key: string,
 ): Promise<IntegrationConnectionRow | null> {
   const { rows } = await pool.query<IntegrationConnectionRow>(
-    `select participant_id, integration_key, external_account, access_token, refresh_token,
-            access_expires_at, scopes, extra
+    `select ${COLUMNS}
        from integration_connections where participant_id = $1 and integration_key = $2`,
     [participantId, key],
   );
@@ -33,8 +38,7 @@ export async function getIntegrationConnection(
 // All of a user's integration connections (for the Settings connections list / status).
 export async function listIntegrationConnections(participantId: string): Promise<IntegrationConnectionRow[]> {
   const { rows } = await pool.query<IntegrationConnectionRow>(
-    `select participant_id, integration_key, external_account, access_token, refresh_token,
-            access_expires_at, scopes, extra
+    `select ${COLUMNS}
        from integration_connections where participant_id = $1`,
     [participantId],
   );
@@ -66,6 +70,8 @@ export async function upsertIntegrationConnection(c: {
        access_expires_at = excluded.access_expires_at,
        scopes = excluded.scopes,
        extra = excluded.extra,
+       -- a fresh consent revives the connection
+       needs_reconnect = false,
        updated_at = now()`,
     [
       c.participantId, c.key, c.externalAccount, c.accessToken, c.refreshToken,
@@ -97,6 +103,20 @@ export async function deleteIntegrationConnection(participantId: string, key: st
   await pool.query(
     `delete from integration_connections where participant_id = $1 and integration_key = $2`,
     [participantId, key],
+  );
+}
+
+// Flag/unflag a dead refresh grant (mirrors setGoogleNeedsReconnect). Doesn't touch updated_at —
+// that keeps reflecting the last token write.
+export async function setIntegrationNeedsReconnect(
+  participantId: string,
+  key: string,
+  needsReconnect: boolean,
+): Promise<void> {
+  await pool.query(
+    `update integration_connections set needs_reconnect = $3
+     where participant_id = $1 and integration_key = $2`,
+    [participantId, key, needsReconnect],
   );
 }
 

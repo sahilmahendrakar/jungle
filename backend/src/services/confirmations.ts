@@ -1,7 +1,6 @@
 import { randomBytes } from "node:crypto";
 import * as db from "../db";
 import { fanOut } from "../ws/appSocket";
-import * as push from "./push";
 import { ApiError } from "../http/errors";
 
 // Tool confirmations: a tool call awaiting a human's allow/deny. Kept in memory (single backend);
@@ -64,8 +63,6 @@ export function surfaceConfirmCard(
       tool,
       input,
     });
-    // Also ping the mobile app (fire-and-forget) so an approval can be acted on from a phone.
-    void push.pushApproval({ channelId, agentName: agent.display_name, tool });
   });
 }
 
@@ -96,6 +93,15 @@ export async function resolveConfirmDecision(
     result: decision,
     by: me.handle,
   });
+}
+
+// Any of these agents blocked on a pending confirmation? Used by the workflow stall sweep — a
+// run waiting on a human approval is an approval, not a stall.
+export function hasPendingConfirmForAgents(agentIds: string[]): boolean {
+  for (const p of pendingConfirms.values()) {
+    if (agentIds.includes(p.agentId)) return true;
+  }
+  return false;
 }
 
 // Every confirmation still awaiting a decision that `me` is allowed to act on (member of the

@@ -49,6 +49,11 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     description: "Pick a repo. Agent can clone, read code, open PRs & commit via git + gh CLI.",
     connectionKey: "github",
     configFields: [{ key: "repo", label: "Repository", placeholder: "owner/name" }],
+    // Optional config keys beyond configFields (rendered by IntegrationsEditor under an "Advanced"
+    // disclosure on the GitHub row; validated/normalized by the backend adapter's resolveConfig):
+    //   authorName / authorEmail — the agent's git commit identity. Point these at a real GitHub
+    //   account (its `12345+login@users.noreply.github.com` noreply email works) so the agent's
+    //   commits are attributed to that account instead of showing as unverified on GitHub.
   },
   {
     key: "gmail",
@@ -91,6 +96,15 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     name: "Granola",
     description: "Search and read your Granola meeting notes and transcripts.",
     connectionKey: "granola",
+    configFields: [],
+    connection: "oauth",
+    readOnly: true,
+  },
+  {
+    key: "x",
+    name: "X (Twitter)",
+    description: "Summarize activity on your X account — your recent tweets, mentions, replies and notifications.",
+    connectionKey: "x",
     configFields: [],
     connection: "oauth",
     readOnly: true,
@@ -152,4 +166,13 @@ export interface GmailIntegrationConfig {
   backingParticipantId: string;
   email: string;
   requireSendApproval: boolean;
+}
+
+// The `config` stored on an agent's `x` integration row. Holds NO secrets — the OAuth 2.0 User
+// Context tokens live in the per-user integration_connections table (key "x"). This only records
+// which connected account backs the agent (the attaching user) and its @handle for display; the
+// backend mints access tokens from that connection at runtime (see backend/src/integrations/x.ts).
+export interface XIntegrationConfig {
+  backingParticipantId: string;
+  account: string; // the @handle of the connected account
 }

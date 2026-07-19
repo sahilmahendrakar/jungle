@@ -1,10 +1,13 @@
 import type pg from "pg";
 import type { Message as PersistedMessage, AttachmentMeta, SearchResult } from "@jungle/shared";
+import type { ActivityFilters } from "@jungle/shared";
 import { pool } from "./pool";
 import { withTransaction } from "./tx";
 import { resolveMentions, getParticipant } from "./participants";
 import { attachmentsForMessages } from "./attachments";
 import { formatContextLines, oldestSeqOf, type ContextRow } from "./context";
+import { enqueueOutboxIfLinked } from "./slack";
+import { SqlParams, messageWhere } from "./activity";
 
 // Resolve a thread reply's root. Returns the id to store in thread_root_id, or throws if the
 // target doesn't exist / is in another channel. Guarantees replies never nest: if the target
@@ -83,6 +86,10 @@ export async function persistMessage(args: {
   alsoToChannel?: boolean;
   // Agent sends only: the runner turn that produced this message (see RunnerHooks).
   turnId?: string | null;
+  // Slack bridge: set to "slack" for a message INGESTED from Slack, so it isn't mirrored back out
+  // (echo suppression at the source). Any other value (incl. undefined) enqueues a Slack-mirror
+  // job if the channel is linked — see db/slack.ts enqueueOutboxIfLinked / services/slackBridge.ts.
+  origin?: "slack" | null;
 }): Promise<PersistedMessage> {
   const mentions = await resolveMentions(args.channelId, args.body);
   const { msg, attachments } = await withTransaction(async (client) => {
@@ -130,6 +137,12 @@ export async function persistMessage(args: {
           [row.id, args.attachmentIds, args.senderId],
         );
         attachments = linked.rows;
+      }
+      // Transactional outbox: if this channel mirrors to Slack and the message didn't come FROM
+      // Slack, enqueue a mirror job in the same txn (message + intent commit atomically). Covers
+      // every persist call site — human posts, agent sends, schedule announces — for free.
+      if (args.origin !== "slack") {
+        await enqueueOutboxIfLinked(client, args.channelId, row.id);
       }
     } else {
       // conflict (duplicate client_msg_id) — return the existing row
@@ -223,12 +236,18 @@ export async function getChannelHistoryBefore(
 // websearch_to_tsquery parses free text safely ("fix login", quoted phrases, -exclusions); the
 // predicate matches migrations/019's GIN expression index exactly. dm_with mirrors the channel
 // list's shape so the client can label DM hits with the other member's handle.
+// `filters` carries the shared token language (from:/to:/in:/is: — parsed from the query by the
+// route); its free-text remainder is the tsquery. A filters-only query (no text) lists matching
+// messages without ranking — same semantics as the Activity feed's message branch.
 export async function searchMessages(
   workspaceId: string,
   participantId: string,
-  query: string,
+  filters: ActivityFilters,
   limit = 30,
 ): Promise<SearchResult[]> {
+  const p = new SqlParams(workspaceId, participantId);
+  const where = ["c.workspace_id = $1", ...messageWhere(filters, p, { defaultScope: false })];
+  const lim = p.add(Math.min(50, Math.max(1, limit)));
   const { rows } = await pool.query<SearchResult>(
     `select m.id as message_id, m.channel_id, c.name as channel_name, c.kind as channel_kind,
             (select p2.handle from channel_members cm2
@@ -240,11 +259,10 @@ export async function searchMessages(
      join channels c on c.id = m.channel_id
      join channel_members cm on cm.channel_id = m.channel_id and cm.participant_id = $2
      join participants p on p.id = m.sender_id
-     where c.workspace_id = $1
-       and to_tsvector('english', m.body) @@ websearch_to_tsquery('english', $3)
-     order by m.seq desc
-     limit $4`,
-    [workspaceId, participantId, query, Math.min(50, Math.max(1, limit))],
+     where ${where.join(" and ")}
+     order by m.created_at desc
+     limit ${lim}`,
+    p.values,
   );
   return rows;
 }

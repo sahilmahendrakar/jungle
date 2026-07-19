@@ -58,6 +58,9 @@ export function useChatSocket(opts: {
   // Desktop-notification decisions live in App (it knows channels, mentions, prefs); the
   // dispatch just reports what happened.
   onNotifiableMessage: (m: Message, isOpen: boolean) => void;
+  // Fired for every message frame and every deliverable_created frame, whoever they're for —
+  // feeds the Activity page's "new activity" nudge. Keep it cheap (a counter bump).
+  onAnyActivity?: () => void;
   onConfirmRequested: (c: ToolConfirm) => void;
   // Fired on every (re)connect, after the message backfill kicks off — used to re-sync state
   // that only fans out live (pending confirmations).
@@ -86,6 +89,7 @@ export function useChatSocket(opts: {
     ingestLiveEvent,
     ingestQueued,
     onNotifiableMessage,
+    onAnyActivity,
     onConfirmRequested,
     onConnected,
   } = opts;
@@ -144,6 +148,25 @@ export function useChatSocket(opts: {
           if (evt.channelId === selectedRef.current) setSelected(null);
           return;
         }
+        if (evt.type === "schedule_changed") {
+          // Coarse refetch signal for pages that render schedule lists (Home "Coming up", the
+          // Workflows page's embedded schedules). Same relay pattern as device_status_changed.
+          window.dispatchEvent(new CustomEvent("jungle:schedule-changed", { detail: evt }));
+          return;
+        }
+        if (evt.type === "workflow_changed" || evt.type === "workflow_run_changed") {
+          // Coarse refetch signal for the Workflows/Home pages (and later the builder's live
+          // draft preview — the Architect edits a draft, this event makes the preview refetch).
+          window.dispatchEvent(new CustomEvent("jungle:workflow-changed", { detail: evt }));
+          return;
+        }
+        if (evt.type === "slack_link_changed") {
+          // A channel's Slack mirror binding changed (linked/unlinked/errored). Relayed via a
+          // window event so App updates the header badge for the open channel without threading a
+          // setter through here (same pattern as device_status_changed).
+          window.dispatchEvent(new CustomEvent("jungle:slack_link", { detail: evt }));
+          return;
+        }
         if (evt.type === "participant_updated" && evt.participant) {
           setPeople((ps) =>
             ps.map((p) => (p.id === evt.participant.id ? { ...p, ...evt.participant } : p)),
@@ -172,6 +195,15 @@ export function useChatSocket(opts: {
           setPeople((ps) =>
             ps.map((p) =>
               p.id === evt.agentId ? { ...p, memory_changed_at: new Date().toISOString() } : p,
+            ),
+          );
+          return;
+        }
+        if (evt.type === "agent_services_changed") {
+          // Same refetch pattern as memory, for the profile's Services section.
+          setPeople((ps) =>
+            ps.map((p) =>
+              p.id === evt.agentId ? { ...p, services_changed_at: new Date().toISOString() } : p,
             ),
           );
           return;
@@ -246,10 +278,12 @@ export function useChatSocket(opts: {
         if (evt.type === "deliverable_created") {
           const d = evt.deliverable;
           setDeliverables((ds) => (ds.some((x) => x.id === d.id) ? ds : [d, ...ds]));
+          onAnyActivity?.();
           return;
         }
         if (evt.type !== "message") return;
         const m: Message = evt.message;
+        onAnyActivity?.();
         const isOpen = m.channel_id === selectedRef.current;
         const isMine = m.sender_id === participantId;
         // Desktop-notification decision (DMs / mentions of me, tab not looking) lives in App.

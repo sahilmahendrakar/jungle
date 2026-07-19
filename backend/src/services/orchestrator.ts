@@ -7,6 +7,7 @@ import { fanOut, broadcastWorkspace } from "../ws/appSocket";
 import { surfaceConfirmCard } from "./confirmations";
 import { recordDeliverables } from "./deliverables";
 import * as scheduler from "./scheduler";
+import * as workflows from "./workflows";
 import { ApiError } from "../http/errors";
 
 // Agent -> workspace id, memoized. An agent's workspace never changes, so this is a permanent
@@ -154,6 +155,24 @@ export async function triggerMentionedAgents(
 
     const agents = await db.agentsByIds(candidateIds);
     for (const agent of agents) {
+      // Channel-message workflow trigger: a HUMAN's top-level @mention of a workflow's intake
+      // agent in its home channel starts a RUN rooted at that message (the mention thread
+      // becomes the run thread) instead of a plain turn. Falls back to a normal reply when a
+      // run is already live (or anything else refuses).
+      if (senderKind === "human" && !rootId && channel.kind !== "dm") {
+        const wf = await db.getChannelTriggerWorkflow(channelId, agent.id);
+        if (wf) {
+          try {
+            await workflows.startRun(wf, "channel_message", {
+              rootMessageId: message.id,
+              triggerText: `@${message.sender_handle}: ${message.body}`,
+            });
+            continue; // the kickoff dispatch replaces the normal reply
+          } catch (e) {
+            console.error(`channel trigger for workflow ${wf.id} fell back to a plain turn:`, (e as Error).message);
+          }
+        }
+      }
       // Summon the @mentioned agent into the channel so its reply (to:"#channel") succeeds
       // — otherwise mentioning an agent that isn't a member triggers it but it can't respond.
       await db.addChannelMember(channelId, agent.id);
@@ -206,11 +225,18 @@ async function runAgentReply(
     // ends (or splices it in mid-turn) — tell the workspace now so the triggering message shows
     // a "queued" chip immediately instead of nothing until a turn actually picks it up.
     const willQueue = runners.agentStatus(agent.id) === "working";
+    // Run scoping: a turn triggered from inside a live workflow-run's thread belongs to that
+    // run — the run id rides the dispatch context (that's the entire mechanism; see
+    // services/workflows.ts).
+    const run = existingThreadRootId
+      ? await db.getLiveRunByRootMessage(existingThreadRootId).catch(() => null)
+      : null;
     await db.enqueueInboxItem(agent.id, input, attachments, {
       budget: replyBudget,
       channelId: triggerChannelId,
       threadRootId: existingThreadRootId,
       messageId: chipMessageId,
+      ...(run ? { workflowRunId: run.id } : {}),
     });
     if (willQueue) {
       broadcastAgentWorkspace(agent.id, {
@@ -295,6 +321,8 @@ async function deliverAgentMessage(
     });
     await fanOut(channelId, { type: "message", message: att.withUrls(msg) });
     void recordDeliverables(agent, channelId, msg);
+    // Workflow-run completion: a member's "Run complete: …" thread message closes the run.
+    void workflows.completeRunFromMessage(msg).catch((e) => console.error("run complete check:", e));
     void triggerMentionedAgents(channelId, msg, "agent");
     return { ok: true, messageId: msg.id };
   } catch (e) {
@@ -421,6 +449,25 @@ export function buildRunnerHooks(): runners.RunnerHooks {
       broadcastWorkspace(row.workspace_id, { type: "schedule_changed", scheduleId: id, action: "deleted" });
       return { ok: true };
     },
+    // The workflow_* builder tools (Architect's draft/finalize family) — thin dispatch onto
+    // services/workflows.ts, which owns validation and the compile step.
+    workflowTool: async (agent, frame) => {
+      const input = frame.input as never;
+      switch (frame.type) {
+        case "workflow_list_templates":
+          return workflows.toolListTemplates();
+        case "workflow_draft_create":
+          return workflows.toolDraftCreate(agent, input);
+        case "workflow_draft_get":
+          return workflows.toolDraftGet(agent, input);
+        case "workflow_draft_set":
+          return workflows.toolDraftSet(agent, input);
+        case "workflow_finalize":
+          return workflows.toolFinalize(agent, input);
+        default:
+          return { ok: false, error: `unknown workflow tool ${frame.type}` };
+      }
+    },
     // Every turn_done -> attribute the result to any schedules whose fires fed the turn
     // (success/failure counters + auto-pause live in the scheduler), and close out the durable
     // turn row so a reload can show the chip as finished instead of forever "running".
@@ -509,6 +556,14 @@ export function buildRunnerHooks(): runners.RunnerHooks {
         .updateAgentMemory(agentId, content)
         .catch((e) => console.error("updateAgentMemory:", e));
       broadcastAgentWorkspace(agentId, { type: "agent_memory_changed", agentId });
+    },
+    // The agent's managed services changed -> persist the snapshot + broadcast so an open
+    // profile panel's Services section live-updates (same refetch pattern as memory).
+    onServicesUpdated: (agentId, services) => {
+      void db
+        .updateAgentServices(agentId, services)
+        .catch((e) => console.error("updateAgentServices:", e));
+      broadcastAgentWorkspace(agentId, { type: "agent_services_changed", agentId });
     },
     // A turn crashed -> post a notice from the agent into the channel that triggered it so the
     // humans waiting aren't ghosted. cascadeBudget 0: a crash notice must never trigger others.

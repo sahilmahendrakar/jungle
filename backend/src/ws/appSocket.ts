@@ -47,17 +47,91 @@ function removeSocket(pid: string, workspaceId: string, uid: string | null, ws: 
   if (uid) removeFromMap(uidSockets, uid, ws);
 }
 
-// Fan out a payload to every connected device of every member of a channel. Message payloads are
-// also dispatched to Expo push (mobile) fire-and-forget — the single insertion point covering all
-// message emit sites (human posts, orchestrator, scheduler, slack bridge).
+// Fan out a payload to every connected device of every member of a channel. Channel-scoped
+// events also drive mobile push (fire-and-forget): DMs/mentions on `message`, and
+// tool_confirmation_request to every human member — suppressed for anyone with a live socket
+// (the in-app UI already carries the signal).
 export async function fanOut(channelId: string, payload: unknown): Promise<void> {
   const data = JSON.stringify(payload);
-  for (const pid of await db.channelMemberIds(channelId)) {
+  const memberIds = await db.channelMemberIds(channelId);
+  for (const pid of memberIds) {
     const set = sockets.get(pid);
     if (set) for (const ws of set) if (ws.readyState === WebSocket.OPEN) ws.send(data);
   }
-  const p = payload as { type?: string; message?: PersistedMessage };
-  if (p?.type === "message" && p.message) void push.pushMessage(p.message);
+  pushForFanOut(channelId, memberIds, payload).catch((e) =>
+    console.error("push fan-out failed:", String((e as Error).message ?? e)),
+  );
+}
+
+// Decide who (if anyone) gets a mobile push for a channel-scoped event.
+async function pushForFanOut(channelId: string, memberIds: string[], payload: unknown): Promise<void> {
+  const evt = payload as {
+    type?: string;
+    message?: PersistedMessage & { mentions?: { id: string }[] };
+    confirmId?: string;
+    agentHandle?: string;
+    tool?: string;
+  };
+  if (evt.type !== "message" && evt.type !== "tool_confirmation_request") return;
+
+  // A recipient with ANY open socket is looking at the app — no push.
+  const offline = (pid: string) => {
+    const set = sockets.get(pid);
+    return !set || ![...set].some((ws) => ws.readyState === WebSocket.OPEN);
+  };
+
+  const channel = await db.getChannel(channelId);
+  if (!channel) return;
+
+  if (evt.type === "message" && evt.message) {
+    const m = evt.message;
+    const mentioned = new Set((m.mentions ?? []).map((x) => x.id));
+    const isDM = channel.kind === "dm";
+    const uids: string[] = [];
+    for (const pid of memberIds) {
+      if (pid === m.sender_id) continue;
+      if (!isDM && !mentioned.has(pid)) continue;
+      if (!offline(pid)) continue;
+      const p = await db.getParticipant(pid);
+      if (p?.kind === "human" && p.firebase_uid) uids.push(p.firebase_uid);
+    }
+    if (!uids.length) return;
+    const title = isDM ? `@${m.sender_handle}` : `@${m.sender_handle} in #${channel.name}`;
+    await push.sendPush(uids, {
+      title,
+      body: push.preview(m.body || "sent an attachment"),
+      threadId: channelId,
+      data: {
+        kind: "message",
+        workspaceId: channel.workspace_id,
+        channelId,
+        ...(m.thread_root_id ? { threadRootId: m.thread_root_id } : {}),
+      },
+    });
+    return;
+  }
+
+  if (evt.type === "tool_confirmation_request" && evt.confirmId) {
+    const uids: string[] = [];
+    for (const pid of memberIds) {
+      if (!offline(pid)) continue;
+      const p = await db.getParticipant(pid);
+      if (p?.kind === "human" && p.firebase_uid) uids.push(p.firebase_uid);
+    }
+    if (!uids.length) return;
+    await push.sendPush(uids, {
+      title: `@${evt.agentHandle ?? "agent"} needs approval`,
+      body: `Wants to run ${evt.tool ?? "a tool"} — allow or deny`,
+      category: "CONFIRM",
+      threadId: channelId,
+      data: {
+        kind: "confirm",
+        workspaceId: channel.workspace_id,
+        channelId,
+        confirmId: evt.confirmId,
+      },
+    });
+  }
 }
 
 // Broadcast to every connected socket in ONE workspace (workspace-wide events, e.g. a
@@ -103,6 +177,14 @@ export function initAppSocket(server: Server, hooks: AppSocketHooks): void {
 
   wss.on("connection", async (ws, req) => {
     const url = new URL(req.url ?? "/", "http://localhost");
+    // Frames can arrive the instant the socket opens — BEFORE the auth awaits below finish and
+    // the real message listener attaches — and ws drops events with no listener. Buffer them now,
+    // replay after setup. (Same lesson as the runner subsystem's synchronous accept().)
+    const early: Buffer[] = [];
+    const buffer = (raw: Buffer) => {
+      early.push(raw);
+    };
+    ws.on("message", buffer);
     // Real auth: a Firebase ID token (?token=) is verified and mapped to the user's participant in
     // the active workspace (&workspaceId=, with a single-membership fallback during rollout).
     // Dev/test: when DEV_BYPASS is on, fall back to a trusted ?participantId=.
@@ -133,7 +215,7 @@ export function initAppSocket(server: Server, hooks: AppSocketHooks): void {
     addSocket(pid, workspaceId, uid, ws);
     ws.send(JSON.stringify({ type: "connected", participantId: pid }));
 
-    ws.on("message", async (raw) => {
+    const onMessage = async (raw: Buffer) => {
       let evt: {
         type?: string;
         channelId?: string;
@@ -176,7 +258,10 @@ export function initAppSocket(server: Server, hooks: AppSocketHooks): void {
           ws.send(JSON.stringify({ type: "error", error: String((e as Error).message ?? e) }));
         }
       }
-    });
+    };
+    ws.off("message", buffer);
+    ws.on("message", (raw) => void onMessage(raw as Buffer));
+    for (const raw of early) void onMessage(raw);
 
     ws.on("close", () => removeSocket(pid, workspaceId, uid, ws));
   });

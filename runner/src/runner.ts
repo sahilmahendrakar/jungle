@@ -51,8 +51,10 @@ import {
 } from "./send-message-tool.js";
 import { createGmailMcpServer } from "./gmail-tool.js";
 import { createDriveMcpServer } from "./drive-tool.js";
+import { createXMcpServer } from "./x-tool.js";
 import { applyGitCredentials, cloneRepoIfNeeded, getGhToken } from "./git.js";
-import { loadState, saveState } from "./state.js";
+import { loadState, saveState, stateDir } from "./state.js";
+import { ServiceManager } from "./services.js";
 import {
   downloadAttachments,
   httpBaseFromWsUrl,
@@ -92,14 +94,27 @@ const SAFE_TOOLS = new Set([
   "ToolSearch", "Read", "Glob", "Grep", "WebSearch", "WebFetch",
   "TodoWrite", "Task", "NotebookRead", "BashOutput", "TaskOutput",
   "ListMcpResources", "ReadMcpResource", "mcp__jungle__read_history",
+  // Managed-service reads: status/log inspection never changes anything. service_start/stop
+  // are deliberately NOT here (and not in allowedTools): they run arbitrary commands / kill
+  // processes, so default mode routes them through the confirmation card like Bash.
+  "mcp__jungle__service_status", "mcp__jungle__service_logs",
   // Gmail read/search: never mutate the mailbox, so no confirmation.
   "mcp__gmail__gmail_search", "mcp__gmail__gmail_read_message",
   // Google Drive read: search/list/get never mutate, so no confirmation.
   "mcp__gdrive__drive_search", "mcp__gdrive__drive_list", "mcp__gdrive__drive_get_file",
+  // X (Twitter) is read-only by design — every x_* tool runs without a confirmation.
+  "mcp__x__x_my_recent_tweets", "mcp__x__x_mentions", "mcp__x__x_replies_to_me",
+  "mcp__x__x_notifications", "mcp__x__x_search", "mcp__x__x_get_user",
   // Schedule tools are bounded jungle-app operations with backend-enforced guardrails (caps,
   // min interval, prompt cap) and full human visibility/undo on the Scheduled page — a confirm
   // card would be noise, not safety.
   "mcp__jungle__schedule_create", "mcp__jungle__schedule_list", "mcp__jungle__schedule_cancel",
+  // Workflow builder tools: bounded jungle-app operations (drafts are inert; finalize is the
+  // Architect's explicit job, done on the user's say-so in conversation) with full visibility
+  // on the Workflows page. Same reasoning as the schedule tools.
+  "mcp__jungle__workflow_list_templates", "mcp__jungle__workflow_draft_create",
+  "mcp__jungle__workflow_draft_get", "mcp__jungle__workflow_draft_set",
+  "mcp__jungle__workflow_finalize",
 ]);
 
 // Gmail write tools: gated through the human confirmation card when the integration's
@@ -115,6 +130,16 @@ const GMAIL_WRITE_TOOLS = new Set([
 // requireApproval toggle in preToolUseHook; reads always run).
 const DRIVE_READ_TOOLS = ["mcp__gdrive__drive_search", "mcp__gdrive__drive_list", "mcp__gdrive__drive_get_file"];
 const DRIVE_WRITE_TOOLS = new Set(["mcp__gdrive__drive_create_file", "mcp__gdrive__drive_update_file"]);
+
+// X (Twitter) tools are all read-only (Basic tier) — auto-allowed in every mode, no write gating.
+const X_READ_TOOLS = [
+  "mcp__x__x_my_recent_tweets",
+  "mcp__x__x_mentions",
+  "mcp__x__x_replies_to_me",
+  "mcp__x__x_notifications",
+  "mcp__x__x_search",
+  "mcp__x__x_get_user",
+];
 
 // Fallback context reading derived from a `result` SDK message when the
 // getContextUsage() control request is unavailable. The turn's final input
@@ -165,6 +190,18 @@ function messageHasStreamClosed(message: unknown): boolean {
   );
 }
 
+// True for a `result` stream message that does NOT conclude one of the user messages we
+// yielded — e.g. the CLI's bookkeeping result for an orphaned background task delivered on
+// session resume (`origin: { kind: "task-notification" }`, 0 tokens, emitted at init time).
+// Counting such a result in the close rule closes stdin at TURN START (turnResults >=
+// turnYields with the real turn still running), which kills hook/MCP control wiring for the
+// rest of the query — the same dead-wiring failure the close rule exists to prevent. Results
+// for our own yielded messages carry no origin (or "human"); anything else is not ours.
+function isNonTurnResult(message: unknown): boolean {
+  const origin = (message as { origin?: { kind?: string } }).origin;
+  return origin != null && origin.kind !== "human";
+}
+
 export class Runner {
   private conn: Connection;
 
@@ -193,6 +230,12 @@ export class Runner {
   // Google Drive integration state (in-process, like Gmail): settings from `configure`; the token
   // lives in integrationTokens under key "google-drive" (refreshed by `integration_credentials`).
   private driveSettings: { email: string; requireApproval: boolean } | null = null;
+
+  // X (Twitter) integration state (in-process, read-only): settings from `configure`; the token
+  // lives in integrationTokens under key "x" (refreshed by `integration_credentials`). null = no
+  // X integration attached. The x MCP server reads the token live per call, so a refresh applies
+  // without rebuilding.
+  private xSettings: { account: string } | null = null;
 
   // Remote-MCP integrations (Linear/Notion/Granola/…) from `configure`: the grants (key, url,
   // safeTools, requireApproval). Access tokens for BOTH the remote-MCP integrations and the
@@ -261,6 +304,10 @@ export class Runner {
   private pendingScheduleCreate = new Map<string, (r: ScheduleCreateResult) => void>();
   private pendingScheduleList = new Map<string, (r: ScheduleListResult) => void>();
   private pendingScheduleCancel = new Map<string, (r: ScheduleCancelResult) => void>();
+  private pendingWorkflowTool = new Map<
+    string,
+    (r: { ok: boolean; error?: string; text?: string; draftId?: string; workflowId?: string }) => void
+  >();
   private pendingConfirms = new Map<
     string,
     (r: { allow: boolean; message?: string; updatedInput?: Record<string, unknown> }) => void
@@ -268,6 +315,12 @@ export class Runner {
 
   // Backend HTTP origin for attachment transfer, derived from the WS URL.
   private readonly httpBase: string;
+
+  // Long-lived processes the agent asked for (service_* tools). Owned by THIS process, not
+  // the per-turn CLI subprocess, so they survive turn boundaries; see services.ts.
+  private readonly servicesMgr = new ServiceManager(this.workspace, stateDir(), () =>
+    this.reportServices(),
+  );
 
   constructor(private readonly env: RunnerEnv) {
     this.httpBase = httpBaseFromWsUrl(env.wsUrl);
@@ -282,12 +335,20 @@ export class Runner {
     const persisted = await loadState();
     this.sessionId = persisted.sessionId;
     this.model = persisted.model;
+    // Re-adopt services a previous runner process left running (registry + pid probe) before
+    // connecting, so the post-configure services report reflects reality.
+    await this.servicesMgr.init();
     log.info("runner starting", {
       agentId: this.env.agentId,
       sessionId: this.sessionId,
       model: this.model,
     });
     this.conn.start();
+  }
+
+  // Intentional stop (SIGTERM/SIGINT): the agent is being shut down, take its services along.
+  shutdown(): void {
+    this.servicesMgr.stopAll();
   }
 
   // ---- connection lifecycle ----
@@ -403,6 +464,14 @@ export class Runner {
         }
         break;
       }
+      case "workflow_tool_result": {
+        const resolve = this.pendingWorkflowTool.get(frame.id);
+        if (resolve) {
+          this.pendingWorkflowTool.delete(frame.id);
+          resolve(frame.result);
+        }
+        break;
+      }
       case "confirm_result": {
         const resolve = this.pendingConfirms.get(frame.id);
         if (resolve) {
@@ -416,7 +485,7 @@ export class Runner {
         break;
       }
       case "git_credentials":
-        void applyGitCredentials(frame.token, frame.login);
+        void applyGitCredentials(frame.token, frame.login, { name: frame.authorName, email: frame.authorEmail });
         break;
       case "gmail_credentials":
         // A running turn's gmail server reads this via getToken on its next call — no rebuild.
@@ -428,6 +497,12 @@ export class Runner {
         // the NEXT turn; the in-process Drive server reads it live via getToken. The backend
         // refreshes before each drain so every turn starts fresh either way.
         this.integrationTokens.set(frame.key, frame.accessToken);
+        break;
+      case "service_stop":
+        // Human pressed stop in the profile panel. The manager's onChange reports the new list.
+        void this.servicesMgr.stop(frame.name).catch((err) => {
+          log.warn("service_stop frame failed", { name: frame.name, err: String(err) });
+        });
         break;
       default:
         log.warn("unknown frame from backend", { type: (frame as any).type });
@@ -445,7 +520,10 @@ export class Runner {
       // agent the repo is already in its workspace, so it must actually be there. Items
       // enqueued meanwhile just wait (maybeStartTurn no-ops until `configured`). On
       // reconnects the clone is a fast already-present check.
-      await applyGitCredentials(frame.git.token, frame.git.login);
+      await applyGitCredentials(frame.git.token, frame.git.login, {
+        name: frame.git.authorName,
+        email: frame.git.authorEmail,
+      });
       if (frame.git.repoUrl) await cloneRepoIfNeeded(frame.git.repoUrl);
     }
     // Gmail needs no filesystem setup — just hold the token/settings; the gmail MCP server is
@@ -469,12 +547,23 @@ export class Runner {
     } else {
       this.driveSettings = null;
     }
+    // X (in-process, read-only): hold the @handle + seed its token under "x". Built after the
+    // mcpIntegrations token map is reset above so the seed isn't clobbered.
+    if (frame.x) {
+      this.integrationTokens.set("x", frame.x.accessToken);
+      this.xSettings = { account: frame.x.account };
+    } else {
+      this.xSettings = null;
+    }
     this.configured = true;
     void saveState({ sessionId: this.sessionId, model: this.model });
     this.sendState();
     // Report the current MEMORY.md once per (re)configure so the backend's mirror heals any
     // drift (e.g. rows migrated before memory existed, or a report lost across a disconnect).
     void this.reportMemoryIfChanged();
+    // Same for services: heal the backend's snapshot (covers re-adopted services after a
+    // runner restart and reports lost across a disconnect).
+    this.reportServices();
     this.maybeStartTurn();
   }
 
@@ -643,6 +732,15 @@ export class Runner {
       "mcp__jungle__schedule_create",
       "mcp__jungle__schedule_list",
       "mcp__jungle__schedule_cancel",
+      "mcp__jungle__workflow_list_templates",
+      "mcp__jungle__workflow_draft_create",
+      "mcp__jungle__workflow_draft_get",
+      "mcp__jungle__workflow_draft_set",
+      "mcp__jungle__workflow_finalize",
+      // Read-only service tools are auto-allowed; service_start/stop are NOT (they run
+      // arbitrary commands / kill processes, so default mode shows a confirmation card).
+      "mcp__jungle__service_status",
+      "mcp__jungle__service_logs",
     ];
     if (gmailServer) {
       allowedTools.push(...GMAIL_READ_TOOLS);
@@ -657,6 +755,9 @@ export class Runner {
       allowedTools.push(...DRIVE_READ_TOOLS);
       if (!this.driveSettings!.requireApproval) allowedTools.push(...DRIVE_WRITE_TOOLS);
     }
+    // X: in-process, read-only server. All tools auto-allowed (nothing to approve).
+    const xServer = this.xSettings ? this.buildXServer() : null;
+    if (xServer) allowedTools.push(...X_READ_TOOLS);
     // Mount each connected remote-MCP integration as a remote HTTP server with a Bearer header
     // built from the current token. Read-only (safe) tools are auto-allowed; when the agent's
     // approval toggle is off, allow all of that server's tools; otherwise non-safe tools route
@@ -664,6 +765,7 @@ export class Runner {
     const mcpServers: Record<string, McpServerConfig> = { jungle: mcpServer };
     if (gmailServer) mcpServers.gmail = gmailServer;
     if (driveServer) mcpServers.gdrive = driveServer;
+    if (xServer) mcpServers.x = xServer;
     for (const grant of this.mcpIntegrations) {
       const token = this.integrationTokens.get(grant.key) ?? grant.accessToken;
       mcpServers[grant.key] = { type: "http", url: grant.url, headers: { Authorization: `Bearer ${token}` } };
@@ -767,9 +869,27 @@ export class Runner {
           await reconnectJungle();
         } else if ((message as any).type === "user" && messageHasStreamClosed(message)) {
           await reconnectJungle();
+        } else if ((message as any).type === "system" && (message as any).subtype === "init") {
+          // Init-time verify + heal: every init reports the CLI's mounted MCP servers. If the
+          // jungle server is missing or unhealthy, the model has NO send_message in its catalog
+          // for the whole turn — the reactive "Stream closed" reconnect can never fire (it keys
+          // on a tool_result, which requires the tool to be callable at all). Observed cause:
+          // resuming a session that has an orphaned background task makes the CLI come up with
+          // mcp_servers:[] entirely (CLI 2.1.198), silencing the agent for whole turns. Healing
+          // here covers that and any future cause of a dropped mount.
+          const mounted = (message as any).mcp_servers;
+          if (
+            Array.isArray(mounted) &&
+            !mounted.some((s: any) => s?.name === "jungle" && s?.status === "connected")
+          ) {
+            log.warn("jungle MCP server missing/unhealthy at init; remounting", {
+              mcp_servers: mounted,
+            });
+            await reconnectJungle();
+          }
         }
 
-        if ((message as any).type === "result") {
+        if ((message as any).type === "result" && !isNonTurnResult(message)) {
           this.turnResults++;
           const sid = (message as any).session_id;
           if (typeof sid === "string" && sid.length > 0 && sid !== this.sessionId) {
@@ -848,7 +968,38 @@ export class Runner {
       scheduleCreate: (id, input) => this.bridgeScheduleCreate(id, input),
       scheduleList: (id) => this.bridgeScheduleList(id),
       scheduleCancel: (id, input) => this.bridgeScheduleCancel(id, input),
+      workflowTool: (frameType, id, input) => this.bridgeWorkflowTool(frameType, id, input),
+      services: this.servicesMgr,
     });
+  }
+
+  // One bridge for the whole workflow_* family: the frame type varies, the correlation and
+  // result shape don't (all replies arrive as workflow_tool_result).
+  private bridgeWorkflowTool(
+    frameType: string,
+    id: string,
+    input: Record<string, unknown>,
+  ): Promise<{ ok: boolean; error?: string; text?: string; draftId?: string; workflowId?: string }> {
+    return new Promise((resolve) => {
+      this.pendingWorkflowTool.set(id, resolve);
+      const sent = this.conn.send({ type: frameType, id, input } as never);
+      if (!sent) {
+        this.pendingWorkflowTool.delete(id);
+        resolve({ ok: false, error: "backend unreachable" });
+      }
+      setTimeout(() => {
+        if (this.pendingWorkflowTool.delete(id)) {
+          resolve({ ok: false, error: "timed out waiting for backend" });
+        }
+      }, 60_000).unref?.();
+    });
+  }
+
+  // Snapshot the managed-services list to the backend (persisted on the participant row and
+  // broadcast to open profile panels). Fired by the manager on any change and once after
+  // configure; cheap and idempotent, so no hash-compare like memory needs.
+  private reportServices(): void {
+    this.conn.send({ type: "services", services: this.servicesMgr.list() });
   }
 
   // The in-process "gmail" SDK-MCP server (gmail_search/read/send/draft/modify), reading the
@@ -865,6 +1016,13 @@ export class Runner {
     return createDriveMcpServer(() => this.integrationTokens.get("google-drive") ?? null);
   }
 
+  // The in-process "x" SDK-MCP server (x_*), reading the current OAuth access token fresh on each
+  // call (integrationTokens["x"]) so a mid-turn `integration_credentials` refresh applies without
+  // a rebuild. Built per turn alongside the jungle/gmail/gdrive servers.
+  private buildXServer() {
+    return createXMcpServer(() => this.integrationTokens.get("x") ?? null);
+  }
+
   // Rebuild the CLI's connection to our in-process "jungle" SDK-MCP server after a mid-turn
   // session re-init (see the reconnect comment in runTurn). reconnectMcpServer() rejects for
   // in-process (sdk) servers, so we cycle setMcpServers instead: removing 'jungle' tears down the
@@ -879,6 +1037,7 @@ export class Runner {
       };
       if (this.gmailToken) servers.gmail = this.buildGmailServer();
       if (this.driveSettings) servers.gdrive = this.buildDriveServer();
+      if (this.xSettings) servers.x = this.buildXServer();
       // Re-mount remote-MCP integrations too, with the current token per key.
       for (const grant of this.mcpIntegrations) {
         const token = this.integrationTokens.get(grant.key) ?? grant.accessToken;

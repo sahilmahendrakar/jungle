@@ -11,6 +11,7 @@ import {
   FoldVertical,
   MonitorSmartphone,
   Plus,
+  Server,
   ShieldQuestion,
   Sparkles,
   Trash2,
@@ -24,11 +25,17 @@ import {
   clearAgentContext,
   attachmentUrl,
   getAgentMemory,
+  getAgentServices,
+  stopAgentService,
   listAgentIntegrations,
   setAgentIntegration,
   removeAgentIntegration,
+  listWorkflows,
+  updateWorkflow,
+  connectionForIntegration,
+  listActivity,
 } from "../../api";
-import type { Attachment, Participant, AgentStatus } from "../../api";
+import type { Attachment, Participant, AgentStatus, AgentServiceInfo, Workflow, ActivityMessage } from "../../api";
 import {
   IntegrationsEditor,
   integrationFingerprint,
@@ -36,19 +43,22 @@ import {
   validateIntegrations,
   type IntegrationDraft,
 } from "./IntegrationsEditor";
-import { useConnections } from "@/lib/connections";
+import { useConnections, BrandTile } from "@/lib/connections";
 import {
   fmtBytes,
   EFFORT_OPTIONS,
   fmtTokens,
+  fmtRelative,
+  snippet,
   INLINE_IMAGE_MIMES,
   MODEL_OPTIONS,
-  SDK_MODE_OPTIONS,
+  sdkModeOptionsFor,
   STATUS_DOT,
   STATUS_LABEL,
   type ToolConfirm,
 } from "../../lib/chat";
-import { catalogEntry } from "@jungle/shared";
+import { navigate } from "../../route";
+import { catalogEntry, getIntegrationType } from "@jungle/shared";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -156,9 +166,9 @@ export function SelectMenu({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
-        portal={false}
         align="start"
-        className="w-[var(--radix-dropdown-menu-trigger-width)]"
+        collisionPadding={8}
+        className="w-[var(--radix-dropdown-menu-trigger-width)] max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto"
       >
         {options.map((o) => (
           <DropdownMenuItem
@@ -179,6 +189,42 @@ export function SelectMenu({
   );
 }
 
+// --- template (draft-workflow seat) vs real agents ---
+//
+// A "template agent" is referenced by a DRAFT workflow's roster. The roster's integration keys
+// are the team's wishlist: keys whose backing user connection wasn't linked at draft time never
+// attached (the backend attach is best-effort), so they don't exist as agent_integrations rows.
+// Template agents show those as a pending, removable list; removing keeps the roster (and the
+// workflow canvas, via the workflow_changed broadcast) in sync. Once the workflow finalizes the
+// agent is real: its profile hides integrations whose connection still isn't linked.
+
+// Drop one integration key from every draft roster seat the agent occupies. Returns the updated
+// workflow list (same shape it was given), for the panel's local state. This is the PENDING-key
+// path (roster-listed but never attached, so there's no agent_integrations row to DELETE) —
+// removing an attached row is scrubbed backend-side by the integration DELETE route.
+async function scrubKeyFromDraftSeats(
+  workflows: Workflow[],
+  participantId: string,
+  key: string,
+): Promise<Workflow[]> {
+  const next: Workflow[] = [];
+  for (const wf of workflows) {
+    if (!wf.roster.some((r) => r.participant_id === participantId && r.integrations.includes(key))) {
+      next.push(wf);
+      continue;
+    }
+    const roster = wf.roster.map((r) => {
+      if (r.participant_id !== participantId || !r.integrations.includes(key)) return r;
+      const n = { ...r, integrations: r.integrations.filter((k) => k !== key) };
+      // The repo shorthand only means something alongside the github integration.
+      if (key === "github") delete n.repo;
+      return n;
+    });
+    next.push(await updateWorkflow(wf.id, { roster }));
+  }
+  return next;
+}
+
 // Slack-style profile for viewing another participant. Humans are read-only (just their alias
 // for now). Agents expose an editable config: display name + tool-permission mode (applied live),
 // model (applied at the next turn), and an Activity view.
@@ -190,6 +236,8 @@ export function ParticipantProfilePanel({
   onSaved,
   onOpenActivity,
   onDeleted,
+  onOpenConnections,
+  onJumpToMessage,
 }: {
   person: Participant;
   isSelf: boolean;
@@ -197,6 +245,10 @@ export function ParticipantProfilePanel({
   onSaved: (p: Participant) => void;
   onOpenActivity: () => void;
   onDeleted: (id: string) => void;
+  // Opens the user's settings panel on Connections (template agents' pending integrations).
+  onOpenConnections?: () => void;
+  // Deep-link a message into its channel/thread (the Recent messages card).
+  onJumpToMessage: (channelId: string, messageId: string, threadRootId?: string | null) => void;
 }) {
   const isAgent = person.kind === "agent";
   const [name, setName] = useState(person.display_name);
@@ -211,6 +263,8 @@ export function ParticipantProfilePanel({
   const [deleting, setDeleting] = useState(false);
   const [integrations, setIntegrations] = useState<IntegrationDraft[]>([]);
   const [origIntegrations, setOrigIntegrations] = useState<IntegrationDraft[]>([]);
+  // Draft workflows whose roster seats this agent — non-empty = template agent (see above).
+  const [seatWorkflows, setSeatWorkflows] = useState<Workflow[]>([]);
   // The viewer's per-user connections gate the integration rows (inline connect / approval toggle).
   const connections = useConnections(isAgent);
 
@@ -227,6 +281,54 @@ export function ParticipantProfilePanel({
       cancelled = true;
     };
   }, [isAgent, person.id]);
+
+  // Track the draft rosters this agent sits on (live — a roster scrub elsewhere, or the
+  // workflow finalizing, flips the panel between template and real-agent behavior).
+  useEffect(() => {
+    if (!isAgent) return;
+    let cancelled = false;
+    const load = () => {
+      listWorkflows()
+        .then((wfs) => {
+          if (cancelled) return;
+          setSeatWorkflows(
+            wfs.filter(
+              (wf) => wf.status === "draft" && wf.roster.some((r) => r.participant_id === person.id),
+            ),
+          );
+        })
+        .catch(() => {});
+    };
+    load();
+    window.addEventListener("jungle:workflow-changed", load);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("jungle:workflow-changed", load);
+    };
+  }, [isAgent, person.id]);
+
+  const isTemplateAgent = seatWorkflows.length > 0;
+  // Roster-listed keys with no attached row — shown pending, removable (scrubs the roster).
+  // Keyed off origIntegrations (server truth) so unsaved editor edits don't reshuffle the list.
+  const attachedKeys = new Set(origIntegrations.map((v) => v.key));
+  const pendingKeys: string[] = [];
+  for (const wf of seatWorkflows) {
+    for (const r of wf.roster) {
+      if (r.participant_id !== person.id) continue;
+      for (const k of r.integrations) {
+        if (!attachedKeys.has(k) && !pendingKeys.includes(k)) pendingKeys.push(k);
+      }
+    }
+  }
+
+  async function removeTemplateKey(key: string) {
+    setErr("");
+    try {
+      setSeatWorkflows(await scrubKeyFromDraftSeats(seatWorkflows, person.id, key));
+    } catch (e) {
+      setErr(String((e as Error).message ?? e));
+    }
+  }
 
   async function del() {
     if (deleting) return;
@@ -279,6 +381,10 @@ export function ParticipantProfilePanel({
         persona: persona.trim(),
       };
       const nextKeys = new Set(integrations.map((v) => v.key));
+      // Removed rows: the backend scrubs the key from every workflow roster the agent sits on
+      // (draft or live) and broadcasts workflow_changed, so the canvas + Connections panel stop
+      // advertising an integration the agent no longer has. (Pending unattached keys have no row
+      // to delete — those scrub via removeTemplateKey's roster PATCH instead.)
       for (const orig of origIntegrations) {
         if (!nextKeys.has(orig.key)) await removeAgentIntegration(person.id, orig.key);
       }
@@ -392,7 +498,7 @@ export function ParticipantProfilePanel({
               <SelectMenu
                 value={mode}
                 onChange={setMode}
-                options={SDK_MODE_OPTIONS}
+                options={sdkModeOptionsFor(mode)}
                 testId="agent-mode-select"
               />
             </div>
@@ -423,10 +529,74 @@ export function ParticipantProfilePanel({
                   : "Lower effort spends fewer tokens. Applies at the agent's next turn."}
               </p>
             </div>
-            <IntegrationsEditor value={integrations} onChange={setIntegrations} connections={connections} />
+            <IntegrationsEditor
+              value={integrations}
+              onChange={setIntegrations}
+              connections={connections}
+              // Real agents only show working integrations; a template agent keeps its
+              // not-yet-linked rows visible so they can be connected (or removed) pre-launch.
+              hideUnconnected={!isTemplateAgent}
+            />
+            {isTemplateAgent && pendingKeys.length > 0 && (
+              <div className="space-y-1.5" data-testid="template-pending-integrations">
+                <Label className="text-muted-foreground">Not connected yet</Label>
+                {pendingKeys.map((k) => {
+                  const connType = connectionForIntegration(k);
+                  const conn = connType ? connections.byKey[connType.key] : undefined;
+                  const linked = !!conn?.connected;
+                  return (
+                    <div
+                      key={k}
+                      className="group flex items-center gap-2.5 rounded-lg border border-amber-400/50 bg-amber-50/40 pr-1.5 dark:bg-amber-500/5"
+                      data-testid={`template-pending-${k}`}
+                    >
+                      <button
+                        type="button"
+                        onClick={onOpenConnections ? () => onOpenConnections() : undefined}
+                        title="Open your connections settings"
+                        className="flex min-w-0 flex-1 items-center gap-2.5 rounded-l-lg py-2 pl-2.5 text-left hover:bg-accent/40"
+                      >
+                        <BrandTile brand={k} className="size-7 rounded-md" glyphClassName="size-3.5" />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-sm font-medium leading-tight">
+                            {getIntegrationType(k)?.name ?? k}
+                          </span>
+                          <span
+                            className={cn(
+                              "block truncate text-[11px] leading-tight",
+                              linked ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400",
+                            )}
+                          >
+                            {linked
+                              ? "Account linked — attaches when the workflow is created"
+                              : "Not connected — link it in your settings"}
+                          </span>
+                        </span>
+                      </button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="size-6 shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
+                        onClick={() => void removeTemplateKey(k)}
+                        data-testid={`template-pending-remove-${k}`}
+                        aria-label={`Remove ${getIntegrationType(k)?.name ?? k}`}
+                      >
+                        <X className="size-3.5" />
+                      </Button>
+                    </div>
+                  );
+                })}
+                <p className="text-[11px] leading-tight text-muted-foreground">
+                  The workflow template expects these. Connect them in your settings, or remove
+                  them from the agent — the canvas updates either way.
+                </p>
+              </div>
+            )}
             <EnvironmentCard person={person} />
+            <ServicesCard person={person} />
             <MemoryCard person={person} />
             <ContextUsageCard person={person} />
+            <RecentMessagesCard person={person} onJumpToMessage={onJumpToMessage} />
             <Button
               variant="outline"
               data-testid="activity-open"
@@ -509,6 +679,75 @@ export function ParticipantProfilePanel({
           </Button>
         </div>
       )}
+    </div>
+  );
+}
+
+// The last few messages an agent sent or received (its DMs + mentions of it), shown in its
+// profile above "View activity". Rows deep-link into the channel/thread scrolled to the message;
+// "View all" opens the Activity page pre-filtered to this agent. Scoped server-side to channels
+// the viewer belongs to, so you only ever see conversations you're in.
+function RecentMessagesCard({
+  person,
+  onJumpToMessage,
+}: {
+  person: Participant;
+  onJumpToMessage: (channelId: string, messageId: string, threadRootId?: string | null) => void;
+}) {
+  const [messages, setMessages] = useState<ActivityMessage[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    listActivity({ person: person.handle, type: "messages" }, { limit: 3 })
+      .then((r) => {
+        if (cancelled) return;
+        setMessages(r.items.flatMap((it) => (it.type === "message" ? [it.message] : [])));
+      })
+      .catch(() => {
+        if (!cancelled) setMessages([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [person.handle]);
+
+  if (messages === null || messages.length === 0) return null;
+
+  return (
+    <div data-testid="recent-messages-card" className="space-y-1.5">
+      <div className="flex items-baseline justify-between">
+        <Label>Recent messages</Label>
+        <button
+          data-testid="recent-messages-view-all"
+          onClick={() => navigate(`/activity?person=@${person.handle}`)}
+          className="text-xs font-medium text-muted-foreground hover:text-foreground hover:underline"
+        >
+          View all →
+        </button>
+      </div>
+      <div className="divide-y overflow-hidden rounded-lg border bg-muted/30">
+        {messages.map((m) => (
+          <button
+            key={m.message_id}
+            data-testid="recent-message-row"
+            onClick={() => onJumpToMessage(m.channel_id, m.message_id, m.thread_root_id)}
+            className="block w-full px-3 py-2 text-left transition-colors hover:bg-accent"
+            title="Open in conversation"
+          >
+            <div className="flex items-baseline gap-2">
+              <span className="truncate text-xs font-semibold">@{m.sender_handle}</span>
+              <span className="ml-auto shrink-0 text-[11px] text-muted-foreground">
+                {fmtRelative(m.created_at)}
+              </span>
+            </div>
+            <div className="mt-0.5 truncate text-xs text-foreground/80">{snippet(m.body) || "(attachment)"}</div>
+            <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
+              {m.channel_kind === "dm" ? `@${m.dm_with ?? "dm"}` : `#${m.channel_name}`}
+              {m.thread_root_id ? " · in thread" : ""}
+            </div>
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -803,6 +1042,123 @@ export function MemoryCard({ person }: { person: Participant }) {
             <p className="text-[11px] leading-tight text-muted-foreground">
               No memories yet — the agent writes down durable facts (preferences, decisions,
               gotchas) as it works with you.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The agent's managed services (service_* tools: dev servers, watchers, tunnels), with a stop
+// button per running service. Collapsed by default; fetched on expand and refetched when an
+// agent_services_changed broadcast stamps person.services_changed_at (same pattern as Memory).
+export function ServicesCard({ person }: { person: Participant }) {
+  const [open, setOpen] = useState(false);
+  const [services, setServices] = useState<AgentServiceInfo[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [err, setErr] = useState("");
+  const [stopping, setStopping] = useState<string | null>(null);
+
+  const changedAt = person.services_changed_at ?? null;
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    getAgentServices(person.id)
+      .then((r) => {
+        if (cancelled) return;
+        setServices(r.services);
+        setLoaded(true);
+        setErr("");
+        setStopping(null); // the post-stop refetch — clear the spinner state
+      })
+      .catch((e) => !cancelled && setErr(String((e as Error).message ?? e)));
+    return () => {
+      cancelled = true;
+    };
+  }, [open, person.id, changedAt]);
+
+  const stop = async (name: string) => {
+    setStopping(name);
+    try {
+      await stopAgentService(person.id, name);
+      // The fresh list arrives via the agent_services_changed broadcast (changedAt bump).
+    } catch (e) {
+      setErr(String((e as Error).message ?? e));
+      setStopping(null);
+    }
+  };
+
+  const running = services.filter((s) => s.status === "running").length;
+  return (
+    <div data-testid="agent-services" className="rounded-lg border bg-muted/30">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        data-testid="agent-services-toggle"
+        className="flex w-full items-center gap-2 p-3 text-left"
+      >
+        <Server className="size-4 shrink-0 text-muted-foreground" />
+        <span className="flex-1 text-xs font-medium text-muted-foreground">Services</span>
+        {running > 0 && (
+          <span className="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+            {running} running
+          </span>
+        )}
+        <ChevronDown
+          className={cn("size-4 shrink-0 text-muted-foreground transition-transform", open && "rotate-180")}
+        />
+      </button>
+      {open && (
+        <div className="space-y-2 border-t px-3 pb-3 pt-2">
+          {err && <p className="text-[11px] text-destructive">{err}</p>}
+          {!loaded && !err ? (
+            <p className="text-[11px] text-muted-foreground">Loading…</p>
+          ) : services.length ? (
+            services.map((s) => (
+              <div
+                key={s.name}
+                data-testid={`agent-service-${s.name}`}
+                className="rounded-md border bg-background/70 p-2"
+              >
+                <div className="flex items-center gap-2">
+                  <span
+                    className={cn(
+                      "size-1.5 shrink-0 rounded-full",
+                      s.status === "running" ? "bg-emerald-500" : "bg-muted-foreground/40",
+                    )}
+                  />
+                  <span className="min-w-0 flex-1 truncate font-mono text-xs">{s.name}</span>
+                  {s.status === "running" ? (
+                    <button
+                      onClick={() => stop(s.name)}
+                      disabled={stopping === s.name}
+                      data-testid={`agent-service-stop-${s.name}`}
+                      className="rounded border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-muted disabled:opacity-50"
+                    >
+                      {stopping === s.name ? "Stopping…" : "Stop"}
+                    </button>
+                  ) : (
+                    <span className="text-[10px] text-muted-foreground">
+                      exited{s.exitCode != null ? ` (${s.exitCode})` : ""}
+                    </span>
+                  )}
+                </div>
+                <p className="mt-1 truncate font-mono text-[10px] text-muted-foreground" title={s.command}>
+                  $ {s.command}
+                </p>
+                <p className="text-[10px] text-muted-foreground">
+                  {s.status === "running"
+                    ? `up since ${new Date(s.startedAt).toLocaleString()}`
+                    : s.exitedAt
+                      ? `exited ${new Date(s.exitedAt).toLocaleString()}`
+                      : ""}
+                </p>
+              </div>
+            ))
+          ) : (
+            <p className="text-[11px] leading-tight text-muted-foreground">
+              No services — long-running processes the agent starts (dev servers, watchers)
+              appear here.
             </p>
           )}
         </div>

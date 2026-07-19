@@ -3,6 +3,7 @@
 // socket, most fanned out to a channel or broadcast to all); the client sends ClientFrame frames.
 
 import type { AgentStatus, Deliverable, Participant, WireMessage } from "./domain.js";
+import type { SlackChannelLink } from "./slack.js";
 
 // ---- Server -> client ----
 
@@ -117,6 +118,14 @@ export interface AgentMemoryChangedEvent {
   agentId: string;
 }
 
+// An agent's managed services (service_* tools: dev servers, watchers) changed. Like memory,
+// content doesn't ride in the broadcast: an open profile panel refetches
+// GET /api/agents/:id/services.
+export interface AgentServicesChangedEvent {
+  type: "agent_services_changed";
+  agentId: string;
+}
+
 // An always-ask agent is requesting confirmation for a sensitive tool call.
 export interface ToolConfirmationRequestEvent {
   type: "tool_confirmation_request";
@@ -146,11 +155,37 @@ export interface ScheduleChangedEvent {
   action: "created" | "updated" | "deleted";
 }
 
+// A workflow in the recipient's workspace changed (created/updated/deleted — including draft
+// edits by the Architect, which is what makes the builder's live preview work). Coarse by
+// design, like schedule_changed: clients refetch the workflow.
+export interface WorkflowChangedEvent {
+  type: "workflow_changed";
+  workflowId: string;
+  action: "created" | "updated" | "deleted";
+}
+
+// A workflow run started or changed status (done/stalled/stopped). Clients refetch the run
+// (or the workflow's run list).
+export interface WorkflowRunChangedEvent {
+  type: "workflow_run_changed";
+  workflowId: string;
+  runId: string;
+}
+
 // An agent shipped a work artifact (a PR opened, a doc written, …) — extracted from the links in
 // its message at send time. Carries the full row so the Deliverables feed appends without a refetch.
 export interface DeliverableCreatedEvent {
   type: "deliverable_created";
   deliverable: Deliverable;
+}
+
+// A channel's Slack mirror binding changed (linked, unlinked, or moved to the 'error' state).
+// `link` is null when the channel was unlinked. Broadcast workspace-wide so every client's
+// channel header updates. SlackChannelLink comes from ./slack.
+export interface SlackLinkChangedEvent {
+  type: "slack_link_changed";
+  channelId: string;
+  link: SlackChannelLink | null;
 }
 
 export type ServerEvent =
@@ -168,10 +203,14 @@ export type ServerEvent =
   | AgentQueuedEvent
   | AgentContextEvent
   | AgentMemoryChangedEvent
+  | AgentServicesChangedEvent
   | ToolConfirmationRequestEvent
   | ToolConfirmationResolvedEvent
   | ScheduleChangedEvent
-  | DeliverableCreatedEvent;
+  | WorkflowChangedEvent
+  | WorkflowRunChangedEvent
+  | DeliverableCreatedEvent
+  | SlackLinkChangedEvent;
 
 // ---- Client -> server ----
 

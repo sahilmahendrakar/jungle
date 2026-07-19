@@ -115,6 +115,65 @@ export interface ScheduleCancelFrame {
   input: { scheduleId: string };
 }
 
+// Workflow-builder tools (workflow_* on the jungle MCP server): how the Architect agent (and
+// any agent, though only the Architect is prompted to) creates and shapes workflow DRAFTS and
+// finalizes them into live teams. Same request/result correlation as the schedule_* family.
+// Roster entries use participant_handle (agents think in handles); the backend resolves ids.
+
+export interface WorkflowRoleInput {
+  role: string;
+  handle_seed: string;
+  duties: string;
+  integrations?: string[];
+  repo?: string; // owner/name when integrations includes "github"
+}
+
+export interface WorkflowDraftInput {
+  name?: string;
+  description?: string;
+  emoji?: string;
+  trigger?: { type: "schedule"; cron: string; timezone: string } | { type: "manual" } | { type: "channel_message" };
+  roster?: WorkflowRoleInput[];
+  playbook?: string;
+}
+
+export interface WorkflowListTemplatesFrame {
+  type: "workflow_list_templates";
+  id: string;
+  input: Record<string, never>;
+}
+
+export interface WorkflowDraftCreateFrame {
+  type: "workflow_draft_create";
+  id: string;
+  input: { templateId?: string; name?: string };
+}
+
+export interface WorkflowDraftGetFrame {
+  type: "workflow_draft_get";
+  id: string;
+  input: { draftId: string };
+}
+
+export interface WorkflowDraftSetFrame {
+  type: "workflow_draft_set";
+  id: string;
+  input: { draftId: string } & WorkflowDraftInput;
+}
+
+export interface WorkflowFinalizeFrame {
+  type: "workflow_finalize";
+  id: string;
+  input: { draftId: string; homeChannel?: string }; // homeChannel "#name" adopts an existing channel
+}
+
+export interface WorkflowToolResultFrame {
+  type: "workflow_tool_result";
+  id: string;
+  // text = a rendered view of the draft/templates/result the agent can read back verbatim.
+  result: { ok: boolean; error?: string; text?: string; draftId?: string; workflowId?: string };
+}
+
 export interface ConfirmRequestFrame {
   type: "confirm_request";
   id: string;
@@ -151,6 +210,29 @@ export interface MemoryFrame {
   content: string;
 }
 
+// A long-lived process the RUNNER manages on the agent's machine (the service_* agent tools):
+// dev servers, file watchers, tunnels. Owned by the always-on runner process — NOT the per-turn
+// CLI subprocess — so it survives turn boundaries (a Bash run_in_background task dies when the
+// turn's CLI exits, and its orphaned record breaks the next session's MCP mount; services exist
+// to make that pattern unnecessary). Registry + logs live in the runner's state dir.
+export interface AgentServiceInfo {
+  name: string; // unique per agent, kebab-case
+  command: string; // the shell command line the service runs
+  cwd?: string; // working directory (defaults to the agent workspace)
+  status: "running" | "exited";
+  pid?: number; // process-group leader while running
+  startedAt: string; // ISO
+  exitedAt?: string; // ISO, exited only
+  exitCode?: number | null; // exited only; null = killed by signal
+}
+
+// Runner -> backend: the full service list, sent after configure and on every change
+// (start/stop/exit). Snapshot semantics — the backend replaces, never merges.
+export interface ServicesFrame {
+  type: "services";
+  services: AgentServiceInfo[];
+}
+
 export interface FatalFrame {
   type: "fatal";
   error: string;
@@ -167,10 +249,16 @@ export type RunnerToBackend =
   | ScheduleCreateFrame
   | ScheduleListFrame
   | ScheduleCancelFrame
+  | WorkflowListTemplatesFrame
+  | WorkflowDraftCreateFrame
+  | WorkflowDraftGetFrame
+  | WorkflowDraftSetFrame
+  | WorkflowFinalizeFrame
   | ConfirmRequestFrame
   | TurnDoneFrame
   | ContextUsageFrame
   | MemoryFrame
+  | ServicesFrame
   | FatalFrame;
 
 // ---- Backend -> runner ----
@@ -212,7 +300,11 @@ export interface ConfigureFrame {
   // model is served by first-party Anthropic using the runner container's ANTHROPIC_API_KEY.
   provider?: ProviderConfig | null;
   systemPromptAppend?: string;
-  git?: { token: string; login: string; repoUrl?: string };
+  // Git credentials for the agent's repo. `login` is the agent's handle (used for the credential
+  // store and the default commit identity). authorName/authorEmail optionally override the commit
+  // identity (git user.name/user.email) so commits can be attributed to a real GitHub account;
+  // absent = the runner's default identity derived from `login`.
+  git?: { token: string; login: string; repoUrl?: string; authorName?: string; authorEmail?: string };
   // The agent's attached Gmail integration, if any: a fresh OAuth access token for the
   // backing ("creator") mailbox, that account's address, and whether writes need a human.
   // Read/search Gmail tools run freely; send/modify go through the confirmation card when
@@ -226,6 +318,10 @@ export interface ConfigureFrame {
   // The agent's attached remote-MCP integrations (Linear/Notion/Granola/…), if any. Each is
   // mounted as a remote MCP server; tokens refreshed via IntegrationCredentialsFrame.
   mcpIntegrations?: McpIntegrationGrant[];
+  // The agent's attached X (Twitter) integration, if any: a fresh OAuth 2.0 User Context access
+  // token for the connected account and its @handle. Read-only in-process MCP server (x_* tools);
+  // the token is refreshed mid-session via IntegrationCredentialsFrame keyed "x".
+  x?: { accessToken: string; account: string };
 }
 
 // A file attached to the message that produced an inbox item. `url` is an origin-relative
@@ -325,6 +421,9 @@ export interface GitCredentialsFrame {
   type: "git_credentials";
   token: string;
   login: string;
+  // Optional commit identity override (same semantics as ConfigureFrame.git.authorName/Email).
+  authorName?: string;
+  authorEmail?: string;
 }
 
 // Mid-session refresh of the Gmail OAuth access token (Google access tokens last ~1h). Pushed
@@ -344,6 +443,14 @@ export interface IntegrationCredentialsFrame {
   accessToken: string;
 }
 
+// Backend -> runner: stop one of the agent's managed services by name (the profile panel's
+// stop button). The runner kills the service's process group and reports the new list via a
+// ServicesFrame. Unknown names are a no-op (the frame is advisory, not correlated).
+export interface ServiceStopFrame {
+  type: "service_stop";
+  name: string;
+}
+
 export type BackendToRunner =
   | ConfigureFrame
   | EnqueueFrame
@@ -358,7 +465,9 @@ export type BackendToRunner =
   | ScheduleCreateResultFrame
   | ScheduleListResultFrame
   | ScheduleCancelResultFrame
+  | WorkflowToolResultFrame
   | ConfirmResultFrame
   | GitCredentialsFrame
   | GmailCredentialsFrame
-  | IntegrationCredentialsFrame;
+  | IntegrationCredentialsFrame
+  | ServiceStopFrame;

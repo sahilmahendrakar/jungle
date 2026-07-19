@@ -16,7 +16,7 @@ function pretty(input: unknown): string {
   }
 }
 
-function ApprovalCard({
+export function ApprovalCard({
   c,
   channel,
   onDecide,

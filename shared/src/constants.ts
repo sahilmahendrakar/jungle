@@ -12,6 +12,8 @@ export const ALLOWED_MODELS = [
   "claude-sonnet-5",
   "claude-opus-4-8",
   "glm-5.2",
+  "kimi-k3",
+  "kimi-k2.7-code",
 ] as const;
 export type AllowedModel = (typeof ALLOWED_MODELS)[number];
 
@@ -19,7 +21,7 @@ export type AllowedModel = (typeof ALLOWED_MODELS)[number];
 // ANTHROPIC_API_KEY); every other provider is an Anthropic-compatible endpoint the runner routes
 // to by overriding ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN in the CLI child env. Add a new tier-1
 // (Anthropic-compatible) model with one MODEL_CATALOG row + one PROVIDER_ENV entry (backend).
-export type ModelProvider = "anthropic" | "zai";
+export type ModelProvider = "anthropic" | "zai" | "moonshot";
 
 export interface ModelCatalogEntry {
   id: AllowedModel;
@@ -37,6 +39,8 @@ export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
   { id: "claude-sonnet-5", label: "Sonnet 5", hint: "Balanced", provider: "anthropic", supportsEffort: true, contextWindow: 200_000 },
   { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5", hint: "Fastest", provider: "anthropic", supportsEffort: false, contextWindow: 200_000 },
   { id: "glm-5.2", label: "GLM 5.2", hint: "Open source · fast & cheap", provider: "zai", supportsEffort: false, contextWindow: 200_000 },
+  { id: "kimi-k3", label: "Kimi K3", hint: "Open source · 1M context", provider: "moonshot", supportsEffort: true, contextWindow: 1_048_576 },
+  { id: "kimi-k2.7-code", label: "Kimi K2.7 Code", hint: "Open source · 256K context", provider: "moonshot", supportsEffort: true, contextWindow: 262_144 },
 ];
 
 // Catalog lookup by model id. Accepts null/undefined (agent's model override may be unset) so
