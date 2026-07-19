@@ -1,5 +1,5 @@
 import {
-  Bot,
+  Activity,
   Hash,
   Home,
   LogOut,
@@ -7,6 +7,7 @@ import {
   Moon,
   MonitorSmartphone,
   PanelLeftClose,
+  Plus,
   Search,
   Sun,
   Users,
@@ -17,6 +18,7 @@ import { firebaseEnabled } from "../../firebase";
 import { useTheme, type ThemePreference } from "../../theme";
 import { EmptyHint, NavItem, PersonAvatar, SectionHeader } from "./panels";
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
+import { Button } from "@/components/ui/button";
 import {
   Tooltip,
   TooltipContent,
@@ -59,13 +61,12 @@ function ThemeToggle() {
   );
 }
 
-// The left nav shell: workspace header, Threads/Channels/DMs/People lists, and the user footer.
+// The left nav shell: workspace header, Threads/Channels/DMs lists, and the user footer.
 // Desktop (md+): in-flow, collapsible via a drag-resizable width. Mobile (<md): a fixed off-canvas
 // drawer toggled by `drawerOpen`. Purely presentational — every action is a callback.
 export function Sidebar({
   rooms,
   dms,
-  others,
   selected,
   me,
   threadsListOpen,
@@ -76,13 +77,14 @@ export function Sidebar({
   resizing,
   leftWidth,
   personByHandle,
-  dmChannelWith,
   onSelectChannel,
-  onOpenDm,
   onOpenThreads,
   onOpenHome,
   homeActive,
   homeBadge,
+  onOpenActivity,
+  activityActive,
+  activityBadge,
   onOpenWorkflows,
   workflowsActive,
   onOpenTeam,
@@ -105,7 +107,6 @@ export function Sidebar({
 }: {
   rooms: Channel[];
   dms: Channel[];
-  others: Participant[];
   selected: string | null;
   me: Participant | undefined;
   threadsListOpen: boolean;
@@ -116,13 +117,14 @@ export function Sidebar({
   resizing: boolean;
   leftWidth: number;
   personByHandle: (h?: string | null) => Participant | undefined;
-  dmChannelWith: (handle: string) => Channel | undefined;
   onSelectChannel: (id: string) => void;
-  onOpenDm: (otherId: string) => void;
   onOpenThreads: () => void;
   onOpenHome: () => void;
   homeActive: boolean;
   homeBadge: number; // things waiting on the user (pending approvals + stalled runs)
+  onOpenActivity: () => void;
+  activityActive: boolean;
+  activityBadge: number; // channels holding an unread @mention of me
   onOpenWorkflows: () => void;
   workflowsActive: boolean;
   onOpenTeam: () => void;
@@ -191,7 +193,9 @@ export function Sidebar({
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto">
-          <div className="px-2 py-3">
+          {/* Bottom padding ≈ the floating CTA's height, so the last list item can
+              still be scrolled clear of it. */}
+          <div className="px-2 pb-14 pt-3">
             {/* Search: the ⌘K palette (messages, channels, people). */}
             <NavItem
               testId="search-nav"
@@ -216,6 +220,18 @@ export function Sidebar({
               unread={homeBadge > 0}
               badgeCount={homeBadge}
               badgeMention={homeBadge > 0}
+            />
+            {/* Activity: your unified feed — messages, mentions, thread replies, deliverables —
+                composably filtered. The badge counts channels holding an unread mention of you. */}
+            <NavItem
+              testId="activity-nav"
+              active={activityActive}
+              onClick={onOpenActivity}
+              icon={<Activity className="size-4 opacity-70" />}
+              label="Activity"
+              unread={activityBadge > 0}
+              badgeCount={activityBadge}
+              badgeMention={activityBadge > 0}
             />
             {/* Workflows: teams of agents on a trigger, plus scheduled tasks (absorbs Scheduled). */}
             <NavItem
@@ -310,38 +326,19 @@ export function Sidebar({
                 })}
               </>
             )}
-
-            {/* People */}
-            <div className="h-3" />
-            <SectionHeader
-              label="People"
-              actionLabel="Add agent"
-              onAction={onAddAgent}
-              actionTestId="add-agent-toggle"
-            />
-            {others.map((p) => (
-              <NavItem
-                key={p.id}
-                testId="people-item"
-                active={false}
-                onClick={() => {
-                  const existing = dmChannelWith(p.handle);
-                  if (existing) onSelectChannel(existing.id);
-                  else onOpenDm(p.id);
-                }}
-                icon={<PersonAvatar name={p.display_name} handle={p.handle} size="sm" />}
-                label={p.display_name}
-                title={`@${p.handle}`}
-                status={p.kind === "agent" ? p.status : undefined}
-                trailing={
-                  p.kind === "agent" ? (
-                    <Bot className="size-3.5 text-sidebar-foreground/50" />
-                  ) : undefined
-                }
-              />
-            ))}
-            {others.length === 0 && <EmptyHint>No one else yet.</EmptyHint>}
           </div>
+        </div>
+
+        {/* Create agent: the primary CTA at the bottom of the sidebar. */}
+        <div className="shrink-0 px-3 pb-2">
+          <Button
+            data-testid="add-agent-toggle"
+            onClick={onAddAgent}
+            className="h-8 w-full rounded-full text-sm font-semibold"
+          >
+            <Plus />
+            Create agent
+          </Button>
         </div>
 
         {/* User footer */}

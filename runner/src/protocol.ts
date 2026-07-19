@@ -125,7 +125,7 @@ export interface WorkflowRoleInput {
   handle_seed: string;
   duties: string;
   integrations?: string[];
-  participant_handle?: string; // bind an EXISTING agent to this seat
+  repo?: string; // owner/name when integrations includes "github"
 }
 
 export interface WorkflowDraftInput {
@@ -300,7 +300,11 @@ export interface ConfigureFrame {
   // model is served by first-party Anthropic using the runner container's ANTHROPIC_API_KEY.
   provider?: ProviderConfig | null;
   systemPromptAppend?: string;
-  git?: { token: string; login: string; repoUrl?: string };
+  // Git credentials for the agent's repo. `login` is the agent's handle (used for the credential
+  // store and the default commit identity). authorName/authorEmail optionally override the commit
+  // identity (git user.name/user.email) so commits can be attributed to a real GitHub account;
+  // absent = the runner's default identity derived from `login`.
+  git?: { token: string; login: string; repoUrl?: string; authorName?: string; authorEmail?: string };
   // The agent's attached Gmail integration, if any: a fresh OAuth access token for the
   // backing ("creator") mailbox, that account's address, and whether writes need a human.
   // Read/search Gmail tools run freely; send/modify go through the confirmation card when
@@ -311,6 +315,10 @@ export interface ConfigureFrame {
   // in-process MCP server (drive_* tools); the token is refreshed via IntegrationCredentialsFrame
   // keyed "google-drive".
   drive?: { accessToken: string; email: string; requireApproval: boolean };
+  // The agent's attached Google Calendar integration, if any — same shape as Drive. In-process
+  // MCP server (calendar_* tools); the token is refreshed via IntegrationCredentialsFrame keyed
+  // "google-calendar".
+  calendar?: { accessToken: string; email: string; requireApproval: boolean };
   // The agent's attached remote-MCP integrations (Linear/Notion/Granola/…), if any. Each is
   // mounted as a remote MCP server; tokens refreshed via IntegrationCredentialsFrame.
   mcpIntegrations?: McpIntegrationGrant[];
@@ -417,6 +425,9 @@ export interface GitCredentialsFrame {
   type: "git_credentials";
   token: string;
   login: string;
+  // Optional commit identity override (same semantics as ConfigureFrame.git.authorName/Email).
+  authorName?: string;
+  authorEmail?: string;
 }
 
 // Mid-session refresh of the Gmail OAuth access token (Google access tokens last ~1h). Pushed

@@ -40,7 +40,7 @@ import { SignIn } from "./SignIn";
 import { SettingsPanel } from "./Settings";
 import { Scheduled } from "./Scheduled";
 import { Approvals } from "./Approvals";
-import { DeliverablesView } from "./Deliverables";
+import { ActivityView } from "./Activity";
 import { AgentsHome } from "./AgentsHome";
 import { Environments } from "./Environments";
 import { LinkDevice } from "./LinkDevice";
@@ -118,13 +118,14 @@ export function App({
   const [confirms, setConfirms] = useState<ToolConfirm[]>([]);
   // The deliverables feed (newest first): first page fetched on load, live rows appended via WS.
   const [deliverables, setDeliverables] = useState<Deliverable[]>([]);
-  const [delivLoading, setDelivLoading] = useState(true);
-  const [delivHasMore, setDelivHasMore] = useState(false);
   // ⌘K search palette.
   const [searchOpen, setSearchOpen] = useState(false);
   // Jump target from search / the deliverables feed: MessageList scrolls it into view with a
   // flash once the message renders, then clears it via onJumpDone.
   const [jumpToId, setJumpToId] = useState<string | null>(null);
+  // Same idea but for a thread REPLY (Activity page / search hit with a thread_root_id): the
+  // reply only renders inside the thread pane, so ThreadPanel owns the scroll + flash for it.
+  const [threadJumpToId, setThreadJumpToId] = useState<string | null>(null);
   // Bounded always-on buffer of each agent's current turn (ambient activity surfaces), plus the
   // turn/queued state behind the trigger-message chips (turnChipsRef/queuedRef — durable across
   // reload via hydrateChannel). liveVersion is a throttled re-render tick; the live-turn-derived
@@ -164,6 +165,9 @@ export function App({
   const [profileId, setProfileId] = useState<string | null>(null);
   // Self settings live in the right panel (firebase mode); mutually exclusive with a profile.
   const [settingsPanelOpen, setSettingsPanelOpen] = useState(false);
+  // One-shot scroll hint for the settings panel: integration deep-links (workflow pages) open
+  // it straight on the Connections section. Reset when the panel closes.
+  const [settingsFocusConnections, setSettingsFocusConnections] = useState(false);
 
   // Drag-resizable widths for the two sidebars (desktop only). `resizing` suppresses the
   // width transition mid-drag so the panel tracks the pointer instead of easing behind it.
@@ -180,6 +184,7 @@ export function App({
   // work in dev mode too). Home/Workflows/Team are the primary nav; Approvals/Deliverables/
   // Scheduled survive as deep links (their content is absorbed into Home and Workflows).
   const homeOpen = path === "/home";
+  const activityOpen = path === "/activity";
   const workflowsOpen = path === "/workflows";
   const workflowSub = path.startsWith("/workflows/") ? path.slice("/workflows/".length) : null;
   const workflowEditId = workflowSub?.endsWith("/edit") ? workflowSub.slice(0, -"/edit".length) : null;
@@ -191,6 +196,7 @@ export function App({
   const linkOpen = path === "/link";
   const overlayViewOpen =
     homeOpen ||
+    activityOpen ||
     workflowsOpen ||
     !!workflowDetailId ||
     !!workflowEditId ||
@@ -275,26 +281,12 @@ export function App({
       .catch(() => {});
   }, []);
 
-  // First page of the deliverables feed; older pages via loadMoreDeliverables.
+  // The deliverables snapshot Home renders ("while you were away"); the full feed lives on the
+  // Activity page, which pages for itself.
   function reloadDeliverables() {
-    setDelivLoading(true);
     listDeliverables({ limit: 50 })
-      .then((ds) => {
-        setDeliverables(ds);
-        setDelivHasMore(ds.length >= 50);
-      })
-      .catch(() => {})
-      .finally(() => setDelivLoading(false));
-  }
-  async function loadMoreDeliverables() {
-    if (!deliverables.length) return;
-    const before = deliverables[deliverables.length - 1].id;
-    const page = await listDeliverables({ before, limit: 50 }).catch(() => [] as Deliverable[]);
-    setDeliverables((ds) => {
-      const seen = new Set(ds.map((d) => d.id));
-      return [...ds, ...page.filter((d) => !seen.has(d.id))];
-    });
-    setDelivHasMore(page.length >= 50);
+      .then((ds) => setDeliverables(ds))
+      .catch(() => {});
   }
 
   function refreshMembers() {
@@ -505,6 +497,9 @@ export function App({
     });
   }, []);
 
+  // Bumped on every WS message/deliverable frame — the Activity page turns it into a "new
+  // activity" nudge while you're reading the feed.
+  const [liveTick, setLiveTick] = useState(0);
   // One auto-reconnecting WebSocket owning the ServerEvent dispatch (see useChatSocket). Returns
   // the socket ref for posting frames (messages, thread replies, steering).
   const wsRef = useChatSocket({
@@ -530,6 +525,7 @@ export function App({
     ingestLiveEvent,
     ingestQueued,
     onNotifiableMessage,
+    onAnyActivity: useCallback(() => setLiveTick((t) => t + 1), []),
     onConfirmRequested,
     onConnected: refreshConfirms,
   });
@@ -607,8 +603,9 @@ export function App({
     setActivityId(null);
     setDrawerOpen(false);
   }, []);
-  function openSettingsPanel() {
+  function openSettingsPanel(opts?: { focusConnections?: boolean }) {
     setSettingsPanelOpen(true);
+    setSettingsFocusConnections(opts?.focusConnections ?? false);
     setProfileId(null);
     setThreadRootId(null);
     setThreadsListOpen(false);
@@ -737,11 +734,15 @@ export function App({
     openActivity(turn.agentId, turn.turnId);
   }
 
-  // Jump to a message (search hit / deliverable): land in its channel, open its thread if it
-  // was a pure thread reply, and let MessageList scroll + flash it once rendered.
+  // Jump to a message (search hit / deliverable / Activity row): land in its channel, open its
+  // thread if it was a pure thread reply, and let MessageList/ThreadPanel scroll + flash it once
+  // rendered.
   function jumpToMessage(channelId: string, messageId: string, threadRootId?: string | null) {
     goToChat();
     if (channelId !== selectedRef.current) setSelected(channelId);
+    // The conversation is the destination — take the right panel over from a profile/settings.
+    setProfileId(null);
+    setSettingsPanelOpen(false);
     if (threadRootId) {
       // A pure thread reply doesn't render in the timeline — open its thread instead. Seed the
       // messages so the pane isn't blank while the channel history loads.
@@ -749,6 +750,11 @@ export function App({
         .then((msgs) => setMessages((prev) => mergeById(prev, msgs)))
         .catch(() => {});
       openThread(threadRootId, channelId);
+      // The root renders in the timeline too, so the main list scrolls to context while the
+      // thread pane flashes the reply itself (no-op on the list if the root isn't loaded yet —
+      // the thread flash is the primary signal).
+      setJumpToId(threadRootId);
+      setThreadJumpToId(messageId);
     } else {
       setJumpToId(messageId);
     }
@@ -879,7 +885,6 @@ export function App({
   const others = people.filter((p) => p.id !== participantId);
   const rooms = channels.filter((c) => c.kind !== "dm");
   const dms = channels.filter((c) => c.kind === "dm");
-  const dmChannelWith = (handle: string) => dms.find((c) => c.dm_with === handle);
   // Stable identity across re-renders (unlike an inline arrow fn) so consumers that key off it —
   // notably Markdown's react-markdown `components` object — don't get a "new" prop on every
   // render and remount their custom renderers (which would drop mounted state like an open
@@ -962,6 +967,10 @@ export function App({
 
   const totalThreadUnread = unreadThreads.reduce((n, t) => n + t.unread_count, 0);
 
+  // The Activity nav badge: channels holding an unread @mention of me (the feed's "needs a
+  // look" signal — mentions are the activity that actively asks for you).
+  const activityBadge = channels.filter((c) => c.has_mention).length;
+
   // Compact message row for the thread panel (root + replies), not sender-grouped.
   const threadPanelOpen = !!threadRootId || threadsListOpen;
   const closeThreadPanel = () => {
@@ -992,6 +1001,7 @@ export function App({
   const closeRightPanel = () => {
     setProfileId(null);
     setSettingsPanelOpen(false);
+    setSettingsFocusConnections(false);
     setThreadRootId(null);
     setThreadsListOpen(false);
     setRosterOpen(false);
@@ -1031,7 +1041,6 @@ export function App({
       <Sidebar
         rooms={rooms}
         dms={dms}
-        others={others}
         selected={selected}
         me={me}
         threadsListOpen={threadsListOpen}
@@ -1042,14 +1051,9 @@ export function App({
         resizing={resizing}
         leftWidth={left.width}
         personByHandle={personByHandle}
-        dmChannelWith={dmChannelWith}
         onSelectChannel={(id) => {
           goToChat();
           selectAndClose(id);
-        }}
-        onOpenDm={(id) => {
-          goToChat();
-          openDm(id);
         }}
         onOpenThreads={() => {
           goToChat();
@@ -1058,6 +1062,9 @@ export function App({
         onOpenHome={() => navigate("/home")}
         homeActive={homeOpen}
         homeBadge={confirms.length}
+        onOpenActivity={() => navigate("/activity", { resetQuery: true })}
+        activityActive={activityOpen}
+        activityBadge={activityBadge}
         onOpenWorkflows={() => navigate("/workflows")}
         workflowsActive={workflowsOpen || scheduledOpen || !!workflowDetailId || !!workflowEditId}
         onOpenTeam={() => navigate("/team")}
@@ -1128,11 +1135,25 @@ export function App({
             goToChat();
             selectAndClose(channelId);
           }}
-          onJumpToMessage={(channelId, messageId) => jumpToMessage(channelId, messageId)}
+          onJumpToMessage={jumpToMessage}
           onOpenAgentProfile={(id) => {
             goToChat();
             openProfilePanel(id);
           }}
+          personByHandle={personByHandle}
+          liveTick={liveTick}
+        />
+      ) : activityOpen ? (
+        <ActivityView
+          channels={channels}
+          people={people}
+          personByHandle={personByHandle}
+          onOpenProfile={openProfilePanel}
+          onJumpToMessage={jumpToMessage}
+          sidebarOpen={sidebarOpen}
+          onOpenDrawer={() => setDrawerOpen(true)}
+          onExpandSidebar={() => setSidebarOpen(true)}
+          liveTick={liveTick}
         />
       ) : workflowsOpen ? (
         <Workflows
@@ -1152,6 +1173,7 @@ export function App({
           // The real right-side profile panel opens NEXT TO the builder (no navigation) — same
           // panel as everywhere else, so integrations/persona/model edits all live there.
           onOpenAgent={openProfilePanel}
+          onOpenConnections={() => openSettingsPanel({ focusConnections: true })}
           onParticipantsChanged={() => void listParticipants().then(setPeople).catch(() => {})}
         />
       ) : workflowDetailId ? (
@@ -1162,6 +1184,7 @@ export function App({
           onOpenDrawer={() => setDrawerOpen(true)}
           onExpandSidebar={() => setSidebarOpen(true)}
           onOpenAgent={openProfilePanel}
+          onOpenConnections={() => openSettingsPanel({ focusConnections: true })}
           onOpenRunThread={(channelId, rootMessageId) => jumpToMessage(channelId, rootMessageId)}
         />
       ) : scheduledOpen ? (
@@ -1198,20 +1221,13 @@ export function App({
           onExpandSidebar={() => setSidebarOpen(true)}
         />
       ) : deliverablesOpen ? (
-        <DeliverablesView
-          deliverables={deliverables}
-          loading={delivLoading}
-          hasMore={delivHasMore}
-          onLoadMore={loadMoreDeliverables}
-          sidebarOpen={sidebarOpen}
-          onOpenDrawer={() => setDrawerOpen(true)}
-          onExpandSidebar={() => setSidebarOpen(true)}
-          onJumpToMessage={(channelId, messageId) => jumpToMessage(channelId, messageId)}
-        />
+        // The standalone deliverables feed moved into Activity as a filter — keep the old URL
+        // (and Home's link, which now points here directly) working.
+        <RedirectTo to="/activity?type=deliverables" />
       ) : agentsOpen || !sel ? (
         // Mission control — also the landing view when no conversation is open.
         <AgentsHome
-          agents={others.filter((p) => p.kind === "agent")}
+          participants={others}
           liveTurns={liveTurnsRef.current}
           confirms={confirms}
           deliverables={deliverables}
@@ -1315,8 +1331,9 @@ export function App({
           </div>
         )}
 
-        {/* Composer */}
+        {/* Composer — draft persists per channel across navigation (draftKey = channel id) */}
         <Composer
+          draftKey={selected}
           headerTitle={headerTitle}
           isDm={sel?.kind === "dm"}
           people={people}
@@ -1324,6 +1341,7 @@ export function App({
           participantId={participantId}
           onSend={postMessage}
           onNotice={setNotice}
+          onOpenProfile={openProfilePanel}
         />
       </main>
       )}
@@ -1391,11 +1409,15 @@ export function App({
                 setPeople((ps) => ps.filter((p) => p.id !== id));
                 closeRightPanel();
               }}
+              onOpenConnections={() => openSettingsPanel({ focusConnections: true })}
+              onJumpToMessage={jumpToMessage}
             />
           )}
 
           {/* Self settings view (account + GitHub); firebase mode only */}
-          {rightMode === "settings" && <SettingsPanel onClose={closeRightPanel} />}
+          {rightMode === "settings" && (
+            <SettingsPanel onClose={closeRightPanel} focusConnections={settingsFocusConnections} />
+          )}
 
           {/* Threads view */}
           {rightMode === "threads" && (
@@ -1417,6 +1439,8 @@ export function App({
               people={people}
               members={members}
               participantId={participantId}
+              jumpToId={threadJumpToId}
+              onJumpDone={() => setThreadJumpToId(null)}
             />
           )}
 
@@ -1517,3 +1541,11 @@ export function App({
 
 /* ----------------------------- small pieces ----------------------------- */
 
+// A route that only forwards elsewhere (e.g. /deliverables -> /activity?type=deliverables after
+// the feed moved). Navigates on mount; renders nothing.
+function RedirectTo({ to }: { to: string }) {
+  useEffect(() => {
+    navigate(to);
+  }, [to]);
+  return null;
+}

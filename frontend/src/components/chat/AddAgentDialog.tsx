@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ChevronDown, Cloud, MonitorSmartphone } from "lucide-react";
+import { Cloud, MonitorSmartphone } from "lucide-react";
 import { createParticipant, listDevices, listParticipants, type Participant, type RunnerHost } from "../../api";
 import { MODEL_OPTIONS, SDK_MODE_OPTIONS, DEFAULT_SDK_MODE } from "../../lib/chat";
 import { randomFreePreset, toKebab } from "../../lib/agent-presets";
@@ -23,6 +23,33 @@ import { Textarea } from "@/components/ui/textarea";
 
 // The create-agent dialog: a persistent cloud agent (kind "agent", sdk runtime). Owns its own
 // form state; tells the parent to refresh People on success, and to surface any notice.
+
+// The creator's last-used environment / model / permissions, saved on every successful create
+// and prefilled the next time the dialog opens — most people run a stable setup and shouldn't
+// have to re-pick it per agent. Per-browser (localStorage), not synced to the account.
+const AGENT_DEFAULTS_KEY = "jungle:add-agent-defaults:v1";
+
+interface AgentDefaults {
+  env?: string;
+  model?: string;
+  mode?: string;
+}
+
+function loadAgentDefaults(): AgentDefaults {
+  try {
+    return JSON.parse(localStorage.getItem(AGENT_DEFAULTS_KEY) ?? "{}") as AgentDefaults;
+  } catch {
+    return {};
+  }
+}
+
+function saveAgentDefaults(d: Required<AgentDefaults>) {
+  try {
+    localStorage.setItem(AGENT_DEFAULTS_KEY, JSON.stringify(d));
+  } catch {
+    /* storage unavailable — defaults just won't persist */
+  }
+}
 export function AddAgentDialog({
   open,
   onOpenChange,
@@ -46,7 +73,6 @@ export function AddAgentDialog({
   const [agPersona, setAgPersona] = useState("");
   const [agModel, setAgModel] = useState(MODEL_OPTIONS[0].id);
   const [agMode, setAgMode] = useState(DEFAULT_SDK_MODE); // new agents are sdk runtime
-  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [addingAgent, setAddingAgent] = useState(false);
   // Environment: "cloud" (default) or `self:<hostId>` for one of the account's registered devices.
   const [env, setEnv] = useState("cloud");
@@ -57,7 +83,22 @@ export function AddAgentDialog({
 
   useEffect(() => {
     if (!open) return;
-    listDevices().then(setDevices).catch(() => setDevices([]));
+    // Prefill environment/model/permissions from the creator's last successful create (falling
+    // back to the global defaults on first use). A saved self-host env is validated against the
+    // devices that still exist once they load — a since-removed device falls back to Cloud.
+    const defaults = loadAgentDefaults();
+    setAgModel(MODEL_OPTIONS.some((o) => o.id === defaults.model) ? defaults.model! : MODEL_OPTIONS[0].id);
+    setAgMode(SDK_MODE_OPTIONS.some((o) => o.id === defaults.mode) ? defaults.mode! : DEFAULT_SDK_MODE);
+    const wantEnv = defaults.env ?? "cloud";
+    listDevices()
+      .then((ds) => {
+        setDevices(ds);
+        setEnv(wantEnv === "cloud" || ds.some((d) => `self:${d.id}` === wantEnv) ? wantEnv : "cloud");
+      })
+      .catch(() => {
+        setDevices([]);
+        setEnv("cloud");
+      });
     // Pick a fresh playful preset whose handle isn't already taken in this workspace.
     listParticipants()
       .then((ps: Participant[]) => {
@@ -126,14 +167,13 @@ export function AddAgentDialog({
         ...(selfHost ? { runnerProvider: "self_hosted", hostId: selfHost } : {}),
       });
       onOpenChange(false);
-      // Name/handle are re-preset (to a fresh free animal) the next time the dialog opens.
+      // Remember this setup as the prefill for the next create. Name/handle are re-preset (to a
+      // fresh free animal) the next time the dialog opens; env/model/mode are left in place and
+      // re-applied from storage on open, so the dialog always starts from the last-used defaults.
+      saveAgentDefaults({ env, model: agModel, mode: agMode });
       setHandleTouched(false);
       setIntegrations([]);
       setAgPersona("");
-      setAgModel(MODEL_OPTIONS[0].id);
-      setAgMode(DEFAULT_SDK_MODE);
-      setAdvancedOpen(false);
-      setEnv("cloud");
       onCreated();
     } catch (e) {
       onNotice(String((e as Error).message ?? e));
@@ -234,33 +274,21 @@ export function AddAgentDialog({
                 testId="agent-model"
               />
             </div>
+            <div className="col-span-2 space-y-1.5">
+              <Label>Tool permissions</Label>
+              <SelectMenu
+                value={agMode}
+                onChange={setAgMode}
+                options={SDK_MODE_OPTIONS}
+                testId="agent-mode"
+              />
+            </div>
           </div>
           {selectedDevice && !selectedDevice.online && (
             <p className="text-[11px] text-muted-foreground">
               This device is offline; the agent will start when it reconnects.
             </p>
           )}
-          <div className="space-y-2">
-            <button
-              type="button"
-              onClick={() => setAdvancedOpen((v) => !v)}
-              className="flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground"
-            >
-              <ChevronDown className={cn("size-3.5 transition-transform", advancedOpen && "rotate-180")} />
-              Advanced
-            </button>
-            {advancedOpen && (
-              <div className="space-y-1.5">
-                <Label>Tool permissions</Label>
-                <SelectMenu
-                  value={agMode}
-                  onChange={setAgMode}
-                  options={SDK_MODE_OPTIONS}
-                  testId="agent-mode"
-                />
-              </div>
-            )}
-          </div>
         </div>
         <DialogFooter>
           <Button data-testid="add-agent-button" onClick={submitAddAgent} disabled={addingAgent}>

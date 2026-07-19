@@ -49,6 +49,11 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     description: "Pick a repo. Agent can clone, read code, open PRs & commit via git + gh CLI.",
     connectionKey: "github",
     configFields: [{ key: "repo", label: "Repository", placeholder: "owner/name" }],
+    // Optional config keys beyond configFields (rendered by IntegrationsEditor under an "Advanced"
+    // disclosure on the GitHub row; validated/normalized by the backend adapter's resolveConfig):
+    //   authorName / authorEmail — the agent's git commit identity. Point these at a real GitHub
+    //   account (its `12345+login@users.noreply.github.com` noreply email works) so the agent's
+    //   commits are attributed to that account instead of showing as unverified on GitHub.
   },
   {
     key: "gmail",
@@ -75,6 +80,14 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     name: "Google Drive",
     description: "Search, read, create & update files in a connected Google Drive.",
     connectionKey: "google-drive",
+    configFields: [],
+    connection: "oauth",
+  },
+  {
+    key: "google-calendar",
+    name: "Google Calendar",
+    description: "Read, create & update events on a connected Google Calendar.",
+    connectionKey: "google-calendar",
     configFields: [],
     connection: "oauth",
   },
@@ -118,8 +131,8 @@ export const CONNECTION_TYPES: ConnectionType[] = [
   },
   {
     key: "google",
-    name: "Google",
-    description: "Backs the Gmail integration — agents read, search & send email from this account.",
+    name: "Gmail",
+    description: "Agents read, search & send email from this Gmail account.",
     kind: "google",
   },
   ...INTEGRATION_TYPES.filter((t) => t.connection === "oauth" && !t.comingSoon).map(

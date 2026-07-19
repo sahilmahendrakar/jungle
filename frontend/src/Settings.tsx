@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "./auth";
 import { navigate } from "./route";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
@@ -31,7 +31,8 @@ import {
 
 // One thin connection row: brand tile + name + live status, expanding on click to the
 // connect/disconnect controls (and, for GitHub, the App-installation details).
-function ConnectionRow({
+// Exported for the connections mocks/tests.
+export function ConnectionRow({
   conn,
   expanded,
   onToggle,
@@ -59,7 +60,12 @@ function ConnectionRow({
         <BrandTile brand={conn.key} />
         <span className="min-w-0 flex-1">
           <span className="block text-sm font-medium leading-tight">{conn.name}</span>
-          {conn.connected ? (
+          {conn.connected && conn.needsReconnect ? (
+            <span className="flex items-center gap-1 text-xs text-amber-600">
+              <span className="size-1.5 rounded-full bg-amber-500" />
+              <span className="truncate">Reconnect needed{conn.account ? ` · ${conn.account}` : ""}</span>
+            </span>
+          ) : conn.connected ? (
             <span className="flex items-center gap-1 text-xs text-emerald-600">
               <span className="size-1.5 rounded-full bg-emerald-500" />
               <span className="truncate">{conn.account || "Connected"}</span>
@@ -68,11 +74,18 @@ function ConnectionRow({
             <span className="text-xs text-muted-foreground">Not connected</span>
           )}
         </span>
-        {!conn.connected && (
+        {!conn.connected ? (
           <span className="rounded-full border px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
             Connect
           </span>
-        )}
+        ) : conn.needsReconnect ? (
+          <span
+            data-testid={`connection-reconnect-badge-${conn.key}`}
+            className="rounded-full border border-amber-500/50 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-600"
+          >
+            Reconnect
+          </span>
+        ) : null}
         <ChevronDown
           className={cn("size-4 shrink-0 text-muted-foreground transition-transform", expanded && "rotate-180")}
         />
@@ -81,6 +94,30 @@ function ConnectionRow({
       {expanded && (
         <div className="space-y-3 border-t bg-muted/30 px-3 py-3">
           <p className="text-xs leading-relaxed text-muted-foreground">{conn.description}</p>
+
+          {/* A dead OAuth grant (invalid_grant) looks "connected" but agents can't use it —
+              reconnecting rides the same consent flow as connecting and revives the grant. */}
+          {conn.connected && conn.needsReconnect && (
+            <div
+              className="space-y-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3"
+              data-testid={`settings-reconnect-${conn.key}`}
+            >
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                This connection's authorization expired, so agents can't use it right now.
+                Reconnect to restore access — it takes a few seconds.
+              </p>
+              <Button
+                data-testid={`settings-reconnect-button-${conn.key}`}
+                size="sm"
+                onClick={onConnect}
+                disabled={connecting}
+                className="gap-1.5"
+              >
+                {connecting ? <Loader2 className="size-3.5 animate-spin" /> : null}
+                {connecting ? "Waiting for authorization…" : `Reconnect ${conn.name}`}
+              </Button>
+            </div>
+          )}
 
           {/* GitHub also surfaces its App installation state — repo access rides the App, not
               just the account link. */}
@@ -308,7 +345,7 @@ function SlackWorkspaceSection({ isAdmin }: { isAdmin: boolean }) {
   );
 }
 
-function SettingsContent() {
+function SettingsContent({ focusConnections = false }: { focusConnections?: boolean }) {
   const { me, signOut } = useAuth();
   const profile = me?.profile;
   // Resolve the active membership (the workspace stored by AuthGate), falling back to the first.
@@ -320,6 +357,13 @@ function SettingsContent() {
   const conns = useConnections();
   const [query, setQuery] = useState("");
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  // When opened from an integration deep-link (e.g. a workflow's connections panel), land
+  // directly on the Connections section instead of the account block at the top.
+  const connectionsRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (focusConnections) connectionsRef.current?.scrollIntoView({ block: "start" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -368,7 +412,7 @@ function SettingsContent() {
 
       {/* Connections: every account link agents can build on — one searchable list; each row
           expands for details. Integrations attach these per-agent (agent profile → Integrations). */}
-      <section className="mt-8 space-y-3">
+      <section ref={connectionsRef} className="mt-8 scroll-mt-4 space-y-3">
         <div className="flex items-center justify-between gap-3">
           <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
             Connections
@@ -432,7 +476,15 @@ function SettingsContent() {
 }
 
 // Settings as a right-panel view (contextual sidebar). Shares its body with the full-page route.
-export function SettingsPanel({ onClose }: { onClose: () => void }) {
+// `focusConnections` scrolls straight to the Connections section — used by integration
+// deep-links (workflow pages) where the user clearly wants to manage account links.
+export function SettingsPanel({
+  onClose,
+  focusConnections = false,
+}: {
+  onClose: () => void;
+  focusConnections?: boolean;
+}) {
   return (
     <div data-testid="settings-panel" className="flex h-full flex-col">
       <header className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
@@ -450,7 +502,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
         </Button>
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <SettingsContent />
+        <SettingsContent focusConnections={focusConnections} />
       </div>
     </div>
   );

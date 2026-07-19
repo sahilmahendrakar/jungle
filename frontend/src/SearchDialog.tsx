@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Bot, Hash, Loader2, MessageSquare } from "lucide-react";
-import { searchMessages, type Channel, type Participant, type SearchResult } from "./api";
-import { fmtRelative } from "./lib/chat";
+import { Bot, Hash, Loader2, MessageSquare, Package, SlidersHorizontal } from "lucide-react";
+import { searchMessages, type Channel, type Deliverable, type Participant, type SearchResult } from "./api";
+import { fmtRelative, snippet } from "./lib/chat";
+import { IS_TOKENS, KIND_LABELS, KIND_TOKENS, TYPE_TOKENS, tokenAtCaret } from "./lib/filterTokens";
 import { PersonAvatar } from "./components/chat/panels";
+import { DELIVERABLE_KIND_META } from "./components/chat/deliverableCards";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
   Command,
@@ -14,19 +16,11 @@ import {
 } from "@/components/ui/command";
 
 // ⌘K: one box to jump anywhere — channels and people filter instantly client-side; messages are
-// full-text searched server-side (debounced) across everything you're a member of. This is how a
-// week-old agent decision gets found again.
+// full-text searched server-side (debounced) across everything you're a member of. The query
+// speaks the shared filter-token language (from:@pip, in:#general, is:sent, kind:pr — see
+// lib/filterTokens.ts); `type:deliverables` switches the search to the deliverables index.
 
 const DEBOUNCE_MS = 250;
-
-function snippet(body: string): string {
-  const line = body
-    .replace(/\[([^\]]+)\]\((?:[^)]+)\)/g, "$1") // markdown links -> their text
-    .replace(/[#*`>_]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  return line.length > 90 ? `${line.slice(0, 89)}…` : line;
-}
 
 export function SearchDialog({
   open,
@@ -49,6 +43,7 @@ export function SearchDialog({
 }) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
+  const [deliverables, setDeliverables] = useState<Deliverable[]>([]);
   const [searching, setSearching] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -57,6 +52,7 @@ export function SearchDialog({
     if (open) {
       setQuery("");
       setResults([]);
+      setDeliverables([]);
     }
   }, [open]);
 
@@ -66,14 +62,16 @@ export function SearchDialog({
     const q = query.trim();
     if (q.length < 2) {
       setResults([]);
+      setDeliverables([]);
       setSearching(false);
       return;
     }
     setSearching(true);
     debounceRef.current = setTimeout(() => {
       searchMessages(q)
-        .then((rs) => {
-          setResults(rs);
+        .then((r) => {
+          setResults(r.results);
+          setDeliverables(r.deliverables);
           setSearching(false);
         })
         .catch(() => setSearching(false));
@@ -102,6 +100,58 @@ export function SearchDialog({
     [people, q],
   );
 
+  // Filter-token autocomplete: the trailing word is an in-progress token (from:ec, in:#gen) →
+  // offer completions. Selecting one splices it in and keeps the palette open.
+  const tokenSuggestions: { label: string; insert: string }[] = useMemo(() => {
+    const active = tokenAtCaret(query, query.length);
+    if (!active) return [];
+    const prefix = active.value.replace(/^[@#]+/, "").toLowerCase();
+    switch (active.key) {
+      case "from":
+      case "to":
+        return people
+          .filter((p) => p.handle.toLowerCase().startsWith(prefix))
+          .slice(0, 5)
+          .map((p) => ({ label: `${active.key}:@${p.handle} — ${p.display_name}`, insert: `${active.key}:@${p.handle}` }));
+      case "in": {
+        const rooms = channels
+          .filter((c) => c.kind !== "dm" && c.name.toLowerCase().startsWith(prefix))
+          .slice(0, 4)
+          .map((c) => ({ label: `in:#${c.name}`, insert: `in:#${c.name}` }));
+        const dms = active.value.startsWith("@")
+          ? people
+              .filter((p) => p.handle.toLowerCase().startsWith(prefix))
+              .slice(0, 4)
+              .map((p) => ({ label: `in:@${p.handle} (DM)`, insert: `in:@${p.handle}` }))
+          : [];
+        return [...rooms, ...dms].slice(0, 5);
+      }
+      case "type":
+        return TYPE_TOKENS.filter((t) => t.startsWith(prefix)).map((t) => ({
+          label: `type:${t}`,
+          insert: `type:${t}`,
+        }));
+      case "kind":
+        return KIND_TOKENS.filter((t) => t.startsWith(prefix)).map((t) => ({
+          label: `kind:${t} — ${KIND_LABELS[t]}`,
+          insert: `kind:${t}`,
+        }));
+      case "is":
+        return IS_TOKENS.filter((t) => t.startsWith(prefix)).map((t) => ({
+          label: `is:${t}`,
+          insert: `is:${t}`,
+        }));
+      default:
+        return [];
+    }
+  }, [query, people, channels]);
+
+  function acceptToken(insert: string) {
+    const active = tokenAtCaret(query, query.length);
+    if (!active) return;
+    setQuery(`${query.slice(0, active.start)}${insert} `);
+  }
+
   const close = () => onOpenChange(false);
 
   return (
@@ -117,10 +167,39 @@ export function SearchDialog({
             data-testid="search-input"
             value={query}
             onValueChange={setQuery}
-            placeholder="Search messages, channels, people…"
+            placeholder="Search — try from:@pip, in:#general, type:deliverables…"
           />
           <CommandList className="max-h-[26rem]">
             {!searching && <CommandEmpty>No matches.</CommandEmpty>}
+            {!q && (
+              <div className="flex items-start gap-2 px-3 py-2.5 text-xs text-muted-foreground">
+                <SlidersHorizontal className="mt-0.5 size-3.5 shrink-0" />
+                <span>
+                  Compose filters with your search:{" "}
+                  <span className="font-medium text-foreground/80">from:@pip</span>,{" "}
+                  <span className="font-medium text-foreground/80">to:@sahil</span>,{" "}
+                  <span className="font-medium text-foreground/80">in:#general</span>,{" "}
+                  <span className="font-medium text-foreground/80">is:sent</span>,{" "}
+                  <span className="font-medium text-foreground/80">type:deliverables</span>,{" "}
+                  <span className="font-medium text-foreground/80">kind:pr</span>
+                </span>
+              </div>
+            )}
+            {tokenSuggestions.length > 0 && (
+              <CommandGroup heading="Filters">
+                {tokenSuggestions.map((s) => (
+                  <CommandItem
+                    key={s.insert}
+                    value={`filter-${s.insert}`}
+                    data-testid="search-filter-suggestion"
+                    onSelect={() => acceptToken(s.insert)}
+                  >
+                    <SlidersHorizontal className="size-4 text-muted-foreground" />
+                    <span className="truncate">{s.label}</span>
+                  </CommandItem>
+                ))}
+              </CommandGroup>
+            )}
             {matchedChannels.length > 0 && (
               <CommandGroup heading="Channels">
                 {matchedChannels.map((c) => (
@@ -157,7 +236,7 @@ export function SearchDialog({
                 ))}
               </CommandGroup>
             )}
-            {(results.length > 0 || searching) && (
+            {(results.length > 0 || (searching && deliverables.length === 0)) && (
               <CommandGroup heading="Messages">
                 {searching && results.length === 0 && (
                   <div className="flex items-center gap-2 px-2 py-2 text-sm text-muted-foreground">
@@ -186,6 +265,46 @@ export function SearchDialog({
                     </span>
                   </CommandItem>
                 ))}
+              </CommandGroup>
+            )}
+            {deliverables.length > 0 && (
+              <CommandGroup heading="Deliverables">
+                {deliverables.map((d) => {
+                  const meta = DELIVERABLE_KIND_META[d.kind];
+                  const Icon = meta?.icon ?? Package;
+                  return (
+                    <CommandItem
+                      key={d.id}
+                      value={`deliv-${d.id}`}
+                      data-testid="search-result-deliverable"
+                      onSelect={() => {
+                        onJumpToMessage({
+                          message_id: d.message_id,
+                          channel_id: d.channel_id,
+                          channel_name: d.channel_name,
+                          channel_kind: d.channel_kind,
+                          dm_with: null,
+                          thread_root_id: null,
+                          sender_handle: d.agent_handle,
+                          body: d.title ?? d.url,
+                          created_at: d.created_at,
+                        });
+                        close();
+                      }}
+                      className="items-start"
+                    >
+                      <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm">{d.title ?? d.url}</span>
+                        <span className="block truncate text-xs text-muted-foreground">
+                          {meta?.label ?? "Link"} · @{d.agent_handle} in{" "}
+                          {d.channel_kind === "dm" ? "a DM" : `#${d.channel_name}`} ·{" "}
+                          {fmtRelative(d.created_at)}
+                        </span>
+                      </span>
+                    </CommandItem>
+                  );
+                })}
               </CommandGroup>
             )}
           </CommandList>

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchAgentEvents, type AgentEvent, type Participant } from "../../api";
 import { Button } from "@/components/ui/button";
 import { Activity as ActivityIcon } from "lucide-react";
-import { groupTurns, mergeEvents } from "./activity/sdkEvents";
+import { countVisibleTurns, groupTurns, mergeEvents, turnHasVisibleItems } from "./activity/sdkEvents";
 import { TurnSection } from "./activity/Transcript";
 import { EmptyState } from "./panels";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -10,6 +10,15 @@ import { Skeleton } from "@/components/ui/skeleton";
 // The scrollable, paginated turn-by-turn transcript shared by the full-screen Activity dialog
 // (AgentActivity) and the inline "View activity" mode in an agent DM (DmActivityView) — same
 // data loading/scroll-pin/load-earlier behavior, just without a header or steer footer around it.
+
+// On open, auto-page backwards until the transcript shows at least this many turns — a busy turn
+// emits dozens of raw SDK events, so a single 200-event page can be just a turn or two. Capped by
+// AUTO_MAX_PAGES so an agent with very chatty turns doesn't pull unbounded history on every open;
+// "Load earlier" remains for going further back.
+const AUTO_MIN_TURNS = 12;
+const AUTO_MAX_PAGES = 5;
+const PAGE_SIZE = 200;
+
 export function ActivityTranscript({
   agent,
   events,
@@ -28,7 +37,10 @@ export function ActivityTranscript({
   const [history, setHistory] = useState<AgentEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [hasMore, setHasMore] = useState(true);
+  // True while the open-time auto-pagination (below) is still pulling earlier pages — shown as
+  // the "Load earlier" button in its loading state so it's clear more history is on its way.
+  const [autoLoading, setAutoLoading] = useState(false);
+  const [hasMore, setHasMore] = useState<boolean>(true);
   const [err, setErr] = useState("");
 
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -37,8 +49,21 @@ export function ActivityTranscript({
   // All events = history page(s) + live buffer, deduped and ordered.
   const all = useMemo(() => mergeEvents(history, events), [history, events]);
   const turns = useMemo(() => groupTurns(all), [all]);
+  // Filter out turns whose events all render as nothing (e.g. thinking_tokens/task_progress).
+  const visibleTurns = useMemo(() => turns.filter(turnHasVisibleItems), [turns]);
 
-  // Initial load.
+  // Keep the same content in view when a page prepends above an unpinned (reading-up) user —
+  // the pinned case is handled by the scroll-to-bottom effect.
+  const preserveScrollOnPrepend = useCallback((prevHeight: number) => {
+    requestAnimationFrame(() => {
+      const vp = viewportRef.current;
+      if (vp && !pinnedRef.current) vp.scrollTop += vp.scrollHeight - prevHeight;
+    });
+  }, []);
+
+  // Initial load + open-time auto-pagination: fetch the newest page, then keep paging backwards
+  // (updating the transcript as pages land) until AUTO_MIN_TURNS turns are visible, the pages are
+  // exhausted, or AUTO_MAX_PAGES is hit.
   useEffect(() => {
     if (!isSdk) {
       setLoading(false);
@@ -46,39 +71,76 @@ export function ActivityTranscript({
     }
     let cancelled = false;
     setLoading(true);
-    fetchAgentEvents(agent.id, { limit: 200 })
-      .then((page) => {
+    (async () => {
+      try {
+        let page = await fetchAgentEvents(agent.id, { limit: PAGE_SIZE });
         if (cancelled) return;
-        setHistory(page.events);
-        setHasMore(page.events.length >= 200);
-      })
-      .catch((e) => !cancelled && setErr(String((e as Error).message ?? e)))
-      .finally(() => !cancelled && setLoading(false));
+        let acc = page.events;
+        let more = page.events.length >= PAGE_SIZE;
+        setHistory(acc);
+        setHasMore(more);
+        setLoading(false); // the first page renders while earlier pages stream in
+        let pages = 1;
+        while (
+          more &&
+          !cancelled &&
+          pages < AUTO_MAX_PAGES &&
+          countVisibleTurns(acc) < AUTO_MIN_TURNS
+        ) {
+          setAutoLoading(true);
+          const prevHeight = viewportRef.current?.scrollHeight ?? 0;
+          page = await fetchAgentEvents(agent.id, { before: acc[0].id, limit: PAGE_SIZE });
+          if (cancelled) return;
+          acc = mergeEvents(page.events, acc);
+          more = page.events.length >= PAGE_SIZE;
+          pages++;
+          setHistory(acc);
+          setHasMore(more);
+          preserveScrollOnPrepend(prevHeight);
+        }
+      } catch (e) {
+        if (!cancelled) setErr(String((e as Error).message ?? e));
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+          setAutoLoading(false);
+        }
+      }
+    })();
     return () => {
       cancelled = true;
     };
-  }, [agent.id, isSdk]);
+  }, [agent.id, isSdk, preserveScrollOnPrepend]);
 
   const loadEarlier = useCallback(async () => {
-    if (loadingMore || !hasMore || all.length === 0) return;
+    if (loadingMore || autoLoading || !hasMore || history.length === 0) return;
     setLoadingMore(true);
-    const vp = viewportRef.current;
-    const prevHeight = vp?.scrollHeight ?? 0;
+    const prevHeight = viewportRef.current?.scrollHeight ?? 0;
+    // Keep paging backwards until the fetch adds at least one visible turn or history runs out.
+    // A single 200-event page can be all hidden SDK noise (thinking_tokens, tool_result updates),
+    // so chaining prevents the "click and nothing happens" symptom.
+    let localHistory = history;
+    let localHasMore: boolean = hasMore;
     try {
-      const smallest = all[0].id;
-      const page = await fetchAgentEvents(agent.id, { before: smallest, limit: 200 });
-      setHistory((h) => mergeEvents(page.events, h));
-      setHasMore(page.events.length >= 200);
-      // Preserve scroll position after prepending.
-      requestAnimationFrame(() => {
-        if (vp) vp.scrollTop = vp.scrollHeight - prevHeight;
-      });
+      let pages = 0;
+      while (localHasMore && pages < AUTO_MAX_PAGES) {
+        const visibleBefore = countVisibleTurns(localHistory);
+        const smallest = localHistory[0].id;
+        const page = await fetchAgentEvents(agent.id, { before: smallest, limit: PAGE_SIZE });
+        localHistory = mergeEvents(page.events, localHistory);
+        localHasMore = page.events.length >= PAGE_SIZE;
+        setHistory(localHistory);
+        setHasMore(localHasMore);
+        pages++;
+        if (countVisibleTurns(localHistory) > visibleBefore) break;
+      }
+      preserveScrollOnPrepend(prevHeight);
     } catch (e) {
       setErr(String((e as Error).message ?? e));
     } finally {
       setLoadingMore(false);
     }
-  }, [agent.id, all, hasMore, loadingMore]);
+  }, [agent.id, hasMore, loadingMore, autoLoading, history, preserveScrollOnPrepend]);
 
   // Track whether the user is pinned to the bottom.
   const onScroll = useCallback(() => {
@@ -102,9 +164,9 @@ export function ActivityTranscript({
     focusedRef.current = true;
     pinnedRef.current = false;
     el.scrollIntoView({ block: "start" });
-  }, [focusTurnId, loading, turns.length]);
+  }, [focusTurnId, loading, visibleTurns.length]);
 
-  const empty = !loading && turns.length === 0;
+  const empty = !loading && visibleTurns.length === 0;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -129,10 +191,10 @@ export function ActivityTranscript({
                   variant="ghost"
                   size="sm"
                   onClick={loadEarlier}
-                  disabled={loadingMore}
+                  disabled={loadingMore || autoLoading}
                   className="h-7 text-xs text-muted-foreground"
                 >
-                  {loadingMore ? "Loading…" : "Load earlier"}
+                  {loadingMore || autoLoading ? "Loading…" : "Load earlier"}
                 </Button>
               </div>
             )}
@@ -143,12 +205,12 @@ export function ActivityTranscript({
                 <Skeleton className="h-24 w-full" />
               </div>
             )}
-            {turns.map((t, i) => (
+            {visibleTurns.map((t, i) => (
               <TurnSection
                 key={t.turnId}
                 turn={t}
-                defaultOpen={i === turns.length - 1 || t.turnId === focusTurnId}
-                running={running && i === turns.length - 1}
+                defaultOpen={i === visibleTurns.length - 1 || t.turnId === focusTurnId}
+                running={running && i === visibleTurns.length - 1}
               />
             ))}
           </div>

@@ -130,17 +130,23 @@ router.get("/auth/integrations/callback", async (req, res) => {
 });
 
 // The authed user's connection status for every connection-based integration (Settings + the
-// agent integration cards read this). `{ [key]: { connected, externalAccount } }`.
+// agent integration cards read this). `{ [key]: { connected, externalAccount, needsReconnect } }`
+// — needsReconnect means the stored grant is dead (invalid_grant) and the user must re-consent.
 router.get(
   "/api/integrations/status",
   wrap(async (req, res) => {
     const me = await requireRequester(req);
     const rows = await db.listIntegrationConnections(me.id);
     const byKey = new Map(rows.map((r) => [r.integration_key, r]));
-    const status: Record<string, { connected: boolean; externalAccount?: string | null }> = {};
+    const status: Record<
+      string,
+      { connected: boolean; externalAccount?: string | null; needsReconnect?: boolean }
+    > = {};
     for (const key of CONNECTION_KEYS) {
       const row = byKey.get(key);
-      status[key] = row ? { connected: true, externalAccount: row.external_account } : { connected: false };
+      status[key] = row
+        ? { connected: true, externalAccount: row.external_account, needsReconnect: row.needs_reconnect }
+        : { connected: false };
     }
     res.json(status);
   }),
