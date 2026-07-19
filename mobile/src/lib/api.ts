@@ -187,6 +187,7 @@ export function createParticipant(p: {
   integrations?: Array<{ key: string; config: Record<string, unknown> }>;
   model?: string;
   mode?: string;
+  persona?: string;
   runnerProvider?: string;
   hostId?: string;
 }): Promise<Participant> {
@@ -199,6 +200,7 @@ export function createParticipant(p: {
           ...(p.integrations?.length ? { integrations: p.integrations } : {}),
           ...(p.model ? { model: p.model } : {}),
           ...(p.mode ? { mode: p.mode } : {}),
+          ...(p.persona ? { persona: p.persona } : {}),
           ...(p.runnerProvider ? { runnerProvider: p.runnerProvider } : {}),
           ...(p.hostId ? { hostId: p.hostId } : {}),
         }

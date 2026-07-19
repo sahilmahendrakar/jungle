@@ -33,12 +33,18 @@ interface StagedFile extends LocalFile {
   previewUri?: string;
 }
 
+// In-progress text per conversation, so navigating away and back (channel <-> thread <-> tabs)
+// doesn't lose what you were typing (web parity: drafts persist per channel/thread). Module
+// scope = survives unmount, not app restart.
+const draftsByKey = new Map<string, string>();
+
 export function Composer({
   placeholder,
   people,
   members,
   participantId,
   compact,
+  draftKey,
   onSend,
   onNotice,
   accessory,
@@ -48,13 +54,22 @@ export function Composer({
   members: Participant[];
   participantId: string | null;
   compact?: boolean;
+  // Stable id of the conversation ("channel:<id>" / "thread:<rootId>") for draft persistence.
+  draftKey?: string;
   onSend: (body: string, attachmentIds: string[]) => boolean;
   onNotice: (msg: string) => void;
   // Extra row rendered above the input (e.g. the thread "Also send to channel" checkbox).
   accessory?: React.ReactNode;
 }) {
   const { colors } = useTheme();
-  const [draft, setDraft] = useState("");
+  const [draft, setDraftState] = useState(() => (draftKey && draftsByKey.get(draftKey)) || "");
+  const setDraft = (v: string) => {
+    setDraftState(v);
+    if (draftKey) {
+      if (v) draftsByKey.set(draftKey, v);
+      else draftsByKey.delete(draftKey);
+    }
+  };
   const [pending, setPending] = useState<PendingAttachment[]>([]);
   const [mention, setMention] = useState<{ start: number; query: string } | null>(null);
   const [sel, setSel] = useState<{ start: number; end: number } | undefined>(undefined);

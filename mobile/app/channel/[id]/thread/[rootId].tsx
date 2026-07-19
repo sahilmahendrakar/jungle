@@ -132,6 +132,7 @@ export default function ThreadScreen() {
             people={people}
             members={members}
             participantId={myPid}
+            draftKey={rootId ? `thread:${rootId}` : undefined}
             onSend={handleSend}
             onNotice={setNotice}
             accessory={

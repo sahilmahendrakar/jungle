@@ -220,6 +220,7 @@ export default function ChannelScreen() {
             people={people}
             members={members}
             participantId={myPid}
+            draftKey={id ? `channel:${id}` : undefined}
             onSend={handleSend}
             onNotice={setNotice}
           />

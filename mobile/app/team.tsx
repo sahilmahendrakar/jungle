@@ -210,7 +210,15 @@ export default function Team() {
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
-      <ScreenHeader title="Team" onBack={() => router.back()} />
+      <ScreenHeader
+        title="Team"
+        onBack={() => router.back()}
+        right={
+          <Pressable onPress={() => router.push("/create-agent")} hitSlop={8}>
+            <Ionicons name="add-circle-outline" size={26} color={colors.primary} />
+          </Pressable>
+        }
+      />
 
       {/* Search + kind filter */}
       <View style={styles.filters}>
