@@ -14,6 +14,7 @@ export interface WorkflowTemplate {
   name: string;
   emoji: string;
   description: string; // one gallery sentence, written to the human
+  tagline: string; // ~5-word essence for the compact gallery row (rendered as "tagline · N agents")
   trigger: WorkflowTrigger;
   roster: WorkflowRole[]; // roster[0] = intake
   playbook: string;
@@ -26,6 +27,7 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
     emoji: "🛟",
     description:
       "Scan a support inbox every morning, file real bugs to a tracker, and dispatch a fix crew on the worst ones.",
+    tagline: "Inbox scan → bugs filed → fix crew",
     trigger: { type: "schedule", cron: "0 8 * * 1-5", timezone: "America/Los_Angeles" },
     roster: [
       {
@@ -78,6 +80,7 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
     emoji: "📋",
     description:
       "One agent collects yesterday's activity across connected tools and posts a single morning brief to a channel.",
+    tagline: "Morning brief from your tools",
     trigger: { type: "schedule", cron: "30 7 * * 1-5", timezone: "America/Los_Angeles" },
     roster: [
       {
@@ -101,6 +104,7 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
     emoji: "🔎",
     description:
       "When a lead reaches out, research the company and person and drop a crisp brief in your DMs before the call.",
+    tagline: "Lead in, brief in your DMs",
     trigger: { type: "channel_message" },
     roster: [
       {
@@ -135,6 +139,7 @@ export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
     emoji: "✍️",
     description:
       "Turn a rough idea into a drafted, edited post — a writer drafts, an editor pushes back, you get the final for sign-off.",
+    tagline: "Writer drafts, editor pushes back",
     trigger: { type: "channel_message" },
     roster: [
       {
