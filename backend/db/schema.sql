@@ -412,3 +412,13 @@ create table if not exists device_auth_requests (
   host_id       uuid references runner_hosts(id) on delete set null,
   claimed_at    timestamptz
 );
+
+-- Expo push tokens for the mobile app (024_push_tokens.sql). Account-scoped (firebase_uid).
+create table if not exists push_tokens (
+  token         text primary key,
+  firebase_uid  text not null,
+  platform      text not null default 'ios',
+  created_at    timestamptz not null default now(),
+  last_seen_at  timestamptz not null default now()
+);
+create index if not exists push_tokens_uid_idx on push_tokens (firebase_uid);

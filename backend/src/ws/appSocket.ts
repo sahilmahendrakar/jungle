@@ -4,6 +4,7 @@ import * as db from "../db";
 import type { PersistedMessage } from "../db";
 import * as auth from "../auth";
 import * as att from "../attachments";
+import * as push from "../services/push";
 
 // The app (human/device) WebSocket: realtime message delivery to browsers. Distinct from the
 // runner subsystem (runners.ts), which owns the /api/runner upgrade path. This module owns the
@@ -46,13 +47,17 @@ function removeSocket(pid: string, workspaceId: string, uid: string | null, ws: 
   if (uid) removeFromMap(uidSockets, uid, ws);
 }
 
-// Fan out a payload to every connected device of every member of a channel.
+// Fan out a payload to every connected device of every member of a channel. Message payloads are
+// also dispatched to Expo push (mobile) fire-and-forget — the single insertion point covering all
+// message emit sites (human posts, orchestrator, scheduler, slack bridge).
 export async function fanOut(channelId: string, payload: unknown): Promise<void> {
   const data = JSON.stringify(payload);
   for (const pid of await db.channelMemberIds(channelId)) {
     const set = sockets.get(pid);
     if (set) for (const ws of set) if (ws.readyState === WebSocket.OPEN) ws.send(data);
   }
+  const p = payload as { type?: string; message?: PersistedMessage };
+  if (p?.type === "message" && p.message) void push.pushMessage(p.message);
 }
 
 // Broadcast to every connected socket in ONE workspace (workspace-wide events, e.g. a

@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import * as db from "../db";
 import { fanOut } from "../ws/appSocket";
+import * as push from "./push";
 import { ApiError } from "../http/errors";
 
 // Tool confirmations: a tool call awaiting a human's allow/deny. Kept in memory (single backend);
@@ -63,6 +64,8 @@ export function surfaceConfirmCard(
       tool,
       input,
     });
+    // Also ping the mobile app (fire-and-forget) so an approval can be acted on from a phone.
+    void push.pushApproval({ channelId, agentName: agent.display_name, tool });
   });
 }
 

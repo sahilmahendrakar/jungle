@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CLIENT_ID</key>
+	<string>782624295113-0nbkafjmibkk436ehseeqrr2aodah174.apps.googleusercontent.com</string>
+	<key>REVERSED_CLIENT_ID</key>
+	<string>com.googleusercontent.apps.782624295113-0nbkafjmibkk436ehseeqrr2aodah174</string>
+	<key>API_KEY</key>
+	<string>AIzaSyD_Vw7F6XG9iPbuVIvANH5dRnTlL26UL3U</string>
+	<key>GCM_SENDER_ID</key>
+	<string>782624295113</string>
+	<key>PLIST_VERSION</key>
+	<string>1</string>
+	<key>BUNDLE_ID</key>
+	<string>com.jungleagents.jungle</string>
+	<key>PROJECT_ID</key>
+	<string>jungle-agents</string>
+	<key>STORAGE_BUCKET</key>
+	<string>jungle-agents.firebasestorage.app</string>
+	<key>IS_ADS_ENABLED</key>
+	<false></false>
+	<key>IS_ANALYTICS_ENABLED</key>
+	<false></false>
+	<key>IS_APPINVITE_ENABLED</key>
+	<true></true>
+	<key>IS_GCM_ENABLED</key>
+	<true></true>
+	<key>IS_SIGNIN_ENABLED</key>
+	<true></true>
+	<key>GOOGLE_APP_ID</key>
+	<string>1:782624295113:ios:7340c4cdab32e1bfc46518</string>
+</dict>
+</plist>

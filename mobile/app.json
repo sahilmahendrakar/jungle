@@ -1,0 +1,71 @@
+{
+  "expo": {
+    "name": "Jungle",
+    "slug": "jungle",
+    "owner": "sahilmahendrakars-team",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "scheme": "jungle",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.jungleagents.jungle",
+      "infoPlist": {
+        "CFBundleURLTypes": [
+          {
+            "CFBundleURLSchemes": [
+              "com.googleusercontent.apps.782624295113-0nbkafjmibkk436ehseeqrr2aodah174"
+            ]
+          }
+        ],
+        "NSCameraUsageDescription": "Jungle uses the camera to let you attach photos to messages.",
+        "ITSAppUsesNonExemptEncryption": false
+      },
+      "entitlements": {
+        "aps-environment": "production"
+      }
+    },
+    "android": {
+      "package": "com.jungleagents.jungle",
+      "adaptiveIcon": {
+        "backgroundColor": "#0B0B0B",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-status-bar",
+      "expo-secure-store",
+      "expo-web-browser",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Jungle needs access to your photos so you can attach images to messages."
+        }
+      ],
+      "expo-notifications"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "4e1a7101-bfb0-40f3-9331-7224eb76fd27"
+      },
+      "firebase": {
+        "apiKey": "AIzaSyD_Vw7F6XG9iPbuVIvANH5dRnTlL26UL3U",
+        "authDomain": "jungle-agents.firebaseapp.com",
+        "projectId": "jungle-agents",
+        "storageBucket": "jungle-agents.firebasestorage.app",
+        "messagingSenderId": "782624295113",
+        "appId": "1:782624295113:ios:7340c4cdab32e1bfc46518"
+      },
+      "googleIosClientId": "782624295113-0nbkafjmibkk436ehseeqrr2aodah174.apps.googleusercontent.com"
+    }
+  }
+}
