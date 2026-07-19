@@ -9,6 +9,8 @@ export interface GoogleIdentity {
   refresh_token: string | null;
   access_expires_at: string | null;
   scopes: string | null;
+  // True when the refresh grant is permanently dead (invalid_grant) — see migration 027.
+  needs_reconnect: boolean;
 }
 
 // Store (or replace) the Google account connected to a participant.
@@ -32,6 +34,8 @@ export async function upsertGoogleIdentity(i: {
        refresh_token = coalesce(excluded.refresh_token, google_identities.refresh_token),
        access_expires_at = excluded.access_expires_at,
        scopes = excluded.scopes,
+       -- a fresh consent revives the connection
+       needs_reconnect = false,
        updated_at = now()`,
     [i.participantId, i.email, i.accessToken, i.refreshToken, i.accessExpiresAt, i.scopes],
   );
@@ -39,7 +43,8 @@ export async function upsertGoogleIdentity(i: {
 
 export async function getGoogleIdentity(participantId: string): Promise<GoogleIdentity | null> {
   const { rows } = await pool.query<GoogleIdentity>(
-    `select participant_id, email, access_token, refresh_token, access_expires_at, scopes
+    `select participant_id, email, access_token, refresh_token, access_expires_at, scopes,
+            needs_reconnect
      from google_identities where participant_id = $1`,
     [participantId],
   );
@@ -65,4 +70,14 @@ export async function updateGoogleTokens(i: {
 
 export async function deleteGoogleIdentity(participantId: string): Promise<void> {
   await pool.query(`delete from google_identities where participant_id = $1`, [participantId]);
+}
+
+// Flag/unflag a dead refresh grant. Set when a refresh hits invalid_grant (or no refresh token
+// exists); cleared on the next successful refresh or a fresh consent (upsert). Doesn't touch
+// updated_at — that keeps reflecting the last token write (useful for debugging expiry).
+export async function setGoogleNeedsReconnect(participantId: string, needsReconnect: boolean): Promise<void> {
+  await pool.query(
+    `update google_identities set needs_reconnect = $2 where participant_id = $1`,
+    [participantId, needsReconnect],
+  );
 }

@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
-import { CalendarClock, Check, Home as HomeIcon, MessageSquare, Package, Radio } from "lucide-react";
-import type { Channel, Participant, Deliverable, Schedule, Workflow } from "./api";
-import { listSchedules, listWorkflows } from "./api";
-import { fmtRelative, type ToolConfirm } from "./lib/chat";
+import { CalendarClock, Check, Home as HomeIcon, MessageSquare, MessagesSquare, Package, Radio } from "lucide-react";
+import type { ActivityMessage, Channel, Participant, Deliverable, Schedule, Workflow } from "./api";
+import { listActivity, listSchedules, listWorkflows } from "./api";
+import type { ToolConfirm } from "./lib/chat";
 import { ViewShell } from "./components/chat/ViewShell";
 import { ApprovalCard } from "./Approvals";
 import { DeliverableRow } from "./Deliverables";
+import { MessageRow } from "./Activity";
 import { PersonAvatar } from "./components/chat/panels";
 import { navigate } from "./route";
 
@@ -55,6 +56,8 @@ export function Home({
   onJumpToChannel,
   onJumpToMessage,
   onOpenAgentProfile,
+  personByHandle,
+  liveTick,
 }: {
   me: Participant | undefined;
   confirms: ToolConfirm[];
@@ -68,8 +71,10 @@ export function Home({
   onExpandSidebar: () => void;
   onDecide: (c: ToolConfirm, d: "allow" | "deny") => void;
   onJumpToChannel: (channelId: string) => void;
-  onJumpToMessage: (channelId: string, messageId: string) => void;
+  onJumpToMessage: (channelId: string, messageId: string, threadRootId?: string | null) => void;
   onOpenAgentProfile: (id: string) => void;
+  personByHandle: (h?: string | null) => Participant | undefined;
+  liveTick: number;
 }) {
   const byChannel = new Map(channels.map((c) => [c.id, c]));
   const working = participants.filter((p) => p.kind === "agent" && p.status === "working");
@@ -116,6 +121,25 @@ export function Home({
 
   const recentDeliverables = deliverables.slice(0, 6);
   const firstName = (me?.display_name ?? "").split(/\s+/)[0] || me?.handle || "there";
+
+  // Catch up: the newest messages addressed to you — DMs, @mentions, replies on threads you're
+  // in (the Activity feed's received-messages view, top 5). Refreshes when the WS sees traffic
+  // (liveTick), throttled to one refetch per 2s.
+  const [catchUp, setCatchUp] = useState<ActivityMessage[]>([]);
+  useEffect(() => {
+    let alive = true;
+    const t = setTimeout(() => {
+      listActivity({ type: "messages", direction: "received" }, { limit: 5 })
+        .then((r) => {
+          if (alive) setCatchUp(r.items.flatMap((it) => (it.type === "message" ? [it.message] : [])));
+        })
+        .catch(() => {});
+    }, liveTick === 0 ? 0 : 2000);
+    return () => {
+      alive = false;
+      clearTimeout(t);
+    };
+  }, [liveTick]);
 
   return (
     <ViewShell
@@ -203,6 +227,42 @@ export function Home({
             )}
           </section>
 
+          {/* Catch up: recent messages addressed to you (DMs, mentions, thread replies). */}
+          <section data-testid="home-catch-up">
+            <div className="mb-2 flex items-baseline justify-between px-1">
+              <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Catch up
+              </h2>
+              {catchUp.length > 0 && (
+                <button
+                  data-testid="home-catch-up-all"
+                  onClick={() => navigate("/activity?type=messages&direction=received")}
+                  className="text-xs font-medium text-muted-foreground hover:text-foreground hover:underline"
+                >
+                  View all →
+                </button>
+              )}
+            </div>
+            {catchUp.length === 0 ? (
+              <div className="flex items-center gap-2.5 rounded-xl border border-dashed p-4 text-sm text-muted-foreground">
+                <MessagesSquare className="size-4" />
+                You're all caught up — DMs, mentions, and thread replies land here.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {catchUp.map((m) => (
+                  <MessageRow
+                    key={m.message_id}
+                    m={m}
+                    personByHandle={personByHandle}
+                    onOpenProfile={onOpenAgentProfile}
+                    onJump={() => onJumpToMessage(m.channel_id, m.message_id, m.thread_root_id)}
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+
           {/* While you were away: the recent deliverables feed. */}
           <section data-testid="home-recent">
             <SectionLabel>While you were away</SectionLabel>
@@ -218,7 +278,7 @@ export function Home({
                 ))}
                 {deliverables.length > recentDeliverables.length && (
                   <button
-                    onClick={() => navigate("/deliverables")}
+                    onClick={() => navigate("/activity?type=deliverables")}
                     className="px-1 text-xs font-medium text-muted-foreground hover:text-foreground hover:underline"
                   >
                     See all deliverables →

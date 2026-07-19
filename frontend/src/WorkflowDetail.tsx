@@ -30,6 +30,7 @@ import {
 } from "./components/workflow/WorkflowCanvas";
 import { useConnections } from "./lib/connections";
 import { navigate } from "./route";
+import { DeleteWorkflowDialog } from "./components/workflow/DeleteWorkflowDialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -64,6 +65,7 @@ export function WorkflowDetail({
   onOpenDrawer,
   onExpandSidebar,
   onOpenAgent,
+  onOpenConnections,
   onOpenRunThread,
 }: {
   workflowId: string;
@@ -72,6 +74,7 @@ export function WorkflowDetail({
   onOpenDrawer: () => void;
   onExpandSidebar: () => void;
   onOpenAgent: (id: string) => void;
+  onOpenConnections: () => void;
   onOpenRunThread: (channelId: string, rootMessageId: string) => void;
 }) {
   const [w, setW] = useState<Workflow | null>(null);
@@ -80,6 +83,7 @@ export function WorkflowDetail({
   const [playbook, setPlaybook] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const connections = useConnections(true);
   const connectedKeys = useMemo(() => connectedIntegrationKeys(connections.connections), [connections.connections]);
@@ -144,6 +148,22 @@ export function WorkflowDetail({
           {w.status === "draft" ? <Badge variant="secondary">Draft</Badge> : w.status === "paused" ? <Badge variant="secondary">Paused</Badge> : <Badge variant="outline" className="text-primary">Active</Badge>}
         </span>
         <div className="ml-auto flex items-center gap-2">
+          {/* Destructive secondary action: icon-only (universal glyph + tooltip/aria) but the
+              SAME height as the row's labeled buttons (size-8 = h-8 sm) — a shorter box floats
+              off the row's rhythm and reads as a stray element. Outline at rest, destructive
+              border + text on hover. */}
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={busy}
+            data-testid="detail-delete"
+            onClick={() => setDeleting(true)}
+            aria-label="Delete workflow"
+            title="Delete workflow"
+            className="size-8 px-0 text-muted-foreground hover:border-destructive hover:text-destructive"
+          >
+            <Trash2 className="size-3.5" />
+          </Button>
           <Button size="sm" variant="outline" data-testid="detail-edit" onClick={() => navigate(`/workflows/${w.id}/edit`)} className="h-8 text-xs">
             <Pencil className="size-3.5" /> Edit
           </Button>
@@ -199,6 +219,7 @@ export function WorkflowDetail({
             participants={participants}
             connectedKeys={connectedKeys}
             onSelectAgent={onOpenAgent}
+            onOpenConnections={onOpenConnections}
           />
           {w.description && <p className="text-sm text-muted-foreground">{w.description}</p>}
           <div className="grid gap-6 lg:grid-cols-3">
@@ -232,7 +253,7 @@ export function WorkflowDetail({
               </div>
               <div>
                 <h2 className="mb-2 px-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Connections</h2>
-                <ConnectionsPanel w={w} connectedKeys={connectedKeys} onSelectAgent={onOpenAgent} />
+                <ConnectionsPanel w={w} connectedKeys={connectedKeys} onOpenConnections={onOpenConnections} />
               </div>
             </div>
           </div>
@@ -251,25 +272,19 @@ export function WorkflowDetail({
             <Button size="sm" disabled={busy || playbook === w.playbook} onClick={() => act(() => updateWorkflow(w.id, { playbook }))}>
               Save playbook
             </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={busy}
-              onClick={() => {
-                if (confirm(`Delete “${w.name}”? Its agents and channel stay; the workflow, its runs, and its trigger go away.`)) {
-                  void act(async () => {
-                    await deleteWorkflow(w.id);
-                    navigate("/workflows");
-                  });
-                }
-              }}
-              className="ml-auto text-destructive"
-            >
-              <Trash2 className="size-3.5" /> Delete workflow
-            </Button>
           </div>
         </div>
       )}
+
+      <DeleteWorkflowDialog
+        workflow={deleting ? w : null}
+        liveRun={!!liveRun}
+        onOpenChange={setDeleting}
+        onConfirm={async () => {
+          await deleteWorkflow(w.id);
+          navigate("/workflows");
+        }}
+      />
     </ViewShell>
   );
 }

@@ -17,6 +17,9 @@ import type {
   Deliverable,
   DeliverableKind,
   SearchResult,
+  ActivityItem,
+  ActivityMessage,
+  ActivityFilters,
   ExtractedLink,
   RunnerHost,
   SlackStatus,
@@ -43,7 +46,7 @@ export type { SlackStatus, SlackChannelInfo, SlackChannelLink };
 
 export type { Participant, Attachment, UnreadThread, AgentEvent, AgentStatus, AgentIntegration, RunnerHost };
 export type { AgentServiceInfo };
-export type { Schedule, Deliverable, DeliverableKind, SearchResult };
+export type { Schedule, Deliverable, DeliverableKind, SearchResult, ActivityItem, ActivityMessage, ActivityFilters };
 export type { Workflow, WorkflowRole, WorkflowRun, WorkflowTrigger, WorkflowTemplate };
 export type { Me, GoogleProfile, Workspace, Membership, InviteInfo };
 // A message as delivered to the client (attachments carry signed download urls).
@@ -318,6 +321,8 @@ export function removeAgentIntegration(agentId: string, key: string): Promise<{ 
 export interface IntegrationConnectionStatus {
   connected: boolean;
   externalAccount?: string | null;
+  // The stored OAuth grant is dead (invalid_grant) — the user must re-consent to revive it.
+  needsReconnect?: boolean;
 }
 
 // Per-integration connection status for the current user, keyed by integration key.
@@ -704,14 +709,49 @@ export function listDeliverables(opts: { before?: number; limit?: number } = {})
   }).then((r) => r.deliverables);
 }
 
-// Full-text message search across my channels (the ⌘K palette).
-export function searchMessages(q: string, limit = 20): Promise<SearchResult[]> {
+// Full-text message search across my channels (the ⌘K palette). The query may carry the shared
+// filter tokens (from:/to:/in:/is:); a `type:deliverables` token switches the search to the
+// deliverables index, and then `deliverables` comes back instead of `results`.
+export function searchMessages(
+  q: string,
+  limit = 20,
+): Promise<{ results: SearchResult[]; deliverables: Deliverable[] }> {
   const qs = new URLSearchParams({ q, limit: String(limit) });
-  return request<{ results: SearchResult[] }>(`/api/search?${qs.toString()}`, {
+  return request<{ results?: SearchResult[]; deliverables?: Deliverable[] }>(
+    `/api/search?${qs.toString()}`,
+    {
+      auth: true,
+      devAuth: true,
+      errorMessage: "search failed",
+    },
+  ).then((r) => ({ results: r.results ?? [], deliverables: r.deliverables ?? [] }));
+}
+
+// The unified activity feed (sidebar Activity page + agent-profile "recent messages"): messages
+// and deliverables, composably filtered. Page backwards with `before` = the oldest item's
+// created_at. Filters map 1:1 to the backend's query params; `q` may itself carry tokens.
+export function listActivity(
+  filters: ActivityFilters & { q?: string },
+  opts: { before?: string; limit?: number } = {},
+): Promise<{ items: ActivityItem[]; hasMore: boolean }> {
+  const qs = new URLSearchParams();
+  if (filters.q) qs.set("q", filters.q);
+  if (filters.type && filters.type !== "all") qs.set("type", filters.type);
+  if (filters.direction) qs.set("direction", filters.direction);
+  if (filters.from) qs.set("from", filters.from);
+  if (filters.to) qs.set("to", filters.to);
+  if (filters.person) qs.set("person", filters.person);
+  if (filters.inChannel) qs.set("in", filters.inChannel);
+  if (filters.inDm) qs.set("in", `@${filters.inDm}`);
+  if (filters.kind) qs.set("kind", filters.kind);
+  if (opts.before) qs.set("before", opts.before);
+  if (opts.limit != null) qs.set("limit", String(opts.limit));
+  const s = qs.toString();
+  return request<{ items: ActivityItem[]; hasMore: boolean }>(`/api/activity${s ? `?${s}` : ""}`, {
     auth: true,
     devAuth: true,
-    errorMessage: "search failed",
-  }).then((r) => r.results);
+    errorMessage: "failed to load activity",
+  });
 }
 
 // --- Channel members + delete ---
@@ -1074,6 +1114,8 @@ export function disconnectGoogle(): Promise<{ ok: boolean }> {
 export interface GoogleStatus {
   connected: boolean;
   email?: string;
+  // The stored OAuth grant is dead (invalid_grant) — the user must re-consent to revive it.
+  needsReconnect?: boolean;
 }
 
 export function getGoogleStatus(): Promise<GoogleStatus> {

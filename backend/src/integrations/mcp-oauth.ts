@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import * as db from "../db";
+import { isInvalidGrantError } from "./oauth";
 import type { ConnectionResult, ConnectionStart, ConnectionStartCtx, IntegrationConnection } from "./types";
 
 // Generic OAuth 2.1 client for remote MCP servers (Linear, Notion, Granola). Implements the MCP
@@ -233,13 +234,18 @@ export function mcpConnection(spec: McpProviderSpec): IntegrationConnection {
 
 // Return a valid access token for a user's connection to this provider, refreshing from the stored
 // refresh token if it's expired/near expiry (mirrors google.ts:getValidGmailToken). Throws if the
-// user isn't connected or the token expired with no refresh token (→ reconnect).
+// user isn't connected or the token expired with no refresh token (→ reconnect). A permanently-dead
+// grant (invalid_grant) flags the connection needs_reconnect; a successful refresh clears it
+// (see migration 027).
 export async function getValidMcpToken(spec: McpProviderSpec, participantId: string): Promise<string> {
   const row = await db.getIntegrationConnection(participantId, spec.key);
   if (!row) throw new Error(`participant ${participantId} is not connected to ${spec.key}`);
   const exp = row.access_expires_at ? new Date(row.access_expires_at).getTime() : Infinity;
   if (exp - Date.now() > 60_000) return row.access_token;
-  if (!row.refresh_token) throw new Error(`${spec.key} token expired and no refresh token; reconnect`);
+  if (!row.refresh_token) {
+    await db.setIntegrationNeedsReconnect(participantId, spec.key, true);
+    throw new Error(`${spec.key} token expired and no refresh token; reconnect`);
+  }
 
   const extra = row.extra ?? {};
   const tokenEndpoint = (extra.tokenEndpoint as string) || (await discover(spec)).tokenEndpoint;
@@ -248,13 +254,19 @@ export async function getValidMcpToken(spec: McpProviderSpec, participantId: str
   const resource = (extra.resource as string) || spec.mcpUrl;
   if (!clientId) throw new Error(`${spec.key}: no OAuth client on file to refresh with`);
 
-  const tok = await postToken(tokenEndpoint, {
-    grant_type: "refresh_token",
-    refresh_token: row.refresh_token,
-    client_id: clientId,
-    resource,
-    ...(clientSecret ? { client_secret: clientSecret } : {}),
-  });
+  let tok: Awaited<ReturnType<typeof postToken>>;
+  try {
+    tok = await postToken(tokenEndpoint, {
+      grant_type: "refresh_token",
+      refresh_token: row.refresh_token,
+      client_id: clientId,
+      resource,
+      ...(clientSecret ? { client_secret: clientSecret } : {}),
+    });
+  } catch (e) {
+    if (isInvalidGrantError(e)) await db.setIntegrationNeedsReconnect(participantId, spec.key, true);
+    throw e;
+  }
   await db.updateIntegrationTokens({
     participantId,
     key: spec.key,
@@ -262,5 +274,7 @@ export async function getValidMcpToken(spec: McpProviderSpec, participantId: str
     refreshToken: tok.refresh_token ?? row.refresh_token, // providers often omit it on refresh
     accessExpiresAt: expiryDate(tok.expires_in),
   });
+  // Self-heal: a successful refresh proves the grant is alive again.
+  if (row.needs_reconnect) await db.setIntegrationNeedsReconnect(participantId, spec.key, false);
   return tok.access_token;
 }

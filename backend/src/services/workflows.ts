@@ -319,6 +319,43 @@ export async function cleanupDraftAgents(wf: db.WorkflowRow): Promise<void> {
   }
 }
 
+// Keep rosters in lockstep with an agent's attached integrations: attaching a key adds it to
+// every roster seat the agent occupies (draft or live), detaching scrubs it. The canvas chips
+// and the Connections panel both read the roster, so this is what makes them follow edits made
+// in the agent's profile panel. Roster integrations drive presentation + finalize's attach pass
+// only — runtime grants come from agent_integrations — so syncing never changes what a run can do.
+export async function syncRosterIntegration(
+  agentId: string,
+  key: string,
+  op: "attach" | "detach",
+  config?: Record<string, unknown>,
+): Promise<void> {
+  // The repo shorthand only means something alongside the github integration.
+  const repo = key === "github" && typeof config?.repo === "string" && config.repo ? config.repo : undefined;
+  for (const wf of await db.workflowsForParticipant(agentId)) {
+    let changed = false;
+    const roster = wf.roster.map((r) => {
+      if (r.participant_id !== agentId) return r;
+      if (op === "attach") {
+        const has = r.integrations.includes(key);
+        if (has && (!repo || r.repo === repo)) return r;
+        changed = true;
+        const n = { ...r, integrations: has ? r.integrations : [...r.integrations, key] };
+        if (repo) n.repo = repo;
+        return n;
+      }
+      if (!r.integrations.includes(key)) return r;
+      changed = true;
+      const n = { ...r, integrations: r.integrations.filter((k) => k !== key) };
+      if (key === "github") delete n.repo;
+      return n;
+    });
+    if (!changed) continue;
+    await db.updateWorkflow(wf.id, { roster });
+    broadcastWorkspace(wf.workspace_id, { type: "workflow_changed", workflowId: wf.id, action: "updated" });
+  }
+}
+
 // The compile step: provision every seat's agent (create machines), create (or adopt) the home
 // channel, add members, create the backing schedule row for cron triggers, set active.
 // Idempotent-ish: rerun after a failure just fills in what's missing. Roles without agents yet
