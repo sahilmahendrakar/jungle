@@ -77,11 +77,14 @@ class AppSocket {
   private async connect() {
     if (this.stopped || !this.cfg) return;
     const { getToken, workspaceId, participantId } = this.cfg;
-    // Fresh token per attempt (never cache the querystring token).
-    const qs = participantId
-      ? `participantId=${encodeURIComponent(participantId)}`
-      : `token=${encodeURIComponent((await getToken()) ?? "")}` +
-        (workspaceId ? `&workspaceId=${encodeURIComponent(workspaceId)}` : "");
+    // Fresh token per attempt (never cache the querystring token). client=mobile lets the backend
+    // suppress a redundant phone push only while this app is foreground-connected (see appSocket
+    // pushForFanOut) — desktop presence must not suppress phone push.
+    const qs =
+      (participantId
+        ? `participantId=${encodeURIComponent(participantId)}`
+        : `token=${encodeURIComponent((await getToken()) ?? "")}` +
+          (workspaceId ? `&workspaceId=${encodeURIComponent(workspaceId)}` : "")) + `&client=mobile`;
     if (this.stopped) return;
 
     const ws = new WebSocket(`${getWsBase()}/?${qs}`);
