@@ -82,14 +82,30 @@ export async function registerPush(): Promise<void> {
   }
 }
 
-// Wire notification taps to navigation. Returns a cleanup fn. `navigate` deep-links to data.url
-// (e.g. jungle:///channel/<id>); also handles a cold start (app launched by tapping a push).
+// Backend push payloads (see backend/src/ws/appSocket.ts): messages carry
+// {kind:"message", channelId, threadRootId?}; approvals carry {kind:"confirm", channelId,
+// confirmId}. Map them to expo-router paths. `data.url` kept as an escape hatch.
+// TODO(workspaces): if data.workspaceId differs from the active workspace the target 404s —
+// switch workspaces before navigating once push is activated.
+function routeForPushData(data: Record<string, unknown>): string | null {
+  if (typeof data.url === "string") return data.url.replace(/^jungle:\/\//, "/").replace(/^\/+/, "/");
+  if (data.kind === "message" && typeof data.channelId === "string") {
+    return typeof data.threadRootId === "string"
+      ? `/channel/${data.channelId}/thread/${data.threadRootId}`
+      : `/channel/${data.channelId}`;
+  }
+  if (data.kind === "confirm") return "/(tabs)/activity";
+  return null;
+}
+
+// Wire notification taps to navigation. Returns a cleanup fn; also handles a cold start (app
+// launched by tapping a push).
 export function installTapHandler(navigate: (url: string) => void): () => void {
   const N = notifications();
   if (!N) return () => {};
   const handle = (resp: any) => {
-    const url = resp?.notification?.request?.content?.data?.url;
-    if (typeof url === "string") navigate(url);
+    const url = routeForPushData(resp?.notification?.request?.content?.data ?? {});
+    if (url) navigate(url);
   };
   let sub: { remove: () => void } | null = null;
   try {

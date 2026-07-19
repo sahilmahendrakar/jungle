@@ -47,12 +47,9 @@ function WorkspaceGate() {
 function AuthGate() {
   const { ready, user } = useAuth();
   const router = useRouter();
-  // Deep-link notification taps (and cold starts) to the channel/activity they name. The backend
-  // sends scheme URLs (jungle:///channel/<id>); strip the scheme to an expo-router path.
-  useEffect(
-    () => installTapHandler((url) => router.push(url.replace(/^jungle:\/\//, "/").replace(/^\/+/, "/") as never)),
-    [router],
-  );
+  // Deep-link notification taps (and cold starts) to the channel/thread/approval they name;
+  // push.ts maps the backend's data payload to an expo-router path.
+  useEffect(() => installTapHandler((url) => router.push(url as never)), [router]);
   if (!ready) return <Splash />;
   if (!user) return <SignIn />;
   return (

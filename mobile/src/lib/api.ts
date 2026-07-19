@@ -521,7 +521,8 @@ export function registerPushToken(token: string, platform = "ios"): Promise<{ ok
 }
 
 export function unregisterPushToken(token: string): Promise<{ ok: boolean }> {
-  return request(`/api/push/unregister`, {
+  return request(`/api/push/register`, {
+    method: "DELETE",
     json: { token },
     auth: true,
     devAuth: true,
