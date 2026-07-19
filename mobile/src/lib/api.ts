@@ -26,6 +26,9 @@ import type {
   Workflow,
   WorkflowRun,
   WorkflowTemplate,
+  ActivityFilters,
+  ActivityItem,
+  ActivityMessage,
 } from "@jungle/shared";
 import { File } from "expo-file-system";
 import { getBase } from "./config";
@@ -44,6 +47,7 @@ export type { ExtractedLink };
 export type { Participant, Attachment, UnreadThread, AgentEvent, AgentStatus, AgentIntegration, RunnerHost };
 export type { Schedule, Deliverable, DeliverableKind, SearchResult };
 export type { Workflow, WorkflowRun, WorkflowTemplate };
+export type { ActivityFilters, ActivityItem, ActivityMessage };
 export type { Me, GoogleProfile, Workspace, Membership, InviteInfo };
 // A message as delivered to the client (attachments carry signed download urls).
 export type Message = WireMessage;
@@ -510,6 +514,32 @@ export function deleteSchedule(id: string): Promise<{ ok: boolean }> {
     auth: true,
     devAuth: true,
     errorMessage: "failed to delete schedule",
+  });
+}
+
+// --- Activity feed (unified messages + deliverables; see shared ActivityFilters) ---
+
+export function listActivity(
+  filters: ActivityFilters & { q?: string },
+  opts: { before?: string; limit?: number } = {},
+): Promise<{ items: ActivityItem[]; hasMore: boolean }> {
+  const qs = new URLSearchParams();
+  if (filters.q) qs.set("q", filters.q);
+  if (filters.type && filters.type !== "all") qs.set("type", filters.type);
+  if (filters.direction) qs.set("direction", filters.direction);
+  if (filters.from) qs.set("from", filters.from);
+  if (filters.to) qs.set("to", filters.to);
+  if (filters.person) qs.set("person", filters.person);
+  if (filters.inChannel) qs.set("in", filters.inChannel);
+  if (filters.inDm) qs.set("in", `@${filters.inDm}`);
+  if (filters.kind) qs.set("kind", filters.kind);
+  if (opts.before) qs.set("before", opts.before);
+  if (opts.limit != null) qs.set("limit", String(opts.limit));
+  const s = qs.toString();
+  return request<{ items: ActivityItem[]; hasMore: boolean }>(`/api/activity${s ? `?${s}` : ""}`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load activity",
   });
 }
 
