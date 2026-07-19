@@ -33,6 +33,7 @@ function AppStack() {
       <Stack.Screen name="agent/[id]/index" />
       <Stack.Screen name="agent/[id]/activity" />
       <Stack.Screen name="workflow/[id]" />
+      <Stack.Screen name="team" />
       <Stack.Screen name="scheduled" />
     </Stack>
   );

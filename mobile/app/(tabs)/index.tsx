@@ -196,6 +196,9 @@ export default function Home() {
               { backgroundColor: connected ? "#34d399" : "rgba(148,163,184,0.6)" },
             ]}
           />
+          <Pressable onPress={() => router.push("/team")} hitSlop={8}>
+            <Ionicons name="people-outline" size={22} color={sidebar.fg} />
+          </Pressable>
           {myP ? (
             <Pressable onPress={() => router.push("/you")} hitSlop={8}>
               <Avatar handle={myP.handle} name={myP.display_name} url={myP.avatar_url} size={26} />
