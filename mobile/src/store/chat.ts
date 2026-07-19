@@ -54,6 +54,9 @@ interface ChatState {
   activityEvents: AgentEvent[];
   // Coarse "schedules changed" flag; the Scheduled screen refetches when it sees this.
   schedulesStale: number;
+  // Same idea for workflows: bumped on workflow_changed / workflow_run_changed; the Workflows
+  // screens refetch when it moves.
+  workflowsStale: number;
 
   // lifecycle / bulk setters (used by initial fetches + the socket manager)
   setConnected: (b: boolean) => void;
@@ -94,6 +97,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   activityAgentId: null,
   activityEvents: [],
   schedulesStale: 0,
+  workflowsStale: 0,
 
   setConnected: (b) => set({ connected: b }),
   setAppActive: (b) => set({ appActive: b }),
@@ -293,6 +297,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return;
       case "schedule_changed":
         set({ schedulesStale: s.schedulesStale + 1 });
+        return;
+      case "workflow_changed":
+      case "workflow_run_changed":
+        set({ workflowsStale: s.workflowsStale + 1 });
         return;
       default:
         return;

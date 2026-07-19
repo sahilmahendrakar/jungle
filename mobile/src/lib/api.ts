@@ -23,6 +23,9 @@ import type {
   SearchResult,
   ExtractedLink,
   RunnerHost,
+  Workflow,
+  WorkflowRun,
+  WorkflowTemplate,
 } from "@jungle/shared";
 import { File } from "expo-file-system";
 import { getBase } from "./config";
@@ -40,6 +43,7 @@ export type { ExtractedLink };
 
 export type { Participant, Attachment, UnreadThread, AgentEvent, AgentStatus, AgentIntegration, RunnerHost };
 export type { Schedule, Deliverable, DeliverableKind, SearchResult };
+export type { Workflow, WorkflowRun, WorkflowTemplate };
 export type { Me, GoogleProfile, Workspace, Membership, InviteInfo };
 // A message as delivered to the client (attachments carry signed download urls).
 export type Message = WireMessage;
@@ -506,6 +510,102 @@ export function deleteSchedule(id: string): Promise<{ ok: boolean }> {
     auth: true,
     devAuth: true,
     errorMessage: "failed to delete schedule",
+  });
+}
+
+// --- Workflows (teams of agents on a trigger; see shared/src/workflows.ts) ---
+
+export function listWorkflows(): Promise<Workflow[]> {
+  return request<{ workflows: Workflow[] }>(`/api/workflows`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load workflows",
+  }).then((r) => r.workflows);
+}
+
+export function listWorkflowTemplates(): Promise<WorkflowTemplate[]> {
+  return request<{ templates: WorkflowTemplate[] }>(`/api/workflow-templates`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load templates",
+  }).then((r) => r.templates);
+}
+
+export function getWorkflow(id: string): Promise<Workflow> {
+  return request<Workflow>(`/api/workflows/${id}`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load workflow",
+  });
+}
+
+export function listWorkflowRuns(id: string): Promise<WorkflowRun[]> {
+  return request<{ runs: WorkflowRun[] }>(`/api/workflows/${id}/runs`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load runs",
+  }).then((r) => r.runs);
+}
+
+// Open the conversational builder: creates a draft (blank or from a template), ensures the
+// Architect agent, and opens your DM with it — the mobile "builder UI" is that DM.
+export function openWorkflowBuilder(
+  templateId?: string,
+): Promise<{ architectId: string; dmChannelId: string; draftId: string }> {
+  return request(`/api/workflows/builder`, {
+    json: templateId ? { templateId } : {},
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to open the workflow builder",
+  });
+}
+
+export function updateWorkflow(
+  id: string,
+  patch: { playbook?: string; paused?: boolean; name?: string },
+): Promise<Workflow> {
+  return request<Workflow>(`/api/workflows/${id}`, {
+    method: "PATCH",
+    json: patch,
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to update workflow",
+  });
+}
+
+export function finalizeWorkflow(id: string): Promise<Workflow> {
+  return request<Workflow>(`/api/workflows/${id}/finalize`, {
+    json: {},
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to create the workflow",
+  });
+}
+
+export function runWorkflow(id: string): Promise<WorkflowRun> {
+  return request<WorkflowRun>(`/api/workflows/${id}/run`, {
+    json: {},
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to start the run",
+  });
+}
+
+export function stopWorkflowRun(id: string, runId: string): Promise<WorkflowRun> {
+  return request<WorkflowRun>(`/api/workflows/${id}/runs/${runId}/stop`, {
+    json: {},
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to stop the run",
+  });
+}
+
+export function deleteWorkflow(id: string): Promise<{ ok: boolean }> {
+  return request(`/api/workflows/${id}`, {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to delete workflow",
   });
 }
 

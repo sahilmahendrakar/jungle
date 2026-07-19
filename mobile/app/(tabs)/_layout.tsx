@@ -3,8 +3,8 @@ import { Ionicons } from "@expo/vector-icons";
 import { useChatStore } from "../../src/store/chat";
 import { useTheme } from "../../src/lib/theme-context";
 
-// Bottom tabs (Slack-mobile IA): Home / Activity / Search / You. The Activity tab badges the
-// count of things waiting on you (pending approvals + unread threads).
+// Bottom tabs (Slack-mobile IA): Home / Workflows / Activity / Search / You. The Activity tab
+// badges the count of things waiting on you (pending approvals + unread threads).
 export default function TabsLayout() {
   const { colors } = useTheme();
   const confirms = useChatStore((s) => s.confirms.length);
@@ -25,6 +25,13 @@ export default function TabsLayout() {
         options={{
           title: "Home",
           tabBarIcon: ({ color, size }) => <Ionicons name="home" color={color} size={size} />,
+        }}
+      />
+      <Tabs.Screen
+        name="workflows"
+        options={{
+          title: "Workflows",
+          tabBarIcon: ({ color, size }) => <Ionicons name="git-network" color={color} size={size} />,
         }}
       />
       <Tabs.Screen

@@ -32,6 +32,7 @@ function AppStack() {
       <Stack.Screen name="channel/[id]/thread/[rootId]" />
       <Stack.Screen name="agent/[id]/index" />
       <Stack.Screen name="agent/[id]/activity" />
+      <Stack.Screen name="workflow/[id]" />
       <Stack.Screen name="scheduled" />
     </Stack>
   );
