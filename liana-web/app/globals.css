@@ -1,0 +1,396 @@
+/* Liana — botanical editorial. Warm paper, deep botanical-green ink, one sunrise accent.
+   Deliberately light-mode: this is a morning product. */
+
+:root {
+  --paper: #f7f4ec;
+  --card: #fffdf7;
+  --ink: #22301f;
+  --ink-strong: #17240f;
+  --ink-soft: #6b7264;
+  --leaf: #2e6b3f;
+  --leaf-soft: #e4ecdc;
+  --accent: #e07a3f;
+  --accent-soft: #f8e8db;
+  --hairline: #e3ddca;
+  --danger: #a8442e;
+  --radius: 12px;
+  --font-display: var(--fraunces), Georgia, serif;
+  --font-ui: var(--inter), system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--leaf);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+.shell {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 0 24px 96px;
+}
+
+/* --- Top nav --- */
+.nav {
+  display: flex;
+  align-items: baseline;
+  gap: 28px;
+  padding: 28px 0 20px;
+  border-bottom: 1px solid var(--hairline);
+  margin-bottom: 36px;
+}
+.nav .brand {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 22px;
+  color: var(--ink-strong);
+  letter-spacing: -0.01em;
+}
+.nav .brand .leaf {
+  color: var(--leaf);
+  margin-right: 6px;
+}
+.nav a.navlink {
+  color: var(--ink-soft);
+  font-size: 14px;
+}
+.nav a.navlink:hover {
+  color: var(--ink);
+  text-decoration: none;
+}
+.nav .spacer {
+  flex: 1;
+}
+
+/* --- Typography --- */
+h1.page-title {
+  font-family: var(--font-display);
+  font-weight: 560;
+  font-size: 34px;
+  letter-spacing: -0.015em;
+  color: var(--ink-strong);
+  margin: 0 0 6px;
+}
+.page-sub {
+  color: var(--ink-soft);
+  margin: 0 0 32px;
+}
+
+/* --- Cards --- */
+.card {
+  background: var(--card);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  padding: 20px 22px;
+  margin-bottom: 14px;
+  transition: border-color 120ms ease;
+}
+a.card-link {
+  display: block;
+  color: inherit;
+}
+a.card-link:hover {
+  text-decoration: none;
+}
+a.card-link:hover .card {
+  border-color: var(--leaf);
+}
+.card .wf-name {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 19px;
+  color: var(--ink-strong);
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.card .sentence {
+  color: var(--ink-soft);
+  font-size: 14px;
+  margin-top: 4px;
+}
+.card .lastrun {
+  margin-top: 10px;
+  font-size: 13.5px;
+  color: var(--ink-soft);
+  border-top: 1px dashed var(--hairline);
+  padding-top: 10px;
+}
+
+/* --- Status dot --- */
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+.dot.active {
+  background: var(--leaf);
+}
+.dot.paused {
+  background: #b8b29e;
+}
+.dot.draft {
+  background: var(--accent);
+}
+
+/* --- Chips --- */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+.chip {
+  font-size: 12.5px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--leaf-soft);
+  color: var(--leaf);
+  border: 1px solid transparent;
+}
+.chip.unconnected {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* --- Buttons --- */
+.btn {
+  font-family: var(--font-ui);
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: 9px;
+  padding: 8px 16px;
+  border: 1px solid var(--hairline);
+  background: var(--card);
+  color: var(--ink);
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+.btn:hover {
+  border-color: var(--leaf);
+  color: var(--leaf);
+}
+.btn.primary {
+  background: var(--leaf);
+  border-color: var(--leaf);
+  color: #fff;
+}
+.btn.primary:hover {
+  background: #245534;
+  color: #fff;
+}
+.btn.danger:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* --- Prompt editor (the centerpiece) --- */
+.prompt-editor {
+  width: 100%;
+  font-family: var(--font-display);
+  font-size: 19px;
+  line-height: 1.6;
+  color: var(--ink-strong);
+  background: transparent;
+  border: none;
+  outline: none;
+  resize: vertical;
+  min-height: 120px;
+  padding: 0;
+}
+.prompt-frame {
+  background: var(--card);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  padding: 22px 24px 14px;
+  transition: border-color 120ms ease;
+}
+.prompt-frame:focus-within {
+  border-color: var(--leaf);
+}
+.prompt-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-top: 1px dashed var(--hairline);
+  margin-top: 12px;
+  padding-top: 10px;
+  font-size: 13px;
+  color: var(--ink-soft);
+  min-height: 30px;
+}
+
+/* --- Run history (stem + nodes) --- */
+.runs {
+  margin-top: 8px;
+  border-left: 2px solid var(--hairline);
+  padding-left: 18px;
+}
+.run {
+  position: relative;
+  padding: 8px 0 14px;
+}
+.run::before {
+  content: "";
+  position: absolute;
+  left: -23.5px;
+  top: 15px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--leaf);
+  border: 2px solid var(--paper);
+}
+.run.failed::before {
+  background: var(--danger);
+}
+.run.running::before {
+  background: var(--accent);
+}
+.run .run-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.run .run-when {
+  color: var(--ink-strong);
+  font-weight: 500;
+}
+.run .run-status {
+  color: var(--ink-soft);
+  font-size: 12.5px;
+}
+.run .run-output {
+  margin-top: 10px;
+  background: var(--card);
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  padding: 16px 18px;
+  font-size: 14px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* --- Inline field rows --- */
+.field-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 10px 0;
+  font-size: 14px;
+}
+.field-row label {
+  color: var(--ink-soft);
+  min-width: 90px;
+}
+.field-row input {
+  font-family: var(--font-ui);
+  font-size: 14px;
+  padding: 6px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--ink);
+}
+.field-row input:focus {
+  outline: none;
+  border-color: var(--leaf);
+}
+
+/* --- Sections --- */
+.section-title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 17px;
+  color: var(--ink-strong);
+  margin: 36px 0 12px;
+}
+
+/* --- Empty state --- */
+.empty {
+  text-align: center;
+  padding: 72px 24px;
+}
+.empty .big-leaf {
+  font-size: 40px;
+}
+.empty h2 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 24px;
+  color: var(--ink-strong);
+  margin: 12px 0 8px;
+}
+.empty p {
+  color: var(--ink-soft);
+  max-width: 26rem;
+  margin: 0 auto 20px;
+}
+.empty .example {
+  display: inline-block;
+  background: var(--card);
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  padding: 10px 18px;
+  font-family: var(--font-display);
+  font-size: 16px;
+  color: var(--ink-strong);
+}
+
+/* --- Connections grid --- */
+.conn-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 14px;
+}
+.conn {
+  background: var(--card);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+}
+.conn .conn-name {
+  font-weight: 600;
+  color: var(--ink-strong);
+}
+.conn .conn-sub {
+  font-size: 13px;
+  color: var(--ink-soft);
+  margin: 4px 0 12px;
+  min-height: 20px;
+}
+
+.muted {
+  color: var(--ink-soft);
+}
+.error-note {
+  color: var(--danger);
+  font-size: 14px;
+}
