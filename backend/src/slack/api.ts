@@ -80,6 +80,9 @@ export interface OAuthV2Result {
   scope: string;
   bot_user_id: string;
   team: { id: string; name?: string };
+  // The Slack user who performed the install (present on standard installs; Liana uses it to
+  // seed the new workspace's creator).
+  authed_user?: { id: string };
 }
 
 export async function oauthV2Access(args: {
@@ -116,6 +119,8 @@ export interface PostMessageArgs {
   threadTs?: string | null;
   replyBroadcast?: boolean;
   metadata?: { event_type: string; event_payload: Record<string, unknown> };
+  // Block Kit blocks (Liana's confirm cards / briefings). `text` stays the notification fallback.
+  blocks?: unknown[];
 }
 
 export async function chatPostMessage(token: string, args: PostMessageArgs): Promise<{ ts: string }> {
@@ -128,6 +133,7 @@ export async function chatPostMessage(token: string, args: PostMessageArgs): Pro
   if (args.threadTs) params.thread_ts = args.threadTs;
   if (args.replyBroadcast) params.reply_broadcast = true;
   if (args.metadata) params.metadata = args.metadata;
+  if (args.blocks) params.blocks = args.blocks;
   // JSON body: metadata is a nested object that can't be form-encoded.
   const r = await slackCall("chat.postMessage", token, params, true);
   return { ts: String(r.ts) };
@@ -171,6 +177,12 @@ export async function conversationsInfo(token: string, channel: string): Promise
   return r.channel as SlackConversation;
 }
 
+// Open (or fetch) the bot's IM with a user — Liana's run-delivery channel.
+export async function conversationsOpen(token: string, userId: string): Promise<{ id: string }> {
+  const r = await slackCall("conversations.open", token, { users: userId });
+  return r.channel as { id: string };
+}
+
 // --- Users ---
 
 export interface SlackUserProfile {
@@ -179,6 +191,9 @@ export interface SlackUserProfile {
   email: string | null;
   avatarUrl: string | null;
   isBot: boolean;
+  // IANA timezone from the Slack profile (e.g. "America/Los_Angeles") — Liana's default for
+  // "every morning at 8am"-style schedules. Null when Slack doesn't report one.
+  tz: string | null;
 }
 
 export async function usersInfo(token: string, user: string): Promise<SlackUserProfile> {
@@ -188,6 +203,7 @@ export async function usersInfo(token: string, user: string): Promise<SlackUserP
     name?: string;
     real_name?: string;
     is_bot?: boolean;
+    tz?: string;
     profile?: { display_name?: string; real_name?: string; email?: string; image_192?: string; image_512?: string };
   };
   const p = u.profile ?? {};
@@ -197,5 +213,6 @@ export async function usersInfo(token: string, user: string): Promise<SlackUserP
     email: p.email || null,
     avatarUrl: p.image_512 || p.image_192 || null,
     isBot: !!u.is_bot,
+    tz: u.tz || null,
   };
 }

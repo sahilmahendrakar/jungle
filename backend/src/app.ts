@@ -18,6 +18,7 @@ import devicesRouter from "./http/routes/devices";
 import pushRouter from "./http/routes/push";
 import llmRouter from "./http/routes/llm";
 import { slackEventsRouter, slackRouter } from "./http/routes/slack";
+import { lianaEventsRouter, lianaRouter } from "./http/routes/liana";
 
 // Build the Express app: global middleware, the per-domain routers, and the terminal error
 // handler. The http server + WebSocket wiring live in index.ts (boot).
@@ -29,6 +30,8 @@ export function createApp(): express.Express {
   // The Slack events webhook verifies its signature over the RAW body, so like the LLM proxy it
   // must be mounted BEFORE express.json(). The rest of the Slack routes are ordinary JSON below.
   app.use(slackEventsRouter);
+  // Liana's Slack webhooks (its own app + signing secret) — raw body for the same reason.
+  app.use(lianaEventsRouter);
   app.use(express.json());
   app.use(auth.attachAuth); // populates req.auth when a valid Firebase token is present
 
@@ -67,6 +70,7 @@ export function createApp(): express.Express {
   app.use(devicesRouter);
   app.use(pushRouter);
   app.use(slackRouter);
+  app.use(lianaRouter);
 
   app.use(errorHandler);
   return app;

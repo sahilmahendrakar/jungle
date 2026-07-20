@@ -588,6 +588,9 @@ export async function completeRunFromMessage(msg: {
   const summary = msg.body.replace(RUN_COMPLETE_RE, "").trim() || null;
   await db.setWorkflowRunStatus(run.id, "done", summary);
   broadcastWorkspace(run.workspace_id, { type: "workflow_run_changed", workflowId: run.workflow_id, runId: run.id });
+  // Liana-owned workflows deliver the run's output to the owner's Slack DM. Dynamic import —
+  // liana.ts statically imports this module, so a static import here would cycle.
+  void import("./liana").then((l) => l.onRunClosed(run.id)).catch((e) => console.error("liana delivery:", e));
 }
 
 // The workflow section of a member agent's system prompt: its role, the playbook, the team, and
@@ -894,6 +897,8 @@ async function sweep(): Promise<void> {
     if (idleMinutes >= WORKFLOW_QUIESCENCE_DONE_MINUTES) {
       await db.setWorkflowRunStatus(run.id, "done", "Auto-completed: the team went quiet without posting a summary.");
       broadcastWorkspace(run.workspace_id, { type: "workflow_run_changed", workflowId: wf.id, runId: run.id });
+      // Quiescence-done still counts as a close for Liana DM delivery (see completeRunFromMessage).
+      void import("./liana").then((l) => l.onRunClosed(run.id)).catch((e) => console.error("liana delivery:", e));
     } else if (run.status === "running" && idleMinutes >= WORKFLOW_STALL_MINUTES) {
       await db.setWorkflowRunStatus(run.id, "stalled");
       broadcastWorkspace(run.workspace_id, { type: "workflow_run_changed", workflowId: wf.id, runId: run.id });

@@ -1,0 +1,145 @@
+import { pool } from "./pool";
+
+// Liana data access: the Slack-first workflow product's ownership layer. A Liana workflow is a
+// normal workflows row; these tables record which Slack team/user owns it and where runs deliver.
+// See migrations/028_liana.sql.
+
+export interface LianaInstall {
+  team_id: string;
+  team_name: string | null;
+  workspace_id: string;
+  bot_token: string;
+  bot_user_id: string;
+  scopes: string | null;
+  status: "active" | "revoked";
+}
+
+export async function upsertLianaInstall(i: {
+  teamId: string;
+  teamName: string | null;
+  workspaceId: string;
+  botToken: string;
+  botUserId: string;
+  scopes: string | null;
+}): Promise<LianaInstall> {
+  const { rows } = await pool.query<LianaInstall>(
+    `insert into liana_slack_installs (team_id, team_name, workspace_id, bot_token, bot_user_id, scopes, status)
+     values ($1, $2, $3, $4, $5, $6, 'active')
+     on conflict (team_id) do update set
+       team_name = excluded.team_name, bot_token = excluded.bot_token,
+       bot_user_id = excluded.bot_user_id, scopes = excluded.scopes, status = 'active'
+     returning *`,
+    [i.teamId, i.teamName, i.workspaceId, i.botToken, i.botUserId, i.scopes],
+  );
+  return rows[0];
+}
+
+export async function getLianaInstall(teamId: string): Promise<LianaInstall | null> {
+  const { rows } = await pool.query<LianaInstall>(
+    `select * from liana_slack_installs where team_id = $1`,
+    [teamId],
+  );
+  return rows[0] ?? null;
+}
+
+export async function setLianaInstallStatus(teamId: string, status: "active" | "revoked"): Promise<void> {
+  await pool.query(`update liana_slack_installs set status = $2 where team_id = $1`, [teamId, status]);
+}
+
+export interface LianaWorkflowRow {
+  workflow_id: string;
+  team_id: string;
+  slack_user_id: string;
+  owner_participant_id: string;
+  dm_channel_id: string | null;
+  origin_channel_id: string | null;
+  origin_thread_ts: string | null;
+}
+
+export async function insertLianaWorkflow(l: {
+  workflowId: string;
+  teamId: string;
+  slackUserId: string;
+  ownerParticipantId: string;
+  originChannelId?: string | null;
+  originThreadTs?: string | null;
+}): Promise<LianaWorkflowRow> {
+  const { rows } = await pool.query<LianaWorkflowRow>(
+    `insert into liana_workflows
+       (workflow_id, team_id, slack_user_id, owner_participant_id, origin_channel_id, origin_thread_ts)
+     values ($1, $2, $3, $4, $5, $6) returning *`,
+    [l.workflowId, l.teamId, l.slackUserId, l.ownerParticipantId, l.originChannelId ?? null, l.originThreadTs ?? null],
+  );
+  return rows[0];
+}
+
+export async function getLianaWorkflow(workflowId: string): Promise<LianaWorkflowRow | null> {
+  const { rows } = await pool.query<LianaWorkflowRow>(
+    `select * from liana_workflows where workflow_id = $1`,
+    [workflowId],
+  );
+  return rows[0] ?? null;
+}
+
+export async function listLianaWorkflowsForOwner(
+  teamId: string,
+  slackUserId: string,
+): Promise<LianaWorkflowRow[]> {
+  const { rows } = await pool.query<LianaWorkflowRow>(
+    `select * from liana_workflows where team_id = $1 and slack_user_id = $2 order by created_at desc`,
+    [teamId, slackUserId],
+  );
+  return rows;
+}
+
+export async function setLianaDmChannel(workflowId: string, dmChannelId: string): Promise<void> {
+  await pool.query(`update liana_workflows set dm_channel_id = $2 where workflow_id = $1`, [
+    workflowId,
+    dmChannelId,
+  ]);
+}
+
+// Insert-once delivery record. Returns true if this call claimed the delivery (caller should
+// post to Slack), false if a previous attempt already recorded one (skip — idempotent).
+export async function claimLianaDelivery(runId: string): Promise<boolean> {
+  const { rowCount } = await pool.query(
+    `insert into liana_deliveries (run_id, status) values ($1, 'delivered')
+     on conflict (run_id) do nothing`,
+    [runId],
+  );
+  return (rowCount ?? 0) > 0;
+}
+
+export async function markLianaDeliveryFailed(runId: string, error: string): Promise<void> {
+  await pool.query(
+    `update liana_deliveries set status = 'failed', error = $2 where run_id = $1`,
+    [runId, error.slice(0, 500)],
+  );
+}
+
+// Reverse of getUserLink: which Slack user a participant is, in a given team. Used when
+// generating web-app links for an owner we resolved earlier.
+export async function getSlackUserIdForParticipant(
+  teamId: string,
+  participantId: string,
+): Promise<string | null> {
+  const { rows } = await pool.query<{ slack_user_id: string }>(
+    `select slack_user_id from slack_user_links where slack_team_id = $1 and participant_id = $2 limit 1`,
+    [teamId, participantId],
+  );
+  return rows[0]?.slack_user_id ?? null;
+}
+
+// Cadence edit for a workflow's backing schedule row (web PATCH). The ticker reads cron/timezone
+// on each fire, so updating the row + next_run_at is the whole change.
+export async function updateBackingScheduleCadence(
+  workflowId: string,
+  cron: string,
+  timezone: string,
+  nextRunAt: string,
+): Promise<void> {
+  await pool.query(
+    `update schedules set cron = $2, timezone = $3, next_run_at = $4 where workflow_id = $1`,
+    [workflowId, cron, timezone, nextRunAt],
+  );
+}

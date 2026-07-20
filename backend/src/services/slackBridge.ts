@@ -191,7 +191,8 @@ async function getOrCreateSlackParticipant(
 
 // Slugify a Slack display name into the mention charset [a-zA-Z0-9_-] and make it unique in the
 // workspace with a numeric suffix (handles are case-insensitively unique per workspace).
-async function uniqueHandle(workspaceId: string, displayName: string): Promise<string> {
+// Exported for the Liana service, which creates shadow participants the same way.
+export async function uniqueHandle(workspaceId: string, displayName: string): Promise<string> {
   let base = displayName
     .toLowerCase()
     .replace(/[^a-z0-9_-]+/g, "-")
