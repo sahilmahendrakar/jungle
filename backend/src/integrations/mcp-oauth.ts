@@ -48,8 +48,41 @@ async function fetchJson(url: string, init?: RequestInit): Promise<Record<string
   return json;
 }
 
+// Some providers (Notion, Linear) don't serve the protected-resource metadata at the RFC 9728
+// well-known URL directly; instead an unauthenticated request to the MCP URL returns 401 with a
+// `WWW-Authenticate: Bearer resource_metadata="..."` header pointing at the metadata document.
+// Extract that URL when present so discovery works for both styles.
+export function parseResourceMetadataHeader(wwwAuth: string): string | null {
+  const match = wwwAuth.match(/resource_metadata="([^"]+)"/);
+  return match?.[1] ?? null;
+}
+
+export async function discoverResourceMetadataUrl(spec: McpProviderSpec): Promise<string | null> {
+  try {
+    const res = await fetch(spec.mcpUrl, { headers: { accept: "application/json" } });
+    if (res.status === 401) {
+      const wwwAuth = res.headers.get("www-authenticate") ?? "";
+      return parseResourceMetadataHeader(wwwAuth);
+    }
+  } catch {
+    /* transient network failure — fall back to well-known discovery below */
+  }
+  return null;
+}
+
+// The metadata's `resource` field should be the actual MCP server URL. Notion currently returns
+// the metadata URL there, which breaks the RFC 8707 resource indicator; use the spec URL when
+// the metadata value is clearly a metadata document URL.
+export function normalizeResourceIndicator(resource: string, mcpUrl: string): string {
+  if (resource.endsWith("/.well-known/oauth-protected-resource")) {
+    return mcpUrl;
+  }
+  return resource;
+}
+
 // RFC 9728: {origin}/.well-known/oauth-protected-resource{/path}. Try the path-suffixed form first
-// (what our providers serve), then the bare one.
+// (what our providers serve), then the bare one, plus any resource_metadata URL advertised via
+// WWW-Authenticate on the MCP URL itself.
 async function discover(spec: McpProviderSpec): Promise<AsMeta> {
   const cached = metaCache.get(spec.key);
   if (cached) return cached;
@@ -59,6 +92,9 @@ async function discover(spec: McpProviderSpec): Promise<AsMeta> {
     `${u.origin}/.well-known/oauth-protected-resource${u.pathname}`,
     `${u.origin}/.well-known/oauth-protected-resource`,
   ];
+  const headerMetadata = await discoverResourceMetadataUrl(spec);
+  if (headerMetadata) prCandidates.unshift(headerMetadata);
+
   let pr: Record<string, unknown> | null = null;
   let lastErr: unknown;
   for (const c of prCandidates) {
@@ -74,7 +110,11 @@ async function discover(spec: McpProviderSpec): Promise<AsMeta> {
   const servers = pr.authorization_servers as string[] | undefined;
   const asUrl = servers?.[0];
   if (!asUrl) throw new Error(`protected-resource metadata for ${spec.mcpUrl} lists no authorization_servers`);
-  const resource = (pr.resource as string) || spec.mcpUrl;
+
+  // The metadata's `resource` field should be the actual MCP server URL. Notion currently returns
+  // the metadata URL there, which breaks the RFC 8707 resource indicator; use the spec URL when
+  // the metadata value is clearly a metadata document URL.
+  let resource = normalizeResourceIndicator((pr.resource as string) || spec.mcpUrl, spec.mcpUrl);
 
   const asOrigin = new URL(asUrl);
   const asCandidates = [
