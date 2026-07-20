@@ -24,6 +24,16 @@ function trackOAuthState(state: string, participantId: string, popup = false): v
   pendingOAuth.set(state, { participantId, popup, createdAt: Date.now() });
 }
 
+// Begin a connect flow for an already-resolved participant. Used by this router's SPA endpoint
+// below AND by the Liana web API (routes/liana.ts), whose users authenticate with a Liana token
+// instead of a Firebase session. Returns null when Google OAuth isn't configured.
+export function beginGoogleConnect(participantId: string, popup: boolean): string | null {
+  if (!google.isConfigured()) return null;
+  const state = randomBytes(16).toString("hex");
+  trackOAuthState(state, participantId, popup);
+  return google.authorizeUrl(state);
+}
+
 // Step 1 of connect: the SPA (Settings → Connections) hits this; the server binds the OAuth
 // `state` to the verified user's participant, then the SPA navigates to the returned URL.
 router.post(

@@ -26,6 +26,15 @@ function trackOAuthState(state: string, participantId: string, popup = false): v
   pendingOAuth.set(state, { participantId, popup, createdAt: Date.now() });
 }
 
+// Begin a connect flow for an already-resolved participant. Used by the Firebase-authed SPA
+// endpoint below AND by the Liana web API (routes/liana.ts, token-authed). Null = not configured.
+export function beginGithubConnect(participantId: string, popup: boolean): string | null {
+  if (!gh.isConfigured()) return null;
+  const state = randomBytes(16).toString("hex");
+  trackOAuthState(state, participantId, popup);
+  return gh.authorizeUrl(state);
+}
+
 // Step 1 of connect: a human hits this (e.g. a "Connect GitHub" button) and is redirected to
 // GitHub to authorize. ?participantId identifies who is connecting (dev path).
 router.get("/auth/github", (req, res) => {

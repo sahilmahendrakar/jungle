@@ -294,3 +294,23 @@ lianaRouter.get("/api/liana/connections", async (req, res) => {
   const keys = ["gmail", "google-calendar", "google-drive", "github", "x", "linear", "notion", "granola"];
   res.json({ connections: await liana.connectionStatus(auth.me, keys) });
 });
+
+// Begin an OAuth connect for the token-authed Liana user. Returns an authorize URL the web app
+// opens in a popup; the callback lands on the shared backend handlers (routes/google.ts,
+// routes/github.ts), which post a self-closing page — origin-agnostic, so the Liana origin works.
+lianaRouter.post("/api/liana/connections/:key/start", async (req, res) => {
+  const auth = await requireLianaAuth(req);
+  const key = req.params.key;
+  const { beginGoogleConnect } = await import("./google");
+  const { beginGithubConnect } = await import("./github");
+  let url: string | null = null;
+  if (key === "gmail" || key === "google-calendar" || key === "google-drive" || key === "google") {
+    url = beginGoogleConnect(auth.me.id, true);
+  } else if (key === "github") {
+    url = beginGithubConnect(auth.me.id, true);
+  } else {
+    throw new ApiError(400, `connecting ${key} from Liana isn't supported yet`);
+  }
+  if (!url) throw new ApiError(500, "provider not configured");
+  res.json({ url });
+});
