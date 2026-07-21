@@ -22,6 +22,7 @@ export default function WorkflowPage() {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState<"idle" | "saving" | "saved">("idle");
   const [runningNow, setRunningNow] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const promptRef = useRef<HTMLTextAreaElement>(null);
 
   const load = useCallback(async () => {
@@ -40,6 +41,13 @@ export default function WorkflowPage() {
 
   useEffect(() => {
     void load();
+    // The OAuth popup posts {connection, status} via postMessage when it closes.
+    const onMessage = (ev: MessageEvent) => {
+      const d = ev.data as { connection?: string; status?: string };
+      if (d?.connection && d?.status) void load();
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
   }, [load]);
 
   async function patch(body: Record<string, unknown>) {
@@ -67,6 +75,23 @@ export default function WorkflowPage() {
       setError((e as Error).message);
     } finally {
       setRunningNow(false);
+    }
+  }
+
+  async function toggleIntegration(key: string) {
+    if (!wf) return;
+    const had = wf.integrations.includes(key);
+    const next = had ? wf.integrations.filter((k) => k !== key) : [...wf.integrations, key];
+    await patch({ integrations: next });
+    // Adding something not yet connected? Launch the OAuth popup right away instead of leaving
+    // an unconnected chip pointing at the Connections page.
+    if (!had && !connections.find((c) => c.key === key)?.connected) {
+      try {
+        const { url } = await api<{ url: string }>(`/api/liana/connections/${key}/start`, { method: "POST", body: "{}" });
+        window.open(url, "liana-oauth", "width=560,height=720");
+      } catch (e) {
+        setError((e as Error).message);
+      }
     }
   }
 
@@ -121,6 +146,28 @@ export default function WorkflowPage() {
             </span>
           );
         })}
+        <span style={{ position: "relative" }}>
+          <button className="chip chip-add" onClick={() => setPickerOpen((v) => !v)} aria-label="Add integration" title="Add integration">
+            +
+          </button>
+          {pickerOpen && (
+            <>
+              <div className="chip-menu-backdrop" onClick={() => setPickerOpen(false)} />
+              <div className="chip-menu">
+                {connections.map((c) => {
+                  const on = wf.integrations.includes(c.key);
+                  return (
+                    <button key={c.key} className="chip-menu-item" onClick={() => void toggleIntegration(c.key)}>
+                      <span className="chip-menu-tick">{on ? "✓" : ""}</span>
+                      {INTEGRATION_LABELS[c.key] ?? c.key}
+                      {!c.connected && <span className="chip-menu-hint">not connected</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </span>
       </div>
 
       <div className="field-row" style={{ marginTop: 22, alignItems: "flex-start" }}>

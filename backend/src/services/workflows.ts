@@ -142,7 +142,7 @@ function slugify(name: string): string {
 // config; other per-integration config is set later via the profile panel.
 // Returns how many integrations were newly attached, so callers can reconfigure a live runner
 // only when something actually changed.
-async function tryAttachIntegrations(
+export async function tryAttachIntegrations(
   actor: db.Participant,
   agentId: string,
   keys: string[],

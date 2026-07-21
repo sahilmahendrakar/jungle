@@ -312,6 +312,7 @@ lianaRouter.patch("/api/liana/workflows/:id", async (req, res) => {
     timezone: typeof body.timezone === "string" ? body.timezone : undefined,
     paused: typeof body.paused === "boolean" ? body.paused : undefined,
     deliverTo: Array.isArray(body.deliverTo) ? body.deliverTo.map(String) : undefined,
+    integrations: Array.isArray(body.integrations) ? body.integrations.map(String) : undefined,
   });
   res.json({ workflow: await wireWorkflow(updated) });
 });
@@ -413,7 +414,11 @@ lianaRouter.post("/api/liana/connections/:key/start", async (req, res) => {
   const auth = await requireLianaAuth(req);
   const key = req.params.key;
   let url: string | null;
-  if (key === "gmail" || key === "google-calendar" || key === "google-drive" || key === "google") {
+  if (key === "gmail" || key === "google") {
+    // Gmail rides the shared Google identity grant; calendar/drive do NOT — their adapters run
+    // their own OAuth (calendar/drive scopes → integration_connections), so they fall through
+    // to beginIntegrationConnect below. Sending them here would mint a scopeless-for-them
+    // identity grant that the attach path can't use.
     const { beginGoogleConnect } = await import("./google");
     url = beginGoogleConnect(auth.me.id, true);
   } else if (key === "github") {
