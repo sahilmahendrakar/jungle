@@ -54,6 +54,14 @@ export interface LianaWorkflowRow {
   dm_channel_id: string | null;
   origin_channel_id: string | null;
   origin_thread_ts: string | null;
+  deliver_to: string[]; // "slack" | "imessage" (text[] — future channels are values, not columns)
+}
+
+export async function setLianaDeliverTo(workflowId: string, deliverTo: string[]): Promise<void> {
+  await pool.query(`update liana_workflows set deliver_to = $2 where workflow_id = $1`, [
+    workflowId,
+    deliverTo,
+  ]);
 }
 
 export async function insertLianaWorkflow(l: {
@@ -63,12 +71,21 @@ export async function insertLianaWorkflow(l: {
   ownerParticipantId: string;
   originChannelId?: string | null;
   originThreadTs?: string | null;
+  deliverTo?: string[];
 }): Promise<LianaWorkflowRow> {
   const { rows } = await pool.query<LianaWorkflowRow>(
     `insert into liana_workflows
-       (workflow_id, team_id, slack_user_id, owner_participant_id, origin_channel_id, origin_thread_ts)
-     values ($1, $2, $3, $4, $5, $6) returning *`,
-    [l.workflowId, l.teamId, l.slackUserId, l.ownerParticipantId, l.originChannelId ?? null, l.originThreadTs ?? null],
+       (workflow_id, team_id, slack_user_id, owner_participant_id, origin_channel_id, origin_thread_ts, deliver_to)
+     values ($1, $2, $3, $4, $5, $6, $7) returning *`,
+    [
+      l.workflowId,
+      l.teamId,
+      l.slackUserId,
+      l.ownerParticipantId,
+      l.originChannelId ?? null,
+      l.originThreadTs ?? null,
+      l.deliverTo ?? ["slack"],
+    ],
   );
   return rows[0];
 }
@@ -115,6 +132,87 @@ export async function markLianaDeliveryFailed(runId: string, error: string): Pro
     `update liana_deliveries set status = 'failed', error = $2 where run_id = $1`,
     [runId, error.slice(0, 500)],
   );
+}
+
+// --- Phone links (iMessage channel, migration 030) ---
+
+export interface LianaPhoneLink {
+  participant_id: string;
+  phone: string;
+  verified_at: string | null;
+  verify_code: string | null;
+  verify_expires_at: string | null;
+  pending_draft_id: string | null;
+  linq_chat_id: string | null;
+}
+
+export async function getPhoneLink(participantId: string): Promise<LianaPhoneLink | null> {
+  const { rows } = await pool.query<LianaPhoneLink>(
+    `select * from liana_phone_links where participant_id = $1`,
+    [participantId],
+  );
+  return rows[0] ?? null;
+}
+
+export async function getPhoneLinkByPhone(phone: string): Promise<LianaPhoneLink | null> {
+  const { rows } = await pool.query<LianaPhoneLink>(
+    `select * from liana_phone_links where phone = $1`,
+    [phone],
+  );
+  return rows[0] ?? null;
+}
+
+// Start (or restart) verification: one row per participant, phone replaceable until verified.
+export async function upsertPhoneLink(
+  participantId: string,
+  phone: string,
+  code: string,
+  expiresAt: string,
+): Promise<void> {
+  await pool.query(
+    `insert into liana_phone_links (participant_id, phone, verify_code, verify_expires_at, verified_at)
+     values ($1, $2, $3, $4, null)
+     on conflict (participant_id) do update set
+       phone = excluded.phone, verify_code = excluded.verify_code,
+       verify_expires_at = excluded.verify_expires_at, verified_at = null`,
+    [participantId, phone, code, expiresAt],
+  );
+}
+
+export async function markPhoneVerified(participantId: string): Promise<void> {
+  await pool.query(
+    `update liana_phone_links set verified_at = now(), verify_code = null, verify_expires_at = null
+     where participant_id = $1`,
+    [participantId],
+  );
+}
+
+export async function deletePhoneLink(participantId: string): Promise<void> {
+  await pool.query(`delete from liana_phone_links where participant_id = $1`, [participantId]);
+}
+
+export async function setPhonePendingDraft(participantId: string, draftId: string | null): Promise<void> {
+  await pool.query(`update liana_phone_links set pending_draft_id = $2 where participant_id = $1`, [
+    participantId,
+    draftId,
+  ]);
+}
+
+export async function setPhoneLinqChat(participantId: string, chatId: string): Promise<void> {
+  await pool.query(`update liana_phone_links set linq_chat_id = $2 where participant_id = $1`, [
+    participantId,
+    chatId,
+  ]);
+}
+
+// Liana install lookup by workspace — the bridge from an iMessage sender (phone -> participant ->
+// workspace) back to the Slack-rooted ownership context (team_id) workflows are keyed by.
+export async function getLianaInstallByWorkspace(workspaceId: string): Promise<LianaInstall | null> {
+  const { rows } = await pool.query<LianaInstall>(
+    `select * from liana_slack_installs where workspace_id = $1 and status = 'active' limit 1`,
+    [workspaceId],
+  );
+  return rows[0] ?? null;
 }
 
 // --- Per-user model settings (migration 029) ---

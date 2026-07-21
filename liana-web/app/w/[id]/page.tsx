@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { api, INTEGRATION_LABELS, type WireConnection, type WireModels, type WireRun, type WireWorkflow } from "@/lib/api";
+import Link from "next/link";
+import { api, INTEGRATION_LABELS, type WireChannels, type WireConnection, type WireModels, type WireRun, type WireWorkflow } from "@/lib/api";
 import { capitalize, timeAgo } from "@/lib/format";
 
 // Workflow detail: the prompt as editable prose (the centerpiece), the cadence as a sentence,
@@ -16,6 +17,7 @@ export default function WorkflowPage() {
   const [runs, setRuns] = useState<WireRun[]>([]);
   const [connections, setConnections] = useState<WireConnection[]>([]);
   const [models, setModels] = useState<WireModels | null>(null);
+  const [channels, setChannels] = useState<WireChannels["channels"] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState<"idle" | "saving" | "saved">("idle");
   const [runningNow, setRunningNow] = useState(false);
@@ -29,6 +31,7 @@ export default function WorkflowPage() {
       const c = await api<{ connections: WireConnection[] }>(`/api/liana/connections`);
       setConnections(c.connections);
       setModels(await api<WireModels>(`/api/liana/models`));
+      setChannels((await api<WireChannels>(`/api/liana/channels`)).channels);
     } catch (e) {
       setError((e as Error).message);
     }
@@ -122,6 +125,45 @@ export default function WorkflowPage() {
       <div className="field-row" style={{ marginTop: 22 }}>
         <label>Schedule</label>
         <CronEditor wf={wf} onSave={(cron, timezone) => void patch(cron === null ? { cron: null } : { cron, timezone })} />
+      </div>
+
+      <div className="field-row">
+        <label>Delivers to</label>
+        <span style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+          <label className="check-chip">
+            <input
+              type="checkbox"
+              checked={wf.deliverTo.includes("slack")}
+              onChange={(e) => {
+                const next = e.target.checked
+                  ? [...new Set([...wf.deliverTo, "slack"])]
+                  : wf.deliverTo.filter((c) => c !== "slack");
+                if (next.length) void patch({ deliverTo: next });
+              }}
+            />
+            Slack DM
+          </label>
+          {channels?.imessage &&
+            (channels.imessage.verified ? (
+              <label className="check-chip">
+                <input
+                  type="checkbox"
+                  checked={wf.deliverTo.includes("imessage")}
+                  onChange={(e) => {
+                    const next = e.target.checked
+                      ? [...new Set([...wf.deliverTo, "imessage"])]
+                      : wf.deliverTo.filter((c) => c !== "imessage");
+                    if (next.length) void patch({ deliverTo: next });
+                  }}
+                />
+                iMessage
+              </label>
+            ) : (
+              <span className="muted" style={{ fontSize: 13 }}>
+                iMessage — <Link href="/settings">verify your number first</Link>
+              </span>
+            ))}
+        </span>
       </div>
 
       {models && wf.status !== "draft" && (

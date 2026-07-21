@@ -72,8 +72,17 @@ export interface WireWorkflow {
   cadence: string;
   integrations: string[];
   model: string | null; // null on drafts (agent not materialized yet)
+  deliverTo: string[]; // "slack" | "imessage"
   nextRunAt: string | null;
   lastRun: WireRun | null;
+}
+
+export interface WireChannels {
+  channels: {
+    slack: { connected: boolean; teamName: string | null };
+    // Absent entirely when the deployment has no iMessage provider configured.
+    imessage?: { phone: string | null; verified: boolean; pendingCode: boolean };
+  };
 }
 
 export interface WireModel {

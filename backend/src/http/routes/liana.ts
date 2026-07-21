@@ -5,6 +5,7 @@ import * as slack from "../../slack/api";
 import { verifySlackSignature } from "../../slack/verify";
 import { providerConfigured } from "../../providers";
 import * as liana from "../../services/liana";
+import * as imsg from "../../services/imessage";
 import * as workflows from "../../services/workflows";
 import { ApiError } from "../errors";
 
@@ -116,6 +117,40 @@ lianaEventsRouter.post("/api/liana/slack/interactivity", (req, res) => {
   });
 });
 
+// Inbound iMessage (Linq) webhook. Standard Webhooks signature over the RAW body; at-least-once
+// delivery, so dedupe by webhook id (shared events table, "linq:" prefixed).
+lianaEventsRouter.post("/api/liana/imessage/webhook", (req, res) => {
+  void (async () => {
+    const raw = await readRaw(req);
+    const ok = imsg.verifyLinqWebhook(raw, {
+      id: req.header("webhook-id"),
+      timestamp: req.header("webhook-timestamp"),
+      signature: req.header("webhook-signature"),
+    });
+    if (!ok) {
+      res.status(401).send("bad signature");
+      return;
+    }
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(raw.toString("utf8"));
+    } catch {
+      res.status(400).send("bad json");
+      return;
+    }
+    res.status(200).end(); // ack fast; Linq retries on non-2xx
+    const eventId = req.header("webhook-id")!;
+    if (!(await db.recordSlackEvent(`linq:${eventId}`))) return; // duplicate delivery
+    const inbound = imsg.parseInboundEvent(payload, eventId);
+    if (inbound) {
+      void liana.processIMessageInbound(inbound).catch((e) => console.error("liana imessage processing:", e));
+    }
+  })().catch((e) => {
+    console.error("liana imessage webhook route:", e);
+    if (!res.headersSent) res.status(500).end();
+  });
+});
+
 // ============================ JSON routes ============================
 
 export const lianaRouter = Router();
@@ -207,6 +242,7 @@ async function wireWorkflow(wf: db.WorkflowRow): Promise<Record<string, unknown>
   const schedule = await db.getWorkflowBackingSchedule(wf.id);
   const runs = await db.listWorkflowRuns(wf.id, 1);
   const integrations = wf.roster[0]?.integrations ?? [];
+  const lianaRow = await db.getLianaWorkflow(wf.id);
   return {
     id: wf.id,
     name: wf.name,
@@ -216,6 +252,7 @@ async function wireWorkflow(wf: db.WorkflowRow): Promise<Record<string, unknown>
     cadence: liana.cadenceSentence(wf),
     integrations,
     model: await liana.workflowModel(wf),
+    deliverTo: lianaRow?.deliver_to?.length ? lianaRow.deliver_to : ["slack"],
     nextRunAt: schedule?.next_run_at ?? null,
     lastRun: runs[0]
       ? { id: runs[0].id, status: runs[0].status, startedAt: runs[0].started_at, endedAt: runs[0].ended_at, summary: runs[0].summary }
@@ -274,6 +311,7 @@ lianaRouter.patch("/api/liana/workflows/:id", async (req, res) => {
     cron: body.cron === null ? null : typeof body.cron === "string" ? body.cron : undefined,
     timezone: typeof body.timezone === "string" ? body.timezone : undefined,
     paused: typeof body.paused === "boolean" ? body.paused : undefined,
+    deliverTo: Array.isArray(body.deliverTo) ? body.deliverTo.map(String) : undefined,
   });
   res.json({ workflow: await wireWorkflow(updated) });
 });
@@ -290,6 +328,33 @@ lianaRouter.delete("/api/liana/workflows/:id", async (req, res) => {
   const { wf } = await requireOwnedWorkflow(auth, req.params.id);
   if (wf.status === "draft") await workflows.cleanupDraftAgents(wf);
   await db.deleteWorkflow(wf.id);
+  res.json({ ok: true });
+});
+
+// --- Channels (Settings): Slack is implicit; iMessage links a phone via texted code ---
+
+lianaRouter.get("/api/liana/channels", async (req, res) => {
+  const auth = await requireLianaAuth(req);
+  res.json({ channels: await liana.channelStatus(auth.me, auth.install) });
+});
+
+lianaRouter.post("/api/liana/channels/imessage", async (req, res) => {
+  const auth = await requireLianaAuth(req);
+  const phone = String((req.body as Record<string, unknown>)?.phone ?? "");
+  await liana.startPhoneVerify(auth.me, phone);
+  res.json({ ok: true });
+});
+
+lianaRouter.post("/api/liana/channels/imessage/verify", async (req, res) => {
+  const auth = await requireLianaAuth(req);
+  const code = String((req.body as Record<string, unknown>)?.code ?? "");
+  const link = await liana.confirmPhoneVerify(auth.me, code);
+  res.json({ phone: link.phone, verified: true });
+});
+
+lianaRouter.delete("/api/liana/channels/imessage", async (req, res) => {
+  const auth = await requireLianaAuth(req);
+  await db.deletePhoneLink(auth.me.id);
   res.json({ ok: true });
 });
 

@@ -10,6 +10,12 @@ import * as workflows from "./workflows";
 import { uniqueHandle } from "./slackBridge";
 import { computeNextRun, isValidTimeZone } from "./scheduler";
 import { runIntake, type IntakeWorkflowSpec } from "./lianaIntake";
+import * as imsg from "./imessage";
+
+// Delivery channels a workflow can target. A list (not flags) so future channels (telegram, …)
+// extend the value set, not the schema.
+export const DELIVERY_CHANNELS = ["slack", "imessage"] as const;
+export type DeliveryChannel = (typeof DELIVERY_CHANNELS)[number];
 
 // Liana: the Slack-first workflow product. This service owns everything between the Liana Slack
 // app's webhooks and the jungle workflow engine: install handling, owner (participant) resolution,
@@ -342,6 +348,8 @@ export async function createLianaDraft(args: {
   spec: IntakeWorkflowSpec;
   defaultTz: string | null;
   origin?: { channel: string; threadTs: string | null };
+  // "Liana answers where you ask": the creating channel is the default delivery target.
+  deliverTo?: DeliveryChannel[];
 }): Promise<{ wf: db.WorkflowRow; liana: db.LianaWorkflowRow }> {
   const { install, owner, spec } = args;
 
@@ -387,6 +395,7 @@ export async function createLianaDraft(args: {
     ownerParticipantId: owner.id,
     originChannelId: args.origin?.channel ?? null,
     originThreadTs: args.origin?.threadTs ?? null,
+    deliverTo: args.deliverTo ?? ["slack"],
   });
   return { wf, liana };
 }
@@ -572,6 +581,165 @@ export async function cancelLianaDraft(workflowId: string): Promise<void> {
   await db.deleteWorkflow(wf.id);
 }
 
+// ============================ iMessage channel ============================
+
+// Phone linking (web Settings): text a 6-digit code, confirm it in the web app.
+export async function startPhoneVerify(me: db.Participant, rawPhone: string): Promise<void> {
+  if (!imsg.imessageConfigured()) throw new ApiError(400, "iMessage isn't enabled on this deployment");
+  const phone = imsg.normalizePhone(rawPhone);
+  if (!phone) throw new ApiError(400, "enter a valid phone number (with country code if outside the US)");
+  const existing = await db.getPhoneLinkByPhone(phone);
+  if (existing && existing.participant_id !== me.id) {
+    throw new ApiError(409, "that number is linked to a different Liana account");
+  }
+  const code = String(Math.floor(100000 + Math.random() * 900000));
+  await db.upsertPhoneLink(me.id, phone, code, new Date(Date.now() + 10 * 60_000).toISOString());
+  await imsg.sendIMessage(phone, `Your Liana verification code is ${code}. It expires in 10 minutes.`);
+}
+
+export async function confirmPhoneVerify(me: db.Participant, code: string): Promise<db.LianaPhoneLink> {
+  const link = await db.getPhoneLink(me.id);
+  if (!link || !link.verify_code) throw new ApiError(400, "start verification first");
+  if (!link.verify_expires_at || new Date(link.verify_expires_at).getTime() < Date.now()) {
+    throw new ApiError(400, "that code expired — request a new one");
+  }
+  if (link.verify_code !== code.trim()) throw new ApiError(400, "that code doesn't match");
+  await db.markPhoneVerified(me.id);
+  await imsg
+    .sendIMessage(link.phone, "🌿 You're linked. Text me what you'd like automated — try \"morning briefing every day at 8am\".")
+    .catch(() => {});
+  return (await db.getPhoneLink(me.id))!;
+}
+
+const YES_RE = /^\s*(yes|y|yep|yeah|confirm|create( it)?|do it|go|👍)\s*[.!]*\s*$/i;
+const NO_RE = /^\s*(no|n|nope|cancel|stop|nevermind|never mind)\s*[.!]*\s*$/i;
+
+// Inbound text from a linked phone: the same brain as Slack, with a conversational YES/NO
+// confirm instead of buttons (texting has no Block Kit). Unlinked numbers get one pointer to
+// the web app (deduped upstream, so no loops).
+export async function processIMessageInbound(inbound: imsg.InboundText): Promise<void> {
+  const link = await db.getPhoneLinkByPhone(inbound.fromPhone);
+  if (!link || !link.verified_at) {
+    await imsg
+      .sendIMessage(
+        inbound.fromPhone,
+        `This number isn't linked to a Liana account yet. Link it from Settings: ${LIANA_WEB_URL}/settings`,
+      )
+      .catch((e) => console.error("liana imessage: unlinked reply failed:", e));
+    return;
+  }
+  if (inbound.chatId && inbound.chatId !== link.linq_chat_id) {
+    await db.setPhoneLinqChat(link.participant_id, inbound.chatId).catch(() => {});
+  }
+
+  const reply = (text: string) => imsg.sendIMessage(link.phone, text);
+  try {
+    const owner = await db.getParticipant(link.participant_id);
+    if (!owner) throw new Error("phone link points at a missing participant");
+    const install = await db.getLianaInstallByWorkspace(owner.workspace_id);
+    if (!install) {
+      await reply("Your Slack workspace's Liana install is gone — reinstall from Slack first.");
+      return;
+    }
+    const slackUserId = (await db.getSlackUserIdForParticipant(install.team_id, owner.id)) ?? "";
+
+    // Pending draft: YES/NO resolves it; anything else falls through to a fresh intake turn
+    // (which replaces the pending draft if it drafts a new workflow).
+    if (link.pending_draft_id) {
+      if (YES_RE.test(inbound.text)) {
+        const draftId = link.pending_draft_id;
+        await db.setPhonePendingDraft(owner.id, null);
+        const result = await confirmLianaWorkflow(draftId);
+        await reply(
+          `🌿 ${result.wf.name} is live — ${cadenceSentence(result.wf)}. I'm doing a first run now.` +
+            (result.unconnected.length
+              ? `\nHeads up: connect ${result.unconnected.map((k) => KEY_LABELS[k] ?? k).join(", ")} so I can use ${result.unconnected.length > 1 ? "them" : "it"}: ${result.url}`
+              : ""),
+        );
+        return;
+      }
+      if (NO_RE.test(inbound.text)) {
+        const draftId = link.pending_draft_id;
+        await db.setPhonePendingDraft(owner.id, null);
+        await cancelLianaDraft(draftId).catch(() => {});
+        await reply("No problem — canceled.");
+        return;
+      }
+    }
+
+    const existing = await describeOwnerWorkflows(install.team_id, slackUserId);
+    const intake = await runIntake(
+      inbound.text,
+      {
+        userName: owner.display_name,
+        userTz: null,
+        today: new Intl.DateTimeFormat("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" }).format(new Date()),
+        existingWorkflows: existing.map((w) => w.line),
+      },
+      await intakeModelFor(owner.id),
+    );
+
+    if (intake.intent === "list_workflows") {
+      if (!existing.length) {
+        await reply(`You don't have any workflows yet. Try: "morning briefing every day at 8am".`);
+      } else {
+        const lines = existing.map((w) => `• ${w.wf.name} — ${cadenceSentence(w.wf)}${w.wf.status === "paused" ? " (paused)" : ""}`);
+        await reply(`Your workflows:\n${lines.join("\n")}\nManage them: ${await webLink(install.team_id, owner)}`);
+      }
+      return;
+    }
+
+    if (intake.intent === "create_workflow" && intake.workflow) {
+      // A new draft replaces any dangling pending one.
+      if (link.pending_draft_id) {
+        await cancelLianaDraft(link.pending_draft_id).catch(() => {});
+        await db.setPhonePendingDraft(owner.id, null);
+      }
+      const { wf } = await createLianaDraft({
+        install,
+        owner,
+        slackUserId,
+        spec: intake.workflow,
+        defaultTz: null,
+        deliverTo: ["imessage"], // answers where you ask
+      });
+      await db.setPhonePendingDraft(owner.id, wf.id);
+      const statuses = await connectionStatus(owner, intake.workflow.integrations);
+      const integrationLines = statuses.map((s) =>
+        s.connected ? `✓ ${KEY_LABELS[s.key] ?? s.key}` : `→ ${KEY_LABELS[s.key] ?? s.key} (connect on the web)`,
+      );
+      await reply(
+        `${intake.reply}\n\n${wf.name} — ${cadenceSentence(wf)}` +
+          (integrationLines.length ? `\n${integrationLines.join("\n")}` : "") +
+          `\n\nReply YES to create it, or NO to cancel.`,
+      );
+      return;
+    }
+
+    await reply(imsg.toPlainText(intake.reply));
+  } catch (e) {
+    console.error("liana imessage inbound:", e);
+    await reply("Something went wrong on my end — mind trying that again?").catch(() => {});
+  }
+}
+
+// Channel status for the web app (Settings). iMessage is absent entirely when the deployment
+// has no provider configured — no dead UI.
+export async function channelStatus(me: db.Participant, install: db.LianaInstall) {
+  const out: Record<string, unknown> = {
+    slack: { connected: true, teamName: install.team_name },
+  };
+  if (imsg.imessageConfigured()) {
+    const link = await db.getPhoneLink(me.id);
+    out.imessage = {
+      phone: link?.phone ?? null,
+      verified: !!link?.verified_at,
+      pendingCode: !!link && !link.verified_at && !!link.verify_code,
+    };
+  }
+  return out;
+}
+
 // ============================ Run delivery (workflows.ts hooks in here on run close) ============================
 
 const RUN_COMPLETE_RE = /^(?:✅\s*)?run\s+complete\b/i;
@@ -588,36 +756,54 @@ export async function onRunClosed(runId: string): Promise<void> {
 
   if (!(await db.claimLianaDelivery(run.id))) return; // already delivered
 
-  try {
-    // DM channel, opened lazily on first delivery.
-    let dm = liana.dm_channel_id;
-    if (!dm) {
-      dm = (await slack.conversationsOpen(install.bot_token, liana.slack_user_id)).id;
-      await db.setLianaDmChannel(liana.workflow_id, dm);
+  const owner = await db.getParticipant(liana.owner_participant_id);
+  const url = owner ? await webLink(liana.team_id, owner) : LIANA_WEB_URL;
+  const date = new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric" }).format(new Date());
+
+  let body: string;
+  if (run.status === "done") {
+    const deliverable = await collectDeliverable(run, wf);
+    body = `*${wf.name}* · ${date}\n\n${deliverable}`;
+  } else {
+    body = `*${wf.name}* · ${date}\n\n:warning: This run didn't finish cleanly (${run.status}). You can check it or run it again in <${url}|Liana>.`;
+  }
+  const MAX = 11000; // Slack chat.postMessage text limit is 40k; keep messages readable
+  if (body.length > MAX) body = body.slice(0, MAX) + `\n\n_…truncated — <${url}|read the full run in Liana>_`;
+
+  // Fan out to each enabled channel independently: one channel failing must not block the other,
+  // and the per-run claim above keeps the whole delivery idempotent.
+  const channels = liana.deliver_to?.length ? liana.deliver_to : ["slack"];
+  const failures: string[] = [];
+
+  if (channels.includes("slack")) {
+    try {
+      let dm = liana.dm_channel_id;
+      if (!dm) {
+        dm = (await slack.conversationsOpen(install.bot_token, liana.slack_user_id)).id;
+        await db.setLianaDmChannel(liana.workflow_id, dm);
+      }
+      await slack.chatPostMessage(install.bot_token, { channel: dm, text: jungleToSlackText(body) });
+    } catch (e) {
+      failures.push(`slack: ${e instanceof Error ? e.message : String(e)}`);
     }
+  }
 
-    const owner = await db.getParticipant(liana.owner_participant_id);
-    const url = owner ? await webLink(liana.team_id, owner) : LIANA_WEB_URL;
-    const date = new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric" }).format(new Date());
-
-    let body: string;
-    if (run.status === "done") {
-      const deliverable = await collectDeliverable(run, wf);
-      body = `*${wf.name}* · ${date}\n\n${deliverable}`;
-    } else {
-      body = `*${wf.name}* · ${date}\n\n:warning: This run didn't finish cleanly (${run.status}). You can check it or run it again in <${url}|Liana>.`;
+  if (channels.includes("imessage") && imsg.imessageConfigured()) {
+    try {
+      const link = owner ? await db.getPhoneLink(owner.id) : null;
+      if (link?.verified_at) {
+        await imsg.sendIMessage(link.phone, imsg.toPlainText(body));
+      } else {
+        failures.push("imessage: no verified phone linked");
+      }
+    } catch (e) {
+      failures.push(`imessage: ${e instanceof Error ? e.message : String(e)}`);
     }
+  }
 
-    const MAX = 11000; // Slack chat.postMessage text limit is 40k; keep DMs readable
-    if (body.length > MAX) body = body.slice(0, MAX) + `\n\n_…truncated — <${url}|read the full run in Liana>_`;
-
-    await slack.chatPostMessage(install.bot_token, {
-      channel: dm,
-      text: jungleToSlackText(body),
-    });
-  } catch (e) {
-    console.error(`liana: delivery for run ${runId} failed:`, e);
-    await db.markLianaDeliveryFailed(runId, e instanceof Error ? e.message : String(e)).catch(() => {});
+  if (failures.length) {
+    console.error(`liana: delivery for run ${runId} failed:`, failures.join(" | "));
+    await db.markLianaDeliveryFailed(runId, failures.join(" | ")).catch(() => {});
   }
 }
 
@@ -685,8 +871,22 @@ export async function editLianaWorkflow(
     cron?: string | null; // null = switch to on-demand
     timezone?: string;
     paused?: boolean;
+    deliverTo?: string[];
   },
 ): Promise<db.WorkflowRow> {
+  if (args.deliverTo !== undefined) {
+    const channels = [...new Set(args.deliverTo)];
+    if (!channels.length) throw new ApiError(400, "pick at least one delivery channel");
+    for (const c of channels) {
+      if (!(DELIVERY_CHANNELS as readonly string[]).includes(c)) throw new ApiError(400, `unknown channel: ${c}`);
+    }
+    if (channels.includes("imessage")) {
+      if (!imsg.imessageConfigured()) throw new ApiError(400, "iMessage isn't enabled on this deployment");
+      const link = await db.getPhoneLink(owner.id);
+      if (!link?.verified_at) throw new ApiError(400, "verify your phone number in Settings first");
+    }
+    await db.setLianaDeliverTo(wf.id, channels);
+  }
   const patch: Parameters<typeof db.updateWorkflow>[1] = {};
   if (args.name !== undefined) patch.name = workflows.validateName(args.name);
   if (args.prompt !== undefined) {
