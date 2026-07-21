@@ -1,7 +1,9 @@
 import { Router, type Request } from "express";
+import { MODEL_CATALOG } from "@jungle/shared";
 import * as db from "../../db";
 import * as slack from "../../slack/api";
 import { verifySlackSignature } from "../../slack/verify";
+import { providerConfigured } from "../../providers";
 import * as liana from "../../services/liana";
 import * as workflows from "../../services/workflows";
 import { ApiError } from "../errors";
@@ -213,6 +215,7 @@ async function wireWorkflow(wf: db.WorkflowRow): Promise<Record<string, unknown>
     trigger: wf.trigger,
     cadence: liana.cadenceSentence(wf),
     integrations,
+    model: await liana.workflowModel(wf),
     nextRunAt: schedule?.next_run_at ?? null,
     lastRun: runs[0]
       ? { id: runs[0].id, status: runs[0].status, startedAt: runs[0].started_at, endedAt: runs[0].ended_at, summary: runs[0].summary }
@@ -264,6 +267,7 @@ lianaRouter.patch("/api/liana/workflows/:id", async (req, res) => {
   const auth = await requireLianaAuth(req);
   const { wf } = await requireOwnedWorkflow(auth, req.params.id);
   const body = (req.body ?? {}) as Record<string, unknown>;
+  if (typeof body.model === "string") await liana.setLianaWorkflowModel(wf, body.model);
   const updated = await liana.editLianaWorkflow(wf, auth.me, {
     name: typeof body.name === "string" ? body.name : undefined,
     prompt: typeof body.prompt === "string" ? body.prompt : undefined,
@@ -287,6 +291,45 @@ lianaRouter.delete("/api/liana/workflows/:id", async (req, res) => {
   if (wf.status === "draft") await workflows.cleanupDraftAgents(wf);
   await db.deleteWorkflow(wf.id);
   res.json({ ok: true });
+});
+
+// The model picker's option list: the shared catalog, minus models whose provider key isn't
+// configured on this deployment (they'd 400 on selection anyway).
+lianaRouter.get("/api/liana/models", async (req, res) => {
+  await requireLianaAuth(req);
+  res.json({
+    models: MODEL_CATALOG.filter((m) => providerConfigured(m.id)).map((m) => ({
+      id: m.id,
+      label: m.label,
+      hint: m.hint,
+    })),
+    defaults: { liana: liana.DEFAULT_LIANA_MODEL, workflow: liana.DEFAULT_WORKFLOW_MODEL },
+  });
+});
+
+lianaRouter.get("/api/liana/settings", async (req, res) => {
+  const auth = await requireLianaAuth(req);
+  const s = await db.getLianaSettings(auth.me.id);
+  res.json({ lianaModel: s?.liana_model ?? null, workflowModel: s?.workflow_model ?? null });
+});
+
+// Partial update; null resets a knob to the built-in default. Validated against the catalog.
+lianaRouter.put("/api/liana/settings", async (req, res) => {
+  const auth = await requireLianaAuth(req);
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const check = (v: unknown, field: string): string | null | undefined => {
+    if (v === undefined) return undefined;
+    if (v === null || v === "") return null;
+    const m = String(v);
+    if (!MODEL_CATALOG.some((e) => e.id === m)) throw new ApiError(400, `unsupported ${field}: ${m}`);
+    if (!providerConfigured(m)) throw new ApiError(400, `model unavailable: ${m}'s provider key is not configured`);
+    return m;
+  };
+  const s = await db.upsertLianaSettings(auth.me.id, {
+    lianaModel: check(body.lianaModel, "lianaModel"),
+    workflowModel: check(body.workflowModel, "workflowModel"),
+  });
+  res.json({ lianaModel: s.liana_model, workflowModel: s.workflow_model });
 });
 
 lianaRouter.get("/api/liana/connections", async (req, res) => {

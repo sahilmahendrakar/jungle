@@ -71,8 +71,25 @@ export interface WireWorkflow {
   trigger: { type: string; cron?: string; timezone?: string };
   cadence: string;
   integrations: string[];
+  model: string | null; // null on drafts (agent not materialized yet)
   nextRunAt: string | null;
   lastRun: WireRun | null;
+}
+
+export interface WireModel {
+  id: string;
+  label: string;
+  hint: string;
+}
+
+export interface WireModels {
+  models: WireModel[];
+  defaults: { liana: string; workflow: string };
+}
+
+export interface WireSettings {
+  lianaModel: string | null; // null = built-in default
+  workflowModel: string | null;
 }
 
 export interface WireConnection {

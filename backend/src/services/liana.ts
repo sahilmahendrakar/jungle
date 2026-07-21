@@ -1,7 +1,9 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import type { WorkflowRole } from "@jungle/shared";
+import { isAllowedModel, type WorkflowRole } from "@jungle/shared";
 import * as db from "../db";
 import * as slack from "../slack/api";
+import * as runners from "../runners";
+import { providerConfigured } from "../providers";
 import { jungleToSlackText } from "../slack/format";
 import { ApiError } from "../http/errors";
 import * as workflows from "./workflows";
@@ -21,6 +23,32 @@ const LIANA_WEB_URL = (process.env.LIANA_WEB_URL ?? "http://localhost:3000").rep
 
 export function lianaConfigured(): boolean {
   return Boolean(process.env.LIANA_SLACK_CLIENT_ID && process.env.LIANA_SLACK_SIGNING_SECRET);
+}
+
+// ============================ Model resolution ============================
+
+// Kimi K3 is Liana's built-in default for both knobs: the intake model (what Liana herself
+// thinks with) and the model new workflows start on. Users override either in Settings; each
+// workflow's agent carries its own concrete model after creation.
+export const DEFAULT_LIANA_MODEL = "kimi-k3";
+export const DEFAULT_WORKFLOW_MODEL = "kimi-k3";
+
+// A model that can actually run right now: the user's preference when valid+configured, else the
+// built-in default, else the first-party fallback (always available — backend holds the key).
+function effectiveModel(preferred: string | null | undefined, fallback: string): string {
+  if (preferred && isAllowedModel(preferred) && providerConfigured(preferred)) return preferred;
+  if (providerConfigured(fallback)) return fallback;
+  return "claude-sonnet-5";
+}
+
+export async function intakeModelFor(participantId: string): Promise<string> {
+  const s = await db.getLianaSettings(participantId);
+  return effectiveModel(s?.liana_model, DEFAULT_LIANA_MODEL);
+}
+
+export async function workflowModelFor(participantId: string): Promise<string> {
+  const s = await db.getLianaSettings(participantId);
+  return effectiveModel(s?.workflow_model, DEFAULT_WORKFLOW_MODEL);
 }
 
 // ============================ Install ============================
@@ -180,12 +208,16 @@ export async function processLianaEvent(payload: LianaEventEnvelope): Promise<vo
     }
 
     const existing = await describeOwnerWorkflows(install.team_id, ev.user);
-    const intake = await runIntake(text, {
-      userName: profile?.displayName ?? owner.display_name,
-      userTz: profile?.tz ?? null,
-      today: new Intl.DateTimeFormat("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" }).format(new Date()),
-      existingWorkflows: existing.map((w) => w.line),
-    });
+    const intake = await runIntake(
+      text,
+      {
+        userName: profile?.displayName ?? owner.display_name,
+        userTz: profile?.tz ?? null,
+        today: new Intl.DateTimeFormat("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" }).format(new Date()),
+        existingWorkflows: existing.map((w) => w.line),
+      },
+      await intakeModelFor(owner.id),
+    );
 
     if (intake.intent === "list_workflows") {
       await postWorkflowList(install, reply, owner, existing);
@@ -510,6 +542,13 @@ export async function confirmLianaWorkflow(
 
   const finalized = await workflows.finalizeWorkflow(wf, owner);
 
+  // Stamp the owner's default workflow model onto the (just-materialized) seat agent before the
+  // first run, so the very first turn already runs on it.
+  const seatId = finalized.roster[0]?.participant_id;
+  if (seatId) {
+    await db.updateAgentConfig(seatId, { model: await workflowModelFor(owner.id) });
+  }
+
   // Instant first run: never make someone wait until 8am for their first payoff.
   try {
     await workflows.startRun(finalized, "manual");
@@ -612,6 +651,27 @@ export function promptOf(wf: Pick<db.WorkflowRow, "playbook">): string {
 // A run's deliverable text, for the web run history (same extraction as DM delivery).
 export async function runDeliverableText(run: db.WorkflowRunRow, wf: db.WorkflowRow): Promise<string> {
   return collectDeliverable(run, wf);
+}
+
+// The concrete model a workflow's agent runs on (null on drafts — the seat doesn't exist yet;
+// the owner's default applies at confirm).
+export async function workflowModel(wf: db.WorkflowRow): Promise<string | null> {
+  const seatId = wf.roster[0]?.participant_id;
+  if (!seatId) return null;
+  return (await db.getParticipant(seatId))?.model ?? null;
+}
+
+// Per-workflow model override (web PATCH). Applies at the agent's next turn boundary — a live
+// runner is told immediately, and the next run picks it up either way.
+export async function setLianaWorkflowModel(wf: db.WorkflowRow, model: string): Promise<void> {
+  if (!isAllowedModel(model)) throw new ApiError(400, `unsupported model: ${model}`);
+  if (!providerConfigured(model)) {
+    throw new ApiError(400, `model unavailable: ${model}'s provider API key is not configured`);
+  }
+  const seatId = wf.roster[0]?.participant_id;
+  if (!seatId) throw new ApiError(400, "create the workflow first — drafts don't have an agent yet");
+  await db.updateAgentConfig(seatId, { model });
+  runners.setModel(seatId, model);
 }
 
 // Web PATCH: name / prompt / cadence / paused. Cadence edits keep the backing schedule row in

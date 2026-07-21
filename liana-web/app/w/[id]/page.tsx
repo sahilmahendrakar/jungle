@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { api, INTEGRATION_LABELS, type WireConnection, type WireRun, type WireWorkflow } from "@/lib/api";
+import { api, INTEGRATION_LABELS, type WireConnection, type WireModels, type WireRun, type WireWorkflow } from "@/lib/api";
 import { capitalize, timeAgo } from "@/lib/format";
 
 // Workflow detail: the prompt as editable prose (the centerpiece), the cadence as a sentence,
@@ -15,6 +15,7 @@ export default function WorkflowPage() {
   const [wf, setWf] = useState<WireWorkflow | null>(null);
   const [runs, setRuns] = useState<WireRun[]>([]);
   const [connections, setConnections] = useState<WireConnection[]>([]);
+  const [models, setModels] = useState<WireModels | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState<"idle" | "saving" | "saved">("idle");
   const [runningNow, setRunningNow] = useState(false);
@@ -27,6 +28,7 @@ export default function WorkflowPage() {
       setRuns(r.runs);
       const c = await api<{ connections: WireConnection[] }>(`/api/liana/connections`);
       setConnections(c.connections);
+      setModels(await api<WireModels>(`/api/liana/models`));
     } catch (e) {
       setError((e as Error).message);
     }
@@ -121,6 +123,28 @@ export default function WorkflowPage() {
         <label>Schedule</label>
         <CronEditor wf={wf} onSave={(cron, timezone) => void patch(cron === null ? { cron: null } : { cron, timezone })} />
       </div>
+
+      {models && wf.status !== "draft" && (
+        <div className="field-row">
+          <label>Model</label>
+          <select
+            value={wf.model ?? ""}
+            onChange={(e) => {
+              if (e.target.value) void patch({ model: e.target.value });
+            }}
+          >
+            {wf.model === null && <option value="">Default</option>}
+            {models.models.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label} — {m.hint}
+              </option>
+            ))}
+          </select>
+          <span className="muted" style={{ fontSize: 13 }}>
+            Takes effect from the next run.
+          </span>
+        </div>
+      )}
 
       <div style={{ display: "flex", gap: 10, marginTop: 22 }}>
         <button className="btn primary" onClick={() => void runNow()} disabled={runningNow || wf.status === "draft"}>

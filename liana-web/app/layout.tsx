@@ -26,6 +26,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <Link href="/connections" className="navlink">
               Connections
             </Link>
+            <Link href="/settings" className="navlink">
+              Settings
+            </Link>
             <span className="spacer" />
           </nav>
           {children}

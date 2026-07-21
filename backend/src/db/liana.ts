@@ -117,6 +117,45 @@ export async function markLianaDeliveryFailed(runId: string, error: string): Pro
   );
 }
 
+// --- Per-user model settings (migration 029) ---
+
+export interface LianaSettings {
+  participant_id: string;
+  liana_model: string | null;
+  workflow_model: string | null;
+}
+
+export async function getLianaSettings(participantId: string): Promise<LianaSettings | null> {
+  const { rows } = await pool.query<LianaSettings>(
+    `select participant_id, liana_model, workflow_model from liana_settings where participant_id = $1`,
+    [participantId],
+  );
+  return rows[0] ?? null;
+}
+
+export async function upsertLianaSettings(
+  participantId: string,
+  patch: { lianaModel?: string | null; workflowModel?: string | null },
+): Promise<LianaSettings> {
+  const { rows } = await pool.query<LianaSettings>(
+    `insert into liana_settings (participant_id, liana_model, workflow_model)
+     values ($1, $2, $3)
+     on conflict (participant_id) do update set
+       liana_model    = case when $4 then excluded.liana_model    else liana_settings.liana_model end,
+       workflow_model = case when $5 then excluded.workflow_model else liana_settings.workflow_model end,
+       updated_at = now()
+     returning participant_id, liana_model, workflow_model`,
+    [
+      participantId,
+      patch.lianaModel ?? null,
+      patch.workflowModel ?? null,
+      patch.lianaModel !== undefined,
+      patch.workflowModel !== undefined,
+    ],
+  );
+  return rows[0];
+}
+
 // Reverse of getUserLink: which Slack user a participant is, in a given team. Used when
 // generating web-app links for an owner we resolved earlier.
 export async function getSlackUserIdForParticipant(

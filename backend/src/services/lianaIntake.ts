@@ -1,9 +1,15 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { resolveProvider } from "../providers";
 
-// Liana intake: one structured-output Messages call that turns a raw Slack message
+// Liana intake: one structured Messages call that turns a raw Slack message
 // ("@Liana give me a morning briefing every day at 8am") into either a workflow draft spec,
 // a list request, or a plain conversational reply. This is deliberately NOT a runner/agent —
-// it's a single parse with a JSON schema, so it's fast, cheap to reason about, and stateless.
+// it's a single parse against a JSON schema, so it's fast, cheap to reason about, and stateless.
+//
+// Structured output via a FORCED TOOL CALL (tool_choice: the one tool), not output_config —
+// the forced-tool pattern works on every Anthropic-compatible provider (Moonshot/Kimi, z.ai/GLM)
+// the same way it does first-party, so the intake model is a free choice from the shared
+// MODEL_CATALOG. Provider routing mirrors the runner's (providers.ts).
 
 // Integration keys the intake may propose. Kept in sync by hand with the subset of
 // @jungle/shared INTEGRATION_TYPES that Liana supports end-to-end (attachable + runner tools).
@@ -120,30 +126,75 @@ export interface IntakeContext {
   existingWorkflows: string[]; // "Morning briefing (daily 8:00 AM)"
 }
 
-let client: Anthropic | null = null;
-function anthropic(): Anthropic {
-  if (!client) client = new Anthropic(); // ANTHROPIC_API_KEY from env (loaded by env.ts)
-  return client;
+// One client per provider endpoint (first-party = the plain env-keyed client). Routed providers
+// authenticate with a bearer token, matching how the runner overrides ANTHROPIC_AUTH_TOKEN.
+const clients = new Map<string, Anthropic>();
+function clientFor(model: string): Anthropic {
+  const p = resolveProvider(model);
+  const key = p?.baseUrl ?? "anthropic";
+  let c = clients.get(key);
+  if (!c) {
+    c = p ? new Anthropic({ baseURL: p.baseUrl, authToken: p.authToken, apiKey: null }) : new Anthropic();
+    clients.set(key, c);
+  }
+  return c;
 }
 
-export async function runIntake(message: string, ctx: IntakeContext): Promise<IntakeResult> {
-  const response = await anthropic().messages.create({
-    model: "claude-opus-4-8",
+// Fallback for compat endpoints that answer the forced tool call with plain text: pull the first
+// top-level JSON object out of the text.
+function extractJson(text: string): string {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start === -1 || end <= start) throw new Error("intake: no JSON in response");
+  return text.slice(start, end + 1);
+}
+
+export async function runIntake(message: string, ctx: IntakeContext, model: string): Promise<IntakeResult> {
+  const response = await clientFor(model).messages.create({
+    model,
     max_tokens: 2048,
-    output_config: {
-      format: { type: "json_schema" as const, schema: OUTPUT_SCHEMA as unknown as Record<string, unknown> },
-      effort: "medium" as const,
-    },
+    // Thinking off: intake is a parse, and providers with thinking-on-by-default (Moonshot/Kimi)
+    // reject forced tool_choice while thinking is enabled. Accepted by every catalog model.
+    thinking: { type: "disabled" },
     system: systemPrompt(ctx),
     messages: [{ role: "user", content: message }],
+    tools: [
+      {
+        name: "intake_result",
+        description: "Report your parse of the user's message. Always call this exactly once.",
+        input_schema: OUTPUT_SCHEMA as unknown as Anthropic.Tool.InputSchema,
+      },
+    ],
+    tool_choice: { type: "tool", name: "intake_result" },
   });
+
+  // Result extraction, most-structured first: (1) the forced tool call; (2) JSON in a text
+  // block; (3) plain prose — some providers answer conversational turns naturally even under a
+  // forced tool_choice, and that prose IS a perfectly good chat reply, so use it as one.
+  let parsed: IntakeResult;
+  const toolUse = response.content.find((b) => b.type === "tool_use");
   const text = response.content.find((b) => b.type === "text");
-  if (!text || text.type !== "text") throw new Error("intake: no text block in response");
-  const parsed = JSON.parse(text.text) as IntakeResult;
-  // Belt-and-suspenders: the schema enforces shape, but clamp the enum-adjacent fields anyway.
+  if (toolUse && toolUse.type === "tool_use") {
+    parsed = toolUse.input as IntakeResult;
+  } else if (text && text.type === "text") {
+    try {
+      parsed = JSON.parse(extractJson(text.text)) as IntakeResult;
+    } catch {
+      parsed = { intent: "chat", reply: text.text.trim(), workflow: null };
+    }
+  } else {
+    throw new Error("intake: no tool_use or text block in response");
+  }
+
+  // Belt-and-suspenders: the schema shapes the output, but clamp the enum-adjacent fields anyway
+  // (open models are looser about schema adherence than first-party structured outputs).
+  if (!["create_workflow", "list_workflows", "chat"].includes(parsed.intent)) parsed.intent = "chat";
   if (parsed.intent === "create_workflow" && !parsed.workflow) parsed.intent = "chat";
+  if (typeof parsed.reply !== "string" || !parsed.reply.trim()) {
+    parsed.reply = parsed.workflow ? "Here's what I'll set up:" : "Tell me what you'd like automated.";
+  }
   if (parsed.workflow) {
-    parsed.workflow.integrations = parsed.workflow.integrations.filter((k) =>
+    parsed.workflow.integrations = (parsed.workflow.integrations ?? []).filter((k) =>
       (INTAKE_INTEGRATION_KEYS as readonly string[]).includes(k),
     );
   }

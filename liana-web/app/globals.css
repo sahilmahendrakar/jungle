@@ -323,6 +323,23 @@ a.card-link:hover .card {
   outline: none;
   border-color: var(--leaf);
 }
+.model-select,
+.field-row select {
+  font-family: var(--font-ui);
+  font-size: 14px;
+  padding: 7px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--ink);
+  cursor: pointer;
+  max-width: 100%;
+}
+.model-select:focus,
+.field-row select:focus {
+  outline: none;
+  border-color: var(--leaf);
+}
 
 /* --- Sections --- */
 .section-title {
