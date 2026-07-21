@@ -403,21 +403,6 @@ lianaRouter.get("/api/liana/connections", async (req, res) => {
   res.json({ connections: await liana.connectionStatus(auth.me, keys) });
 });
 
-// Paste-key connect for static-credential integrations (PostHog personal API key, Mixpanel
-// service account). Validates against the provider before storing, so typos fail here with a
-// clear message instead of silently at a scheduled run.
-lianaRouter.post("/api/liana/connections/:key/apikey", async (req, res) => {
-  const auth = await requireLianaAuth(req);
-  const { posthogAdapter, mixpanelAdapter } = await import("../../integrations/analytics");
-  const adapter =
-    req.params.key === "posthog" ? posthogAdapter : req.params.key === "mixpanel" ? mixpanelAdapter : null;
-  if (!adapter) throw new ApiError(400, `${req.params.key} doesn't use API-key connect`);
-  const body = (req.body ?? {}) as Record<string, unknown>;
-  const fields: Record<string, string> = {};
-  for (const [k, v] of Object.entries(body)) if (typeof v === "string") fields[k] = v;
-  await adapter.validateAndStore(auth.me, fields);
-  res.json({ ok: true });
-});
 
 // Begin an OAuth connect for the token-authed Liana user. Returns an authorize URL the web app
 // opens in a popup; the callback lands on the shared backend handlers (routes/google.ts,

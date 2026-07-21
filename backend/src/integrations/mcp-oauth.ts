@@ -78,9 +78,15 @@ async function discover(spec: McpProviderSpec): Promise<AsMeta> {
 
   const asOrigin = new URL(asUrl);
   const asCandidates = [
-    // RFC 8414 inserts the well-known segment after the host, before any AS path.
-    `${asOrigin.origin}/.well-known/oauth-authorization-server${asOrigin.pathname === "/" ? "" : asOrigin.pathname}`,
-    `${asOrigin.origin}/.well-known/openid-configuration${asOrigin.pathname === "/" ? "" : asOrigin.pathname}`,
+    ...new Set([
+      // RFC 8414 inserts the well-known segment after the host, before any AS path.
+      `${asOrigin.origin}/.well-known/oauth-authorization-server${asOrigin.pathname === "/" ? "" : asOrigin.pathname}`,
+      `${asOrigin.origin}/.well-known/openid-configuration${asOrigin.pathname === "/" ? "" : asOrigin.pathname}`,
+      // Real-world looseness (e.g. Mixpanel): the AS is announced with a path but serves its
+      // metadata at the bare origin — try those before giving up.
+      `${asOrigin.origin}/.well-known/oauth-authorization-server`,
+      `${asOrigin.origin}/.well-known/openid-configuration`,
+    ]),
   ];
   let as: Record<string, unknown> | null = null;
   for (const c of asCandidates) {

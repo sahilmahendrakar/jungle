@@ -125,7 +125,7 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     description: "Query product analytics — events, insights, trends, funnels & session data via PostHog's MCP server.",
     connectionKey: "posthog",
     configFields: [],
-    connection: "apikey",
+    connection: "oauth",
     readOnly: true,
   },
   {
@@ -134,7 +134,7 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     description: "Query product analytics — events, reports, metrics & dashboards via Mixpanel's MCP server.",
     connectionKey: "mixpanel",
     configFields: [],
-    connection: "apikey",
+    connection: "oauth",
     readOnly: true,
   },
 ];
