@@ -297,19 +297,22 @@ lianaRouter.get("/api/liana/connections", async (req, res) => {
 
 // Begin an OAuth connect for the token-authed Liana user. Returns an authorize URL the web app
 // opens in a popup; the callback lands on the shared backend handlers (routes/google.ts,
-// routes/github.ts), which post a self-closing page — origin-agnostic, so the Liana origin works.
+// routes/github.ts, routes/integrations.ts), which post a self-closing page — origin-agnostic,
+// so the Liana origin works. Google-backed keys share one grant; x/linear/notion/granola go
+// through the integration adapters' own start flows.
 lianaRouter.post("/api/liana/connections/:key/start", async (req, res) => {
   const auth = await requireLianaAuth(req);
   const key = req.params.key;
-  const { beginGoogleConnect } = await import("./google");
-  const { beginGithubConnect } = await import("./github");
-  let url: string | null = null;
+  let url: string | null;
   if (key === "gmail" || key === "google-calendar" || key === "google-drive" || key === "google") {
+    const { beginGoogleConnect } = await import("./google");
     url = beginGoogleConnect(auth.me.id, true);
   } else if (key === "github") {
+    const { beginGithubConnect } = await import("./github");
     url = beginGithubConnect(auth.me.id, true);
   } else {
-    throw new ApiError(400, `connecting ${key} from Liana isn't supported yet`);
+    const { beginIntegrationConnect } = await import("./integrations");
+    url = await beginIntegrationConnect(auth.me, key, true); // throws 400 on unknown keys
   }
   if (!url) throw new ApiError(500, "provider not configured");
   res.json({ url });

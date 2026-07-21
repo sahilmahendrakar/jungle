@@ -17,8 +17,18 @@ const DESCRIPTIONS: Record<string, string> = {
   granola: "Can read your meeting notes.",
 };
 
-// Keys the web app can start OAuth for today; the rest connect via chat/jungle for now.
-const CONNECTABLE = new Set(["gmail", "google-calendar", "google-drive", "github"]);
+// Every key connects from here: Google/GitHub via their identity flows, the rest via the
+// integration adapters' own OAuth start (all popup-based, all landing on backend callbacks).
+const CONNECTABLE = new Set([
+  "gmail",
+  "google-calendar",
+  "google-drive",
+  "github",
+  "x",
+  "linear",
+  "notion",
+  "granola",
+]);
 
 export default function ConnectionsPage() {
   const [connections, setConnections] = useState<WireConnection[] | null>(null);
@@ -79,7 +89,7 @@ export default function ConnectionsPage() {
               </button>
             ) : (
               <span className="muted" style={{ fontSize: 13 }}>
-                Connect via chat — coming soon here
+                Coming soon
               </span>
             )}
           </div>

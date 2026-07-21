@@ -67,22 +67,32 @@ function connectionAdapter(key: string) {
   return adapter;
 }
 
-// Step 1: Settings → Connections hits this to begin connecting. The adapter builds the authorize
-// URL and its per-attempt state; we bind it to a fresh OAuth `state` and hand the URL back for the
-// SPA to navigate to (full-page redirect).
+// Begin a connect flow for an already-resolved participant. Used by the route below AND by the
+// Liana web API (routes/liana.ts), whose users authenticate with a Liana token instead of a
+// Firebase session. The adapter builds the authorize URL + per-attempt state; we bind it to a
+// fresh OAuth `state` and return the URL for the caller to navigate/popup to.
+export async function beginIntegrationConnect(
+  me: db.Participant,
+  key: string,
+  popup: boolean,
+): Promise<string> {
+  const adapter = connectionAdapter(key);
+  const state = randomBytes(16).toString("hex");
+  const start = await adapter.connection!.start({ me, redirectUri: REDIRECT_URI });
+  trackConnect(state, { participantId: me.id, key, pending: start.pending, popup });
+  // The adapter returns an authorize URL without `state` (it can't know ours); append it.
+  const url = new URL(start.authorizeUrl);
+  url.searchParams.set("state", state);
+  return url.toString();
+}
+
+// Step 1: Settings → Connections hits this to begin connecting.
 router.post(
   "/api/integrations/:key/connect-url",
   wrap(async (req, res) => {
     const me = await requireRequester(req);
-    const key = String(req.params.key);
-    const adapter = connectionAdapter(key);
-    const state = randomBytes(16).toString("hex");
-    const start = await adapter.connection!.start({ me, redirectUri: REDIRECT_URI });
-    trackConnect(state, { participantId: me.id, key, pending: start.pending, popup: req.body?.popup === true });
-    // The adapter returns an authorize URL without `state` (it can't know ours); append it.
-    const url = new URL(start.authorizeUrl);
-    url.searchParams.set("state", state);
-    res.json({ url: url.toString() });
+    const url = await beginIntegrationConnect(me, String(req.params.key), req.body?.popup === true);
+    res.json({ url });
   }),
 );
 

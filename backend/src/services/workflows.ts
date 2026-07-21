@@ -140,14 +140,17 @@ function slugify(name: string): string {
 // whose underlying connection isn't linked yet just stays unattached — the builder shows it as
 // "needs setup" and the profile panel's ordinary flow fixes it. `repo` supplies the github
 // config; other per-integration config is set later via the profile panel.
+// Returns how many integrations were newly attached, so callers can reconfigure a live runner
+// only when something actually changed.
 async function tryAttachIntegrations(
   actor: db.Participant,
   agentId: string,
   keys: string[],
   repo?: string,
-): Promise<void> {
+): Promise<number> {
   const { adapterFor } = await import("../integrations");
   const { getIntegrationType } = await import("@jungle/shared");
+  let attached = 0;
   for (const key of keys) {
     const type = getIntegrationType(key);
     if (!type || type.comingSoon) continue;
@@ -160,10 +163,12 @@ async function tryAttachIntegrations(
         ? await adapter.resolveConfig({ me: actor, agentId, existing: null }, raw)
         : raw;
       await db.setAgentIntegration(agentId, key, config);
+      attached++;
     } catch (e) {
       console.log(`workflow seat ${agentId}: integration ${key} not attached yet: ${(e as Error).message}`);
     }
   }
+  return attached;
 }
 
 // Create one seat's agent: an ordinary participant row with an animal-preset identity and the
@@ -498,6 +503,20 @@ export async function startRun(
   const agent = await db.getAgentRow(intake.participant_id);
   const channel = wf.home_channel_id ? await db.getChannel(wf.home_channel_id) : null;
   if (!agent || !channel) throw new ApiError(400, "workflow's intake agent or home channel is missing");
+
+  // Self-healing integration attach: connections made AFTER finalize (e.g. the user connected
+  // Google from the Liana web app once the workflow already existed) stick at the next run.
+  // No-ops when everything is already attached; reconfigures live runners only on change.
+  if (wf.created_by) {
+    const creator = await db.getParticipant(wf.created_by);
+    if (creator) {
+      for (const r of wf.roster) {
+        if (!r.participant_id) continue;
+        const attached = await tryAttachIntegrations(creator, r.participant_id, r.integrations, r.repo);
+        if (attached > 0) void runners.reconfigure(r.participant_id).catch(() => {});
+      }
+    }
+  }
 
   const run = await db.createWorkflowRun({
     workflowId: wf.id,
