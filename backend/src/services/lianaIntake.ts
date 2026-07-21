@@ -22,6 +22,8 @@ const INTAKE_INTEGRATION_KEYS = [
   "linear",
   "notion",
   "granola",
+  "posthog",
+  "mixpanel",
 ] as const;
 
 export interface IntakeWorkflowSpec {
@@ -106,7 +108,8 @@ function systemPrompt(ctx: IntakeContext): string {
     `Available integrations (only these keys): gmail (read/send the user's email), google-calendar ` +
     `(their calendar), google-drive (their Drive files), github (a repo: code, PRs, issues — set ` +
     `repo when named), x (their X/Twitter reading), linear (issues), notion (pages), granola ` +
-    `(meeting notes). Pick only integrations the task actually needs. If the task needs one we ` +
+    `(meeting notes), posthog (product analytics: events, insights, trends, funnels), mixpanel ` +
+    `(product analytics: queries, reports, metrics). Pick only integrations the task actually needs. If the task needs one we ` +
     `don't have (e.g. Salesforce), say so honestly in the reply and leave it out.\n\n` +
     `Voice: competent and warm, brief, no exclamation-point pileups, no filler.\n\n` +
     `Context: today is ${ctx.today}. The user is ${ctx.userName}` +

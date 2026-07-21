@@ -10,6 +10,7 @@ import { googleDriveAdapter } from "./google-drive";
 import { googleCalendarAdapter } from "./google-calendar";
 import { xAdapter } from "./x";
 import { linearAdapter, notionAdapter, granolaAdapter } from "./providers";
+import { posthogAdapter, mixpanelAdapter } from "./analytics";
 
 export { registerAdapter, adapterFor, allAdapters } from "./registry";
 export type { IntegrationAdapter, ResolveConfigCtx } from "./types";
@@ -23,4 +24,6 @@ export function registerBuiltinIntegrations(): void {
   registerAdapter(linearAdapter);
   registerAdapter(notionAdapter);
   registerAdapter(granolaAdapter);
+  registerAdapter(posthogAdapter);
+  registerAdapter(mixpanelAdapter);
 }

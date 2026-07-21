@@ -431,6 +431,8 @@ const KEY_LABELS: Record<string, string> = {
   linear: "Linear",
   notion: "Notion",
   granola: "Granola",
+  posthog: "PostHog",
+  mixpanel: "Mixpanel",
 };
 
 async function createDraftAndPostCard(

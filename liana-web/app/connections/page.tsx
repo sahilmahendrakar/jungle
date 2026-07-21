@@ -15,11 +15,12 @@ const DESCRIPTIONS: Record<string, string> = {
   linear: "Can read and update your issues.",
   notion: "Can read and edit pages you share.",
   granola: "Can read your meeting notes.",
+  posthog: "Can query your product analytics. Read-only.",
+  mixpanel: "Can query your product analytics. Read-only.",
 };
 
-// Every key connects from here: Google/GitHub via their identity flows, the rest via the
-// integration adapters' own OAuth start (all popup-based, all landing on backend callbacks).
-const CONNECTABLE = new Set([
+// OAuth keys connect via popup (Google/GitHub identity flows or the adapters' own OAuth start).
+const OAUTH_CONNECTABLE = new Set([
   "gmail",
   "google-calendar",
   "google-drive",
@@ -29,6 +30,15 @@ const CONNECTABLE = new Set([
   "notion",
   "granola",
 ]);
+
+// Static-credential keys connect with a small inline form (no OAuth for headless use).
+const APIKEY_FIELDS: Record<string, { key: string; label: string; secret?: boolean }[]> = {
+  posthog: [{ key: "apiKey", label: "Personal API key (phx_…)", secret: true }],
+  mixpanel: [
+    { key: "username", label: "Service account username" },
+    { key: "secret", label: "Service account secret", secret: true },
+  ],
+};
 
 export default function ConnectionsPage() {
   const [connections, setConnections] = useState<WireConnection[] | null>(null);
@@ -82,11 +92,13 @@ export default function ConnectionsPage() {
               {c.connected ? `Connected${c.account ? ` as ${c.account}` : ""}` : (DESCRIPTIONS[c.key] ?? "")}
             </div>
             {c.connected ? (
-              <span className="chip">✓ Connected</span>
-            ) : CONNECTABLE.has(c.key) ? (
+              <span className="chip">✓ Connected{c.account ? ` — ${c.account}` : ""}</span>
+            ) : OAUTH_CONNECTABLE.has(c.key) ? (
               <button className="btn" onClick={() => void connect(c.key)}>
                 Connect
               </button>
+            ) : APIKEY_FIELDS[c.key] ? (
+              <ApiKeyConnect integrationKey={c.key} fields={APIKEY_FIELDS[c.key]} onConnected={load} />
             ) : (
               <span className="muted" style={{ fontSize: 13 }}>
                 Coming soon
@@ -96,5 +108,67 @@ export default function ConnectionsPage() {
         ))}
       </div>
     </>
+  );
+}
+
+// Inline paste-key connect: collapsed to a Connect button; expands to the provider's one or two
+// credential fields, validates server-side, and collapses back on success.
+function ApiKeyConnect(props: {
+  integrationKey: string;
+  fields: { key: string; label: string; secret?: boolean }[];
+  onConnected: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  if (!open) {
+    return (
+      <button className="btn" onClick={() => setOpen(true)}>
+        Connect
+      </button>
+    );
+  }
+  const ready = props.fields.every((f) => (values[f.key] ?? "").trim());
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {props.fields.map((f) => (
+        <input
+          key={f.key}
+          type={f.secret ? "password" : "text"}
+          placeholder={f.label}
+          value={values[f.key] ?? ""}
+          style={{ fontSize: 13.5, padding: "7px 10px", border: "1px solid var(--hairline)", borderRadius: 8, background: "var(--card)" }}
+          onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
+        />
+      ))}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button
+          className="btn primary"
+          disabled={busy || !ready}
+          onClick={() => {
+            setBusy(true);
+            setErr(null);
+            api(`/api/liana/connections/${props.integrationKey}/apikey`, {
+              method: "POST",
+              body: JSON.stringify(values),
+            })
+              .then(() => {
+                setOpen(false);
+                props.onConnected();
+              })
+              .catch((e: Error) => setErr(e.message))
+              .finally(() => setBusy(false));
+          }}
+        >
+          {busy ? "Checking…" : "Save"}
+        </button>
+        <button className="btn" disabled={busy} onClick={() => setOpen(false)}>
+          Cancel
+        </button>
+      </div>
+      {err && <span className="error-note" style={{ fontSize: 13 }}>{err}</span>}
+    </div>
   );
 }

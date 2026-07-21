@@ -36,7 +36,9 @@ export interface IntegrationType {
   // connect-url → provider consent → /auth/integrations/callback). The frontend renders a generic
   // "Connect" card for these (see IntegrationsEditor). Gmail is connection-based too but via the
   // per-user Google account in Settings, so it is NOT marked here — it has its own card.
-  connection?: "oauth";
+  // "apikey" = connection-based but with pasted static credentials (PostHog personal API key,
+  // Mixpanel service account) instead of an OAuth round-trip; connected from the Liana web app.
+  connection?: "oauth" | "apikey";
   // The integration exposes only read-only tools (e.g. Granola: query notes/transcripts). There's
   // nothing to approve, so the write-approval toggle is hidden and its tools always run.
   readOnly?: boolean;
@@ -115,6 +117,24 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     connectionKey: "x",
     configFields: [],
     connection: "oauth",
+    readOnly: true,
+  },
+  {
+    key: "posthog",
+    name: "PostHog",
+    description: "Query product analytics — events, insights, trends, funnels & session data via PostHog's MCP server.",
+    connectionKey: "posthog",
+    configFields: [],
+    connection: "apikey",
+    readOnly: true,
+  },
+  {
+    key: "mixpanel",
+    name: "Mixpanel",
+    description: "Query product analytics — events, reports, metrics & dashboards via Mixpanel's MCP server.",
+    connectionKey: "mixpanel",
+    configFields: [],
+    connection: "apikey",
     readOnly: true,
   },
 ];

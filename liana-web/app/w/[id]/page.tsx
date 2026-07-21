@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
+import ScheduleEditor from "@/components/ScheduleEditor";
 import { api, INTEGRATION_LABELS, type WireChannels, type WireConnection, type WireModels, type WireRun, type WireWorkflow } from "@/lib/api";
 import { capitalize, timeAgo } from "@/lib/format";
 
@@ -122,9 +123,14 @@ export default function WorkflowPage() {
         })}
       </div>
 
-      <div className="field-row" style={{ marginTop: 22 }}>
-        <label>Schedule</label>
-        <CronEditor wf={wf} onSave={(cron, timezone) => void patch(cron === null ? { cron: null } : { cron, timezone })} />
+      <div className="field-row" style={{ marginTop: 22, alignItems: "flex-start" }}>
+        <label style={{ paddingTop: 8 }}>Schedule</label>
+        <ScheduleEditor
+          key={`${wf.trigger.type}:${wf.trigger.cron ?? ""}:${wf.trigger.timezone ?? ""}`}
+          cron={wf.trigger.type === "schedule" ? (wf.trigger.cron ?? null) : null}
+          timezone={wf.trigger.type === "schedule" ? (wf.trigger.timezone ?? null) : null}
+          onSave={(cron, timezone) => void patch(cron === null ? { cron: null } : { cron, timezone })}
+        />
       </div>
 
       <div className="field-row">
@@ -211,23 +217,6 @@ export default function WorkflowPage() {
         ))}
       </div>
     </>
-  );
-}
-
-function CronEditor({ wf, onSave }: { wf: WireWorkflow; onSave: (cron: string | null, timezone?: string) => void }) {
-  const isScheduled = wf.trigger.type === "schedule";
-  const [cron, setCron] = useState(isScheduled ? (wf.trigger.cron ?? "") : "");
-  const [tz, setTz] = useState(isScheduled ? (wf.trigger.timezone ?? "") : Intl.DateTimeFormat().resolvedOptions().timeZone);
-  return (
-    <span style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-      <input value={cron} placeholder="0 8 * * * (cron) — empty = on demand" size={26} onChange={(e) => setCron(e.target.value)} />
-      <input value={tz} placeholder="Timezone" size={18} onChange={(e) => setTz(e.target.value)} />
-      {(cron.trim() !== (isScheduled ? wf.trigger.cron : "") || (cron.trim() && tz !== (isScheduled ? wf.trigger.timezone : ""))) && (
-        <button className="btn" onClick={() => onSave(cron.trim() ? cron.trim() : null, tz || undefined)}>
-          Save schedule
-        </button>
-      )}
-    </span>
   );
 }
 
