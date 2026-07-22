@@ -295,6 +295,7 @@ async function wireWorkflow(wf: db.WorkflowRow, owner: db.Participant): Promise<
   const runs = await db.listWorkflowRuns(wf.id, 1);
   const integrations = wf.roster[0]?.integrations ?? [];
   const lianaRow = await db.getLianaWorkflow(wf.id);
+  const lastDelivery = runs[0] ? await db.getLianaDelivery(runs[0].id) : null;
   return {
     id: wf.id,
     name: wf.name,
@@ -309,7 +310,15 @@ async function wireWorkflow(wf: db.WorkflowRow, owner: db.Participant): Promise<
     delivery: lianaRow ? await liana.describeDelivery(lianaRow) : { dmOnly: false, hasChannel: false, label: "your Slack DM" },
     nextRunAt: schedule?.next_run_at ?? null,
     lastRun: runs[0]
-      ? { id: runs[0].id, status: runs[0].status, startedAt: runs[0].started_at, endedAt: runs[0].ended_at, summary: runs[0].summary }
+      ? {
+          id: runs[0].id,
+          status: runs[0].status,
+          startedAt: runs[0].started_at,
+          endedAt: runs[0].ended_at,
+          summary: runs[0].summary,
+          // Per-channel delivery outcomes ({slack:"ok", imessage:"failed: …"}); {} until a run delivers.
+          delivery: lastDelivery?.channels ?? {},
+        }
       : null,
   };
 }
@@ -368,8 +377,17 @@ lianaRouter.get("/api/liana/workflows/:id/runs/:runId", async (req, res) => {
   const { wf } = await requireOwnedWorkflow(auth, req.params.id);
   const run = await db.getWorkflowRun(req.params.runId);
   if (!run || run.workflow_id !== wf.id) throw new ApiError(404, "run not found");
+  const delivery = await db.getLianaDelivery(run.id);
   res.json({
-    run: { id: run.id, status: run.status, trigger: run.trigger, startedAt: run.started_at, endedAt: run.ended_at, summary: run.summary },
+    run: {
+      id: run.id,
+      status: run.status,
+      trigger: run.trigger,
+      startedAt: run.started_at,
+      endedAt: run.ended_at,
+      summary: run.summary,
+      delivery: delivery?.channels ?? {},
+    },
     output: await liana.runDeliverableText(run, wf),
   });
 });
@@ -381,7 +399,7 @@ lianaRouter.patch("/api/liana/workflows/:id", async (req, res) => {
   if (typeof body.model === "string") await liana.setLianaWorkflowModel(wf, body.model);
   // "Send to my DM instead" toggle — non-destructive, keeps the origin recorded so it's reversible.
   if (typeof body.dmOnly === "boolean") await db.setLianaDmOverride(wf.id, body.dmOnly);
-  const updated = await liana.editLianaWorkflow(wf, auth.me, {
+  const { workflow: updated, warning } = await liana.editLianaWorkflow(wf, auth.me, {
     name: typeof body.name === "string" ? body.name : undefined,
     prompt: typeof body.prompt === "string" ? body.prompt : undefined,
     cron: body.cron === null ? null : typeof body.cron === "string" ? body.cron : undefined,
@@ -395,7 +413,7 @@ lianaRouter.patch("/api/liana/workflows/:id", async (req, res) => {
         ? (body.settings as Record<string, Record<string, unknown>>)
         : undefined,
   });
-  res.json({ workflow: await wireWorkflow(updated, auth.me) });
+  res.json({ workflow: await wireWorkflow(updated, auth.me), warning });
 });
 
 lianaRouter.post("/api/liana/workflows/:id/run", async (req, res) => {

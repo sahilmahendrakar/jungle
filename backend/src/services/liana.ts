@@ -546,7 +546,7 @@ async function applyIntakeEdit(
   }
   if (typeof p.repo === "string" && p.repo.trim()) settings.github = { ...(settings.github ?? {}), repo: p.repo.trim() };
   try {
-    const updated = await editLianaWorkflow(target.wf, owner, {
+    const { workflow: updated, warning } = await editLianaWorkflow(target.wf, owner, {
       name: p.name,
       prompt: p.prompt,
       cron: p.cron,
@@ -557,7 +557,8 @@ async function applyIntakeEdit(
       integrations: p.integrations,
       settings: Object.keys(settings).length ? settings : undefined,
     });
-    return confirmSentence.trim() ? confirmSentence.trim() : `Done — updated "${updated.name}".`;
+    const base = confirmSentence.trim() ? confirmSentence.trim() : `Done — updated "${updated.name}".`;
+    return warning ? `${base} (Heads up: ${warning}.)` : base;
   } catch (e) {
     if (e instanceof ApiError) return `I couldn't make that change: ${e.message}`;
     console.error("liana edit:", e);
@@ -1451,9 +1452,12 @@ export async function onRunClosed(runId: string): Promise<void> {
   if (body.length > MAX) body = body.slice(0, MAX) + `\n\n_…truncated — <${url}|read the full run in Liana>_`;
 
   // Fan out to each enabled channel independently: one channel failing must not block the other,
-  // and the per-run claim above keeps the whole delivery idempotent.
+  // and the per-run claim above keeps the whole delivery idempotent. `outcomes` records what
+  // happened per channel (ok / skipped / failed) so the user can see it — a silently-skipped
+  // channel (provider not configured, no verified link) used to leave no trace at all.
   const channels = liana.deliver_to?.length ? liana.deliver_to : ["slack"];
-  const failures: string[] = [];
+  const outcomes: Record<string, string> = {};
+  const failures: string[] = []; // genuine non-deliveries → status rollup + error column
 
   // After a successful send, drop a one-line stub into that conversation's memory — enough for
   // "add calendar to that" to resolve, without dragging a whole briefing into every intake call.
@@ -1479,58 +1483,87 @@ export async function onRunClosed(runId: string): Promise<void> {
       try {
         await slack.chatPostMessage(install.bot_token, { channel: target, text: jungleToSlackText(body) });
         if (owner) await remember(owner.id, `slack:${target}`, "assistant", stub);
+        outcomes.slack = "ok";
       } catch (e) {
         // Bot removed from the channel / channel gone: fall back to the DM so the run isn't lost.
+        // This still counts as delivered (not a failure) — just note where it landed.
         if (useChannel && e instanceof slack.SlackApiError && slack.FATAL_SLACK_ERRORS.has(e.code)) {
           const dm = await openDm();
           await slack.chatPostMessage(install.bot_token, { channel: dm, text: jungleToSlackText(body) });
           if (owner) await remember(owner.id, `slack:${dm}`, "assistant", stub);
-          failures.push(`slack: couldn't post to channel (${e.code}) — delivered to DM instead`);
+          outcomes.slack = `ok (channel unavailable [${e.code}] — sent to your DM)`;
         } else {
           throw e;
         }
       }
     } catch (e) {
-      failures.push(`slack: ${e instanceof Error ? e.message : String(e)}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      outcomes.slack = `failed: ${msg}`;
+      failures.push(`slack: ${msg}`);
     }
   }
 
-  if (channels.includes("imessage") && imsg.imessageConfigured()) {
-    try {
-      const link = owner ? await db.getPhoneLink(owner.id) : null;
-      if (link?.verified_at) {
-        await imsg.sendIMessage(link.phone, imsg.toPlainText(body));
-        if (owner) await remember(owner.id, `imessage:${link.phone}`, "assistant", stub);
-      } else {
-        failures.push("imessage: no verified phone linked");
+  if (channels.includes("imessage")) {
+    if (!imsg.imessageConfigured()) {
+      outcomes.imessage = "skipped: iMessage not configured on this deployment";
+    } else {
+      try {
+        const link = owner ? await db.getPhoneLink(owner.id) : null;
+        if (link?.verified_at) {
+          await imsg.sendIMessage(link.phone, imsg.toPlainText(capForChannel(body, IMSG_MAX, url)));
+          if (owner) await remember(owner.id, `imessage:${link.phone}`, "assistant", stub);
+          outcomes.imessage = "ok";
+        } else {
+          outcomes.imessage = "skipped: no verified phone linked";
+          failures.push("imessage: no verified phone linked");
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        outcomes.imessage = `failed: ${msg}`;
+        failures.push(`imessage: ${msg}`);
       }
-    } catch (e) {
-      failures.push(`imessage: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
-  if (channels.includes("telegram") && tg.telegramConfigured()) {
-    try {
-      const link = owner ? await db.getTelegramLink(owner.id) : null;
-      // Deliver to the chat the workflow was set up in (a group, or the DM), unless switched to
-      // DM-only on the web — then fall back to the owner's private link chat.
-      const groupChat = !liana.deliver_dm_override ? liana.origin_telegram_chat_id : null;
-      const chatId = groupChat ?? (link?.verified_at ? link.chat_id : null);
-      if (chatId) {
-        await tg.sendTelegram(chatId, body);
-        if (owner) await remember(owner.id, `telegram:${chatId}`, "assistant", stub);
-      } else {
-        failures.push("telegram: no linked Telegram account");
+  if (channels.includes("telegram")) {
+    if (!tg.telegramConfigured()) {
+      outcomes.telegram = "skipped: Telegram not configured on this deployment";
+    } else {
+      try {
+        const link = owner ? await db.getTelegramLink(owner.id) : null;
+        // Deliver to the chat the workflow was set up in (a group, or the DM), unless switched to
+        // DM-only on the web — then fall back to the owner's private link chat.
+        const groupChat = !liana.deliver_dm_override ? liana.origin_telegram_chat_id : null;
+        const chatId = groupChat ?? (link?.verified_at ? link.chat_id : null);
+        if (chatId) {
+          await tg.sendTelegram(chatId, body);
+          if (owner) await remember(owner.id, `telegram:${chatId}`, "assistant", stub);
+          outcomes.telegram = "ok";
+        } else {
+          outcomes.telegram = "skipped: no linked Telegram account";
+          failures.push("telegram: no linked Telegram account");
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        outcomes.telegram = `failed: ${msg}`;
+        failures.push(`telegram: ${msg}`);
       }
-    } catch (e) {
-      failures.push(`telegram: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
+  await db.recordLianaDeliveryChannels(runId, outcomes).catch(() => {});
   if (failures.length) {
-    console.error(`liana: delivery for run ${runId} failed:`, failures.join(" | "));
+    console.error(`liana: delivery for run ${runId} had issues:`, failures.join(" | "));
     await db.markLianaDeliveryFailed(runId, failures.join(" | ")).catch(() => {});
   }
+}
+
+// iMessage keeps bubbles short: hard-cap the plain-text body and point at the full run in Liana.
+// (Linq's behavior on very long messages is unverified; a link is safer than a wall of text.)
+const IMSG_MAX = 1500;
+function capForChannel(body: string, max: number, url: string): string {
+  if (body.length <= max) return body;
+  return body.slice(0, max) + `\n\nFull run: ${url}`;
 }
 
 // The deliverable = the workflow agent's thread messages, minus the run header and the
@@ -1638,10 +1671,12 @@ export async function editLianaWorkflow(
     // touched. Keys may reference integrations being added in the same `integrations` edit.
     settings?: Record<string, Record<string, unknown>>;
   },
-): Promise<db.WorkflowRow> {
+): Promise<{ workflow: db.WorkflowRow; warning?: string }> {
   if (args.cron != null && args.runAt != null) {
     throw new ApiError(400, "a workflow is either recurring (cron) or one-time (runAt), not both");
   }
+  // Delivery channels newly added in this edit — pinged after the save to prove they work.
+  let addedChannels: string[] = [];
   if (args.deliverTo !== undefined) {
     const channels = [...new Set(args.deliverTo)];
     if (!channels.length) throw new ApiError(400, "pick at least one delivery channel");
@@ -1658,6 +1693,9 @@ export async function editLianaWorkflow(
       const link = await db.getTelegramLink(owner.id);
       if (!link?.verified_at) throw new ApiError(400, "link your Telegram account in Settings first");
     }
+    const prior = await db.getLianaWorkflow(wf.id);
+    const priorSet = new Set(prior?.deliver_to?.length ? prior.deliver_to : ["slack"]);
+    addedChannels = channels.filter((c) => !priorSet.has(c));
     await db.setLianaDeliverTo(wf.id, channels);
   }
   const patch: Parameters<typeof db.updateWorkflow>[1] = {};
@@ -1804,7 +1842,34 @@ export async function editLianaWorkflow(
       : 0;
     if (changed > 0 || integrationsRemoved.length > 0) void runners.reconfigure(seatId).catch(() => {});
   }
-  return updated;
+
+  // Channel-add confirmation ping: send a friendly one-liner to each newly-added delivery channel
+  // so the user sees it works immediately (the iMessage incident: an added channel that silently
+  // never delivered). Never blocks the save — a send failure comes back as a warning the caller
+  // surfaces ("Saved — but the test message didn't send: …").
+  const warning = addedChannels.length ? await pingAddedChannels(owner, updated, addedChannels) : undefined;
+  return { workflow: updated, warning };
+}
+
+// Send the confirmation ping to each newly-added channel; returns a warning string if any failed.
+async function pingAddedChannels(owner: db.Participant, wf: db.WorkflowRow, added: string[]): Promise<string | undefined> {
+  const msg = `You'll get "${wf.name}" runs here from now on. 🌿`;
+  const problems: string[] = [];
+  for (const channel of added) {
+    try {
+      if (channel === "imessage") {
+        const link = await db.getPhoneLink(owner.id);
+        if (link?.verified_at) await imsg.sendIMessage(link.phone, msg);
+      } else if (channel === "telegram") {
+        const link = await db.getTelegramLink(owner.id);
+        if (link?.verified_at && link.chat_id) await tg.sendTelegram(link.chat_id, msg);
+      }
+      // Slack is the default channel and always reachable via the app; no ping needed.
+    } catch (e) {
+      problems.push(`${channel} (${e instanceof Error ? e.message : String(e)})`);
+    }
+  }
+  return problems.length ? `couldn't send a test message to ${problems.join(", ")}` : undefined;
 }
 
 // ============================ OAuth install state ============================
