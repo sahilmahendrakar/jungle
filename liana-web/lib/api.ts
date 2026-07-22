@@ -65,6 +65,9 @@ export interface WireWorkflow {
   integrations: string[];
   model: string | null; // null on drafts (agent not materialized yet)
   deliverTo: string[]; // "slack" | "imessage" | "telegram"
+  // Where runs land now: a human label, whether there's a channel to switch away from, and
+  // whether the "send to my DM instead" switch is currently on.
+  delivery: { dmOnly: boolean; hasChannel: boolean; label: string };
   nextRunAt: string | null;
   lastRun: WireRun | null;
 }

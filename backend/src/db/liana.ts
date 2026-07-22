@@ -56,7 +56,20 @@ export interface LianaWorkflowRow {
   dm_channel_id: string | null;
   origin_channel_id: string | null;
   origin_thread_ts: string | null;
-  deliver_to: string[]; // "slack" | "imessage" (text[] — future channels are values, not columns)
+  // The Telegram chat runs deliver to (a group chat, or a DM chat). Null = fall back to the
+  // owner's private link chat. Mirrors origin_channel_id's role for Slack (bigint -> string).
+  origin_telegram_chat_id: string | null;
+  // Web toggle: deliver to the owner's personal DM even though this workflow was born in a
+  // channel/group. Origin stays recorded, so it's reversible.
+  deliver_dm_override: boolean;
+  deliver_to: string[]; // "slack" | "imessage" | "telegram" (text[] — surfaces are values, not columns)
+}
+
+export async function setLianaDmOverride(workflowId: string, dmOnly: boolean): Promise<void> {
+  await pool.query(`update liana_workflows set deliver_dm_override = $2 where workflow_id = $1`, [
+    workflowId,
+    dmOnly,
+  ]);
 }
 
 export async function setLianaDeliverTo(workflowId: string, deliverTo: string[]): Promise<void> {
@@ -73,12 +86,14 @@ export async function insertLianaWorkflow(l: {
   ownerParticipantId: string;
   originChannelId?: string | null;
   originThreadTs?: string | null;
+  originTelegramChatId?: number | string | null;
   deliverTo?: string[];
 }): Promise<LianaWorkflowRow> {
   const { rows } = await pool.query<LianaWorkflowRow>(
     `insert into liana_workflows
-       (workflow_id, team_id, slack_user_id, owner_participant_id, origin_channel_id, origin_thread_ts, deliver_to)
-     values ($1, $2, $3, $4, $5, $6, $7) returning *`,
+       (workflow_id, team_id, slack_user_id, owner_participant_id,
+        origin_channel_id, origin_thread_ts, origin_telegram_chat_id, deliver_to)
+     values ($1, $2, $3, $4, $5, $6, $7, $8) returning *`,
     [
       l.workflowId,
       l.teamId,
@@ -86,6 +101,7 @@ export async function insertLianaWorkflow(l: {
       l.ownerParticipantId,
       l.originChannelId ?? null,
       l.originThreadTs ?? null,
+      l.originTelegramChatId ?? null,
       l.deliverTo ?? ["slack"],
     ],
   );
@@ -258,6 +274,19 @@ export async function getTelegramLinkByChat(chatId: number): Promise<LianaTelegr
   const { rows } = await pool.query<LianaTelegramLink>(
     `select * from liana_telegram_links where chat_id = $1`,
     [chatId],
+  );
+  return rows[0] ?? null;
+}
+
+// Resolve a sender by their Telegram user id (not the chat) — the group case, where one chat
+// holds many users. telegram_user_id isn't unique (a Telegram user could link more than one
+// Liana account), so prefer the most recently verified link.
+export async function getTelegramLinkByUser(telegramUserId: number): Promise<LianaTelegramLink | null> {
+  const { rows } = await pool.query<LianaTelegramLink>(
+    `select * from liana_telegram_links
+     where telegram_user_id = $1 and verified_at is not null
+     order by verified_at desc limit 1`,
+    [telegramUserId],
   );
   return rows[0] ?? null;
 }

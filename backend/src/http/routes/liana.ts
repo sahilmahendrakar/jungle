@@ -173,9 +173,17 @@ lianaEventsRouter.post("/api/liana/telegram/webhook", (req, res) => {
     }
     res.status(200).end(); // ack fast; Telegram retries on non-2xx
     const inbound = tg.parseUpdate(payload);
-    if (!inbound) return;
-    if (!(await db.recordSlackEvent(`tg:${inbound.updateId}`))) return; // duplicate delivery
-    void liana.processTelegramInbound(inbound).catch((e) => console.error("liana telegram processing:", e));
+    if (inbound) {
+      if (!(await db.recordSlackEvent(`tg:${inbound.updateId}`))) return; // duplicate delivery
+      void liana.processTelegramInbound(inbound).catch((e) => console.error("liana telegram processing:", e));
+      return;
+    }
+    // A tapped inline button (Create it / Cancel on a draft card).
+    const callback = tg.parseCallback(payload);
+    if (callback) {
+      if (!(await db.recordSlackEvent(`tg:${callback.updateId}`))) return;
+      void liana.processTelegramCallback(callback).catch((e) => console.error("liana telegram callback:", e));
+    }
   })().catch((e) => {
     console.error("liana telegram webhook route:", e);
     if (!res.headersSent) res.status(500).end();
@@ -297,6 +305,7 @@ async function wireWorkflow(wf: db.WorkflowRow): Promise<Record<string, unknown>
     integrations,
     model: await liana.workflowModel(wf),
     deliverTo: lianaRow?.deliver_to?.length ? lianaRow.deliver_to : ["slack"],
+    delivery: lianaRow ? await liana.describeDelivery(lianaRow) : { dmOnly: false, hasChannel: false, label: "your Slack DM" },
     nextRunAt: schedule?.next_run_at ?? null,
     lastRun: runs[0]
       ? { id: runs[0].id, status: runs[0].status, startedAt: runs[0].started_at, endedAt: runs[0].ended_at, summary: runs[0].summary }
@@ -369,6 +378,8 @@ lianaRouter.patch("/api/liana/workflows/:id", async (req, res) => {
   const { wf } = await requireOwnedWorkflow(auth, req.params.id);
   const body = (req.body ?? {}) as Record<string, unknown>;
   if (typeof body.model === "string") await liana.setLianaWorkflowModel(wf, body.model);
+  // "Send to my DM instead" toggle — non-destructive, keeps the origin recorded so it's reversible.
+  if (typeof body.dmOnly === "boolean") await db.setLianaDmOverride(wf.id, body.dmOnly);
   const updated = await liana.editLianaWorkflow(wf, auth.me, {
     name: typeof body.name === "string" ? body.name : undefined,
     prompt: typeof body.prompt === "string" ? body.prompt : undefined,

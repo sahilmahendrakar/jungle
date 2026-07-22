@@ -393,6 +393,20 @@ async function postReply(
   });
 }
 
+// One plain sentence for the confirm card: where this workflow's runs will land. Resolves the
+// Slack channel name so a shared-channel destination is never a surprise. Best-effort — an API
+// hiccup degrades to a generic phrase rather than blocking the card.
+async function slackDeliveryPhrase(install: db.LianaInstall, channelId: string): Promise<string> {
+  try {
+    const info = await slack.conversationsInfo(install.bot_token, channelId);
+    if (info.is_im) return "Runs come to your DMs.";
+    if (info.name) return `Runs post here in #${info.name}.`;
+  } catch {
+    /* fall through to the generic phrase */
+  }
+  return "Runs post in this channel.";
+}
+
 // Memory writes are best-effort — losing a transcript row must never fail a turn.
 async function remember(
   participantId: string,
@@ -496,6 +510,7 @@ export async function createLianaDraft(args: {
   spec: IntakeWorkflowSpec;
   defaultTz: string | null;
   origin?: { channel: string; threadTs: string | null };
+  originTelegramChatId?: number | null;
   // "Liana answers where you ask": the creating channel is the default delivery target.
   deliverTo?: DeliveryChannel[];
 }): Promise<{ wf: db.WorkflowRow; liana: db.LianaWorkflowRow }> {
@@ -543,6 +558,7 @@ export async function createLianaDraft(args: {
     ownerParticipantId: owner.id,
     originChannelId: args.origin?.channel ?? null,
     originThreadTs: args.origin?.threadTs ?? null,
+    originTelegramChatId: args.originTelegramChatId ?? null,
     deliverTo: args.deliverTo ?? ["slack"],
   });
   return { wf, liana };
@@ -620,7 +636,8 @@ async function createDraftAndPostCard(
 
   const detail =
     `*${wf.name}* — ${cadenceSentence(wf)}\n` +
-    (integrationLines.length ? integrationLines.join("\n") : "_No integrations needed_");
+    (integrationLines.length ? integrationLines.join("\n") : "_No integrations needed_") +
+    `\n_${await slackDeliveryPhrase(install, reply.channel)}_`;
 
   await postReply(install, reply, `${replySentence}\n${detail}`, [
     { type: "section", text: { type: "mrkdwn", text: replySentence } },
@@ -684,11 +701,14 @@ export async function handleInteractivity(payload: BlockActionPayload): Promise<
   try {
     if (action.action_id === "liana_confirm") {
       const result = await confirmLianaWorkflow(workflowId);
+      const install = row.team_id ? await db.getLianaInstall(row.team_id) : null;
+      const phrase =
+        install && row.origin_channel_id ? await slackDeliveryPhrase(install, row.origin_channel_id) : "Runs come to your DMs.";
       await respondViaUrl(responseUrl, {
         replace_original: true,
         text:
           `:seedling: *${result.wf.name}* is live — ${cadenceSentence(result.wf)}. ` +
-          `I'm doing a first run now so you can see what it looks like; it'll land in your DMs.` +
+          `I'm doing a first run now so you can see what it looks like. ${phrase}` +
           (result.unconnected.length
             ? `\n:link: Heads up: connect ${result.unconnected.map((k) => KEY_LABELS[k] ?? k).join(", ")} in <${result.url}|the web app> so I can use ${result.unconnected.length > 1 ? "them" : "it"}.`
             : ""),
@@ -804,6 +824,14 @@ interface ConversationalCtx {
   reply: (text: string) => Promise<void>;
   setPendingDraft: (draftId: string | null) => Promise<void>;
   toPlain: (md: string) => string; // channel's markdown handling for freeform intake replies
+  // Where runs from a draft born here will land — one plain sentence for the confirm card, so the
+  // destination is never a surprise (esp. group chats). e.g. "Runs post here in this group."
+  deliveryPhrase?: string;
+  // The Telegram chat a group/DM draft should deliver to (records origin_telegram_chat_id).
+  originTelegramChatId?: number | null;
+  // Buttoned confirm (Telegram): render the draft card with inline Create it / Cancel buttons
+  // instead of a typed YES/NO prompt. Required in groups, where privacy mode drops bare replies.
+  confirmCard?: (cardText: string, workflowId: string) => Promise<void>;
 }
 
 // Reply + record in the conversation's memory in one motion.
@@ -888,18 +916,24 @@ async function handleConversationalTurn(text: string, ctx: ConversationalCtx): P
       spec: intake.workflow,
       defaultTz: null,
       deliverTo: [ctx.channel],
+      originTelegramChatId: ctx.originTelegramChatId ?? null,
     });
-    await ctx.setPendingDraft(wf.id);
     const statuses = await connectionStatus(owner, intake.workflow.integrations);
     const integrationLines = statuses.map((s) =>
       s.connected ? `✓ ${KEY_LABELS[s.key] ?? s.key}` : `→ ${KEY_LABELS[s.key] ?? s.key} (connect on the web)`,
     );
-    await replyAndRemember(
-      ctx,
+    const card =
       `${intake.reply}\n\n${wf.name} — ${cadenceSentence(wf)}` +
-        (integrationLines.length ? `\n${integrationLines.join("\n")}` : "") +
-        `\n\nReply YES to create it, or NO to cancel.`,
-    );
+      (integrationLines.length ? `\n${integrationLines.join("\n")}` : "") +
+      (ctx.deliveryPhrase ? `\n\n${ctx.deliveryPhrase}` : "");
+    if (ctx.confirmCard) {
+      // Buttoned surface (Telegram): the buttons carry the id, so no per-user pending state needed.
+      await ctx.confirmCard(card, wf.id);
+      await remember(owner.id, ctx.convoKey, "assistant", card);
+    } else {
+      await ctx.setPendingDraft(wf.id);
+      await replyAndRemember(ctx, `${card}\n\nReply YES to create it, or NO to cancel.`);
+    }
     return;
   }
 
@@ -956,7 +990,18 @@ export async function startTelegramLink(me: db.Participant): Promise<string> {
   return `https://t.me/${await tg.getBotUsername()}?start=${code}`;
 }
 
+// Inline buttons for a Telegram draft card. callback_data stays short (<=64 bytes): a two-char
+// action tag + the workflow uuid.
+function telegramConfirmButtons(workflowId: string): tg.TelegramButton[] {
+  return [
+    { text: "Create it", data: `lc:${workflowId}` },
+    { text: "Cancel", data: `lx:${workflowId}` },
+  ];
+}
+
 export async function processTelegramInbound(inbound: tg.TelegramInbound): Promise<void> {
+  if (inbound.isGroup) return processTelegramGroupInbound(inbound);
+
   const reply = (text: string) => tg.sendTelegram(inbound.chatId, text);
 
   // Deep-link /start: complete the link minted in web Settings.
@@ -1007,10 +1052,105 @@ export async function processTelegramInbound(inbound: tg.TelegramInbound): Promi
       reply,
       setPendingDraft: (id) => db.setTelegramPendingDraft(owner.id, id),
       toPlain: (md) => md, // sendTelegram renders light markdown itself
+      deliveryPhrase: "Runs land here in this chat.",
+      confirmCard: async (cardText, wfId) => {
+        await tg.sendTelegramButtons(inbound.chatId, cardText, telegramConfirmButtons(wfId));
+      },
     });
   } catch (e) {
     console.error("liana telegram inbound:", e);
     await reply("Something went wrong on my end — mind trying that again?").catch(() => {});
+  }
+}
+
+// A message in a Telegram group/supergroup. Groups have many people, so the owner is resolved by
+// the SENDER's Telegram user id (they must have DM-linked their account first), and runs deliver
+// back to the group chat. Confirm is via inline buttons — privacy mode drops bare typed replies.
+async function processTelegramGroupInbound(inbound: tg.TelegramInbound): Promise<void> {
+  const botUsername = await tg.getBotUsername();
+  const { addressed, text } = tg.addressedInGroup(inbound, botUsername);
+  if (!addressed) return; // group chatter not directed at us
+
+  try {
+    const link = await db.getTelegramLinkByUser(inbound.fromId);
+    if (!link?.participant_id) {
+      // Unlinked sender: one short pointer (deduped by Telegram's per-update delivery — no loop).
+      await tg.sendTelegram(
+        inbound.chatId,
+        `Hi! DM me to link your Liana account first, then @${botUsername} me here. → https://t.me/${botUsername}`,
+      );
+      return;
+    }
+    const owner = await db.getParticipant(link.participant_id);
+    if (!owner) throw new Error("telegram group: link points at a missing participant");
+    if (!text) {
+      await tg.sendTelegram(inbound.chatId, `Tell me what to automate — e.g. "@${botUsername} morning briefing every day at 8am".`);
+      return;
+    }
+    const install = await db.getLianaInstallByWorkspace(owner.workspace_id);
+    await handleConversationalTurn(text, {
+      owner,
+      install,
+      channel: "telegram",
+      convoKey: `telegram:${inbound.chatId}:${inbound.fromId}`, // per-user within a group
+      pendingDraftId: null, // groups confirm with buttons, not typed YES/NO
+      reply: (t) => tg.sendTelegram(inbound.chatId, t),
+      setPendingDraft: async () => {}, // buttons carry the id; no per-user pending state in groups
+      toPlain: (md) => md,
+      deliveryPhrase: "Runs post here in this group.",
+      originTelegramChatId: inbound.chatId,
+      confirmCard: async (cardText, wfId) => {
+        await tg.sendTelegramButtons(inbound.chatId, cardText, telegramConfirmButtons(wfId));
+      },
+    });
+  } catch (e) {
+    console.error("liana telegram group inbound:", e);
+    await tg.sendTelegram(inbound.chatId, "Something went wrong on my end — mind trying that again?").catch(() => {});
+  }
+}
+
+// A tapped Create it / Cancel button on a Telegram draft card (group or DM). Only the person who
+// set the draft up can act on it — buttons are visible to a whole group.
+export async function processTelegramCallback(cb: tg.TelegramCallback): Promise<void> {
+  const m = /^(lc|lx):(.+)$/.exec(cb.data);
+  if (!m) {
+    await tg.answerCallbackQuery(cb.callbackQueryId);
+    return;
+  }
+  const [, action, workflowId] = m;
+  try {
+    const row = await db.getLianaWorkflow(workflowId);
+    if (!row) {
+      await tg.answerCallbackQuery(cb.callbackQueryId, "That draft is no longer available.");
+      await tg.editMessageText(cb.chatId, cb.messageId, "_That draft is no longer available._").catch(() => {});
+      return;
+    }
+    const tapper = await db.getTelegramLinkByUser(cb.fromId);
+    if (!tapper || tapper.participant_id !== row.owner_participant_id) {
+      await tg.answerCallbackQuery(cb.callbackQueryId, "Only the person who set this up can do that.");
+      return;
+    }
+    await db.setTelegramPendingDraft(row.owner_participant_id, null).catch(() => {});
+
+    if (action === "lc") {
+      const result = await confirmLianaWorkflow(workflowId);
+      await tg.answerCallbackQuery(cb.callbackQueryId, "Creating…");
+      await tg.editMessageText(
+        cb.chatId,
+        cb.messageId,
+        `🌿 ${result.wf.name} is live — ${cadenceSentence(result.wf)}. I'm doing a first run now.` +
+          (result.unconnected.length
+            ? `\nHeads up: connect ${result.unconnected.map((k) => KEY_LABELS[k] ?? k).join(", ")} so I can use ${result.unconnected.length > 1 ? "them" : "it"}: ${result.url}`
+            : ""),
+      );
+    } else {
+      await cancelLianaDraft(workflowId).catch(() => {});
+      await tg.answerCallbackQuery(cb.callbackQueryId, "Canceled");
+      await tg.editMessageText(cb.chatId, cb.messageId, "No problem — canceled.");
+    }
+  } catch (e) {
+    console.error("liana telegram callback:", e);
+    await tg.answerCallbackQuery(cb.callbackQueryId, "Something went wrong — try again.");
   }
 }
 
@@ -1080,13 +1220,34 @@ export async function onRunClosed(runId: string): Promise<void> {
   if (channels.includes("slack")) {
     try {
       if (!install || install.status !== "active" || !liana.slack_user_id) throw new Error("no active Slack install for this workflow");
-      let dm = liana.dm_channel_id;
-      if (!dm) {
-        dm = (await slack.conversationsOpen(install.bot_token, liana.slack_user_id)).id;
-        await db.setLianaDmChannel(liana.workflow_id, dm);
+      const slackUserId = liana.slack_user_id; // captured so the closure keeps the narrowed type
+      const openDm = async (): Promise<string> => {
+        let dm = liana.dm_channel_id;
+        if (!dm) {
+          dm = (await slack.conversationsOpen(install.bot_token, slackUserId)).id;
+          await db.setLianaDmChannel(liana.workflow_id, dm);
+        }
+        return dm;
+      };
+      // "Liana answers where you ask": deliver to the channel the workflow was invoked in (a fresh
+      // top-level message each run), unless it was created without an origin (web/legacy) or the
+      // owner switched it to DM-only on the web.
+      const useChannel = !liana.deliver_dm_override && !!liana.origin_channel_id;
+      const target = useChannel ? liana.origin_channel_id! : await openDm();
+      try {
+        await slack.chatPostMessage(install.bot_token, { channel: target, text: jungleToSlackText(body) });
+        if (owner) await remember(owner.id, `slack:${target}`, "assistant", stub);
+      } catch (e) {
+        // Bot removed from the channel / channel gone: fall back to the DM so the run isn't lost.
+        if (useChannel && e instanceof slack.SlackApiError && slack.FATAL_SLACK_ERRORS.has(e.code)) {
+          const dm = await openDm();
+          await slack.chatPostMessage(install.bot_token, { channel: dm, text: jungleToSlackText(body) });
+          if (owner) await remember(owner.id, `slack:${dm}`, "assistant", stub);
+          failures.push(`slack: couldn't post to channel (${e.code}) — delivered to DM instead`);
+        } else {
+          throw e;
+        }
       }
-      await slack.chatPostMessage(install.bot_token, { channel: dm, text: jungleToSlackText(body) });
-      if (owner) await remember(owner.id, `slack:${dm}`, "assistant", stub);
     } catch (e) {
       failures.push(`slack: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -1109,9 +1270,13 @@ export async function onRunClosed(runId: string): Promise<void> {
   if (channels.includes("telegram") && tg.telegramConfigured()) {
     try {
       const link = owner ? await db.getTelegramLink(owner.id) : null;
-      if (link?.verified_at && link.chat_id) {
-        await tg.sendTelegram(link.chat_id, body);
-        if (owner) await remember(owner.id, `telegram:${link.chat_id}`, "assistant", stub);
+      // Deliver to the chat the workflow was set up in (a group, or the DM), unless switched to
+      // DM-only on the web — then fall back to the owner's private link chat.
+      const groupChat = !liana.deliver_dm_override ? liana.origin_telegram_chat_id : null;
+      const chatId = groupChat ?? (link?.verified_at ? link.chat_id : null);
+      if (chatId) {
+        await tg.sendTelegram(chatId, body);
+        if (owner) await remember(owner.id, `telegram:${chatId}`, "assistant", stub);
       } else {
         failures.push("telegram: no linked Telegram account");
       }
@@ -1156,6 +1321,39 @@ export function promptOf(wf: Pick<db.WorkflowRow, "playbook">): string {
 // A run's deliverable text, for the web run history (same extraction as DM delivery).
 export async function runDeliverableText(run: db.WorkflowRunRow, wf: db.WorkflowRow): Promise<string> {
   return collectDeliverable(run, wf);
+}
+
+// Where a workflow's runs land, for the web app: a human label plus whether a channel destination
+// exists (so the "send to my DM instead" switch only shows when there's a channel to switch from)
+// and whether that switch is currently on. Resolves the Slack channel name; a DM-origin Slack
+// workflow reads as no-channel (nothing to switch away from).
+export async function describeDelivery(
+  row: db.LianaWorkflowRow,
+): Promise<{ dmOnly: boolean; hasChannel: boolean; label: string }> {
+  const dmOnly = row.deliver_dm_override;
+  const dmLabel = row.deliver_to?.includes("telegram")
+    ? "your Telegram chat"
+    : row.deliver_to?.includes("imessage")
+      ? "iMessage"
+      : "your Slack DM";
+
+  if (row.origin_channel_id && row.team_id) {
+    const install = await db.getLianaInstall(row.team_id);
+    if (install) {
+      try {
+        const info = await slack.conversationsInfo(install.bot_token, row.origin_channel_id);
+        if (info.is_im) return { dmOnly, hasChannel: false, label: dmLabel }; // DM origin — no channel
+        if (info.name) return { dmOnly, hasChannel: true, label: dmOnly ? dmLabel : `#${info.name}` };
+      } catch {
+        /* fall through */
+      }
+    }
+    return { dmOnly, hasChannel: true, label: dmOnly ? dmLabel : "the channel you set it up in" };
+  }
+  if (row.origin_telegram_chat_id) {
+    return { dmOnly, hasChannel: true, label: dmOnly ? dmLabel : "a Telegram group" };
+  }
+  return { dmOnly, hasChannel: false, label: dmLabel };
 }
 
 // The concrete model a workflow's agent runs on (null on drafts — the seat doesn't exist yet;

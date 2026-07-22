@@ -61,6 +61,56 @@ export async function sendTelegram(chatId: number | string, markdown: string): P
   }
 }
 
+// A single message carrying an inline keyboard — the draft confirm card (Create it / Cancel).
+// Groups can't use typed YES/NO (privacy mode drops bare replies), so the buttons carry the
+// workflow id in callback_data. Returns the message id so we can edit the card once acted on.
+// Cards are short (name + a few integration lines), so a single un-chunked message is safe.
+export interface TelegramButton {
+  text: string;
+  data: string; // callback_data, <=64 bytes
+}
+export async function sendTelegramButtons(
+  chatId: number | string,
+  markdown: string,
+  buttons: TelegramButton[],
+): Promise<number> {
+  if (!telegramConfigured()) throw new Error("Telegram provider not configured");
+  const reply_markup = { inline_keyboard: [buttons.map((b) => ({ text: b.text, callback_data: b.data }))] };
+  const html = mdToTelegramHtml(markdown);
+  try {
+    const m = await api<{ message_id: number }>("sendMessage", {
+      chat_id: chatId,
+      text: html,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      reply_markup,
+    });
+    return m.message_id;
+  } catch {
+    const m = await api<{ message_id: number }>("sendMessage", { chat_id: chatId, text: stripHtml(html), reply_markup });
+    return m.message_id;
+  }
+}
+
+// Acknowledge a tapped button (stops Telegram's spinner). Best-effort — a failed ack is cosmetic.
+export async function answerCallbackQuery(callbackQueryId: string, text?: string): Promise<void> {
+  await api("answerCallbackQuery", { callback_query_id: callbackQueryId, ...(text ? { text } : {}) }).catch(() => {});
+}
+
+// Replace a card's text after it's been acted on, dropping its buttons.
+export async function editMessageText(
+  chatId: number | string,
+  messageId: number,
+  markdown: string,
+): Promise<void> {
+  const html = mdToTelegramHtml(markdown);
+  try {
+    await api("editMessageText", { chat_id: chatId, message_id: messageId, text: html, parse_mode: "HTML", disable_web_page_preview: true });
+  } catch {
+    await api("editMessageText", { chat_id: chatId, message_id: messageId, text: stripHtml(html) }).catch(() => {});
+  }
+}
+
 function chunkText(text: string, max: number): string[] {
   if (text.length <= max) return [text];
   const chunks: string[] = [];
@@ -100,14 +150,20 @@ function stripHtml(html: string): string {
     .replace(/&amp;/g, "&");
 }
 
-// Parsed inbound message (private-chat text only; groups, edits, and media are ignored).
+// Parsed inbound message. Private chats and groups/supergroups (text only; edits and media are
+// ignored). Group addressing (was the bot @mentioned / replied to) is decided in the service
+// layer, which knows the bot's username — parseUpdate just carries the raw signals.
 export interface TelegramInbound {
   updateId: number;
   chatId: number;
+  chatType: "private" | "group" | "supergroup";
+  isGroup: boolean;
+  messageId: number;
   fromId: number;
   username: string | null;
-  text: string;
-  startPayload: string | null; // "/start <code>" deep-link payload, null for normal messages
+  text: string; // trimmed; @bot mention NOT yet stripped
+  replyToBot: boolean; // this message replies to one of the bot's own messages
+  startPayload: string | null; // "/start <code>" deep-link payload (private only), null otherwise
 }
 
 export function parseUpdate(payload: Record<string, unknown>): TelegramInbound | null {
@@ -117,16 +173,61 @@ export function parseUpdate(payload: Record<string, unknown>): TelegramInbound |
   const chat = msg.chat as { id?: number; type?: string } | undefined;
   const from = msg.from as { id?: number; username?: string; is_bot?: boolean } | undefined;
   const text = typeof msg.text === "string" ? msg.text.trim() : "";
-  if (!chat?.id || chat.type !== "private" || !from?.id || from.is_bot || !text) return null;
-  const start = /^\/start(?:\s+(\S+))?$/.exec(text);
+  const type = chat?.type;
+  const isGroup = type === "group" || type === "supergroup";
+  if (!chat?.id || (type !== "private" && !isGroup) || !from?.id || from.is_bot || !text) return null;
+  const replyTo = msg.reply_to_message as { from?: { is_bot?: boolean } } | undefined;
+  const start = type === "private" ? /^\/start(?:\s+(\S+))?$/.exec(text) : null;
   return {
     updateId,
     chatId: chat.id,
+    chatType: type as TelegramInbound["chatType"],
+    isGroup,
+    messageId: typeof msg.message_id === "number" ? msg.message_id : 0,
     fromId: from.id,
     username: from.username ?? null,
     text,
+    replyToBot: Boolean(replyTo?.from?.is_bot),
     startPayload: start ? (start[1] ?? "") : null,
   };
+}
+
+// A tapped inline button. callback_data is our own "<action>:<workflowId>" string.
+export interface TelegramCallback {
+  updateId: number;
+  callbackQueryId: string;
+  chatId: number;
+  messageId: number;
+  fromId: number;
+  data: string;
+}
+
+export function parseCallback(payload: Record<string, unknown>): TelegramCallback | null {
+  const updateId = payload.update_id;
+  const cq = payload.callback_query as Record<string, unknown> | undefined;
+  if (typeof updateId !== "number" || !cq || typeof cq.id !== "string") return null;
+  const from = cq.from as { id?: number } | undefined;
+  const msg = cq.message as { message_id?: number; chat?: { id?: number } } | undefined;
+  const data = typeof cq.data === "string" ? cq.data : "";
+  if (!from?.id || !msg?.chat?.id || typeof msg.message_id !== "number" || !data) return null;
+  return {
+    updateId,
+    callbackQueryId: cq.id,
+    chatId: msg.chat.id,
+    messageId: msg.message_id,
+    fromId: from.id,
+    data,
+  };
+}
+
+// Is a group message addressed to us? Privacy mode already narrows group updates to commands,
+// replies to us, and @bot mentions — but we double-check so a privacy-off bot doesn't treat all
+// group chatter as intake. Returns the text with the leading/embedded @bot mention removed.
+export function addressedInGroup(inbound: TelegramInbound, botUsername: string): { addressed: boolean; text: string } {
+  const mention = new RegExp(`@${botUsername}\\b`, "ig");
+  const mentioned = mention.test(inbound.text);
+  const text = inbound.text.replace(new RegExp(`@${botUsername}\\b`, "ig"), " ").replace(/\s+/g, " ").trim();
+  return { addressed: mentioned || inbound.replyToBot, text };
 }
 
 // Register the webhook with Telegram (called from the routes' one-time setup endpoint is
@@ -135,6 +236,6 @@ export async function ensureWebhook(publicUrl: string): Promise<void> {
   await api("setWebhook", {
     url: `${publicUrl.replace(/\/$/, "")}/api/liana/telegram/webhook`,
     secret_token: process.env.LIANA_TELEGRAM_WEBHOOK_SECRET,
-    allowed_updates: ["message"],
+    allowed_updates: ["message", "callback_query"],
   });
 }

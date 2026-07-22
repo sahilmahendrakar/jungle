@@ -147,6 +147,7 @@ export interface SlackConversation {
   is_private?: boolean;
   is_member?: boolean;
   is_archived?: boolean;
+  is_im?: boolean;
 }
 
 // Public channels the bot can see, following cursor pagination (guarded against runaway loops).

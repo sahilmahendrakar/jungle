@@ -194,7 +194,7 @@ export default function WorkflowPage() {
                 if (next.length) void patch({ deliverTo: next });
               }}
             />
-            Slack DM
+            Slack
           </label>
           {channels?.imessage &&
             (channels.imessage.verified ? (
@@ -238,6 +238,27 @@ export default function WorkflowPage() {
             ))}
         </span>
       </div>
+
+      {/* Where within the surface: the channel Liana was invoked in, or the owner's DM. Only shown
+          when there's a channel to switch away from — a DM-only workflow needs no control. */}
+      {wf.delivery.hasChannel && (
+        <div className="field-row">
+          <label>Where</label>
+          <span style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+            <span className="muted" style={{ fontSize: 13 }}>
+              Runs post to <strong>{wf.delivery.label}</strong>
+            </span>
+            <label className="check-chip">
+              <input
+                type="checkbox"
+                checked={wf.delivery.dmOnly}
+                onChange={(e) => void patch({ dmOnly: e.target.checked })}
+              />
+              Send to my DM instead
+            </label>
+          </span>
+        </div>
+      )}
 
       {models && wf.status !== "draft" && (
         <div className="field-row">
