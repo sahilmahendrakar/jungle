@@ -470,9 +470,56 @@ async function describeOwnerWorkflows(ownerParticipantId: string): Promise<Owned
   return out;
 }
 
+// "Mon, Jul 28 at 9:00 AM" — an absolute instant rendered in its display timezone.
+export function formatRunAt(runAt: string, tz: string): string {
+  const d = new Date(runAt);
+  if (Number.isNaN(d.getTime())) return runAt;
+  const validTz = isValidTimeZone(tz) ? tz : undefined;
+  const date = new Intl.DateTimeFormat("en-US", { timeZone: validTz, weekday: "short", month: "short", day: "numeric" }).format(d);
+  const time = new Intl.DateTimeFormat("en-US", { timeZone: validTz, hour: "numeric", minute: "2-digit", hour12: true }).format(d);
+  return `${date} at ${time}`;
+}
+
+// Convert a local wall-clock "YYYY-MM-DDTHH:MM" in IANA `tz` to an absolute ISO instant, or null
+// if unparseable or not in the future. No dep: we guess the instant as if the wall-clock were UTC,
+// then correct by tz's offset at that instant (one refinement pass covers DST boundaries).
+export function resolveRunAt(local: string, tz: string): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/.exec(String(local).trim());
+  if (!m || !isValidTimeZone(tz)) return null;
+  const [y, mo, d, h, mi] = m.slice(1).map(Number);
+  const asUTC = Date.UTC(y, mo - 1, d, h, mi);
+  const offset1 = tzOffsetMs(tz, new Date(asUTC));
+  const offset2 = tzOffsetMs(tz, new Date(asUTC - offset1));
+  const instant = asUTC - offset2;
+  if (Number.isNaN(instant) || instant <= Date.now()) return null;
+  return new Date(instant).toISOString();
+}
+
+// Milliseconds tz's wall-clock is ahead of UTC at instant `at`.
+function tzOffsetMs(tz: string, at: Date): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz, hour12: false,
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
+  }).formatToParts(at);
+  const p: Record<string, string> = {};
+  for (const x of parts) p[x.type] = x.value;
+  const hour = p.hour === "24" ? "00" : p.hour; // some engines emit hour 24 for midnight
+  const asIfUTC = Date.UTC(+p.year, +p.month - 1, +p.day, +hour, +p.minute, +p.second);
+  return asIfUTC - at.getTime();
+}
+
+// The trailing sentence after a confirm: an instant first run (recurring/on-demand) vs the
+// scheduled single run (one-time).
+function firstRunNotice(wf: Pick<db.WorkflowRow, "trigger">): string {
+  return wf.trigger.type === "once"
+    ? `I'll run it ${cadenceSentence(wf)}.`
+    : "I'm doing a first run now so you can see what it looks like.";
+}
+
 // "every day at 8:00 AM" — a human sentence for the common cron shapes, cron text otherwise.
 export function cadenceSentence(wf: Pick<db.WorkflowRow, "trigger">): string {
   const t = wf.trigger;
+  if (t.type === "once") return `once on ${formatRunAt(t.runAt, t.timezone)}`;
   if (t.type !== "schedule") return "on demand";
   const m = /^(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+(\*|[0-6](?:[,-][0-6])*)$/.exec(t.cron.trim());
   if (m) {
@@ -549,10 +596,14 @@ export async function createLianaDraft(args: {
 }): Promise<{ wf: db.WorkflowRow; liana: db.LianaWorkflowRow }> {
   const { owner, spec } = args;
 
-  // Cadence: bad cron/timezone from intake degrades to on-demand rather than failing the flow.
+  // Cadence: bad cron/runAt/timezone from intake degrades to on-demand rather than failing the flow.
+  const tz = spec.timezone && isValidTimeZone(spec.timezone) ? spec.timezone : (args.defaultTz ?? DEFAULT_TZ);
   let trigger: db.WorkflowRow["trigger"] = { type: "manual" };
-  if (spec.cron) {
-    const tz = spec.timezone && isValidTimeZone(spec.timezone) ? spec.timezone : (args.defaultTz ?? DEFAULT_TZ);
+  if (spec.runAt) {
+    const runAt = resolveRunAt(spec.runAt, tz);
+    if (runAt) trigger = { type: "once", runAt, timezone: tz };
+    else console.error(`liana: intake produced invalid/past runAt ${JSON.stringify(spec.runAt)}; falling back to manual`);
+  } else if (spec.cron) {
     try {
       computeNextRun(spec.cron, tz);
       trigger = { type: "schedule", cron: spec.cron, timezone: tz };
@@ -741,7 +792,7 @@ export async function handleInteractivity(payload: BlockActionPayload): Promise<
         replace_original: true,
         text:
           `:seedling: *${result.wf.name}* is live — ${cadenceSentence(result.wf)}. ` +
-          `I'm doing a first run now so you can see what it looks like. ${phrase}` +
+          `${firstRunNotice(result.wf)} ${phrase}` +
           (result.unconnected.length
             ? `\n:link: Heads up: connect ${result.unconnected.map((k) => KEY_LABELS[k] ?? k).join(", ")} in <${result.url}|the web app> so I can use ${result.unconnected.length > 1 ? "them" : "it"}.`
             : ""),
@@ -789,11 +840,15 @@ export async function confirmLianaWorkflow(
     await db.updateAgentConfig(seatId, { model: await workflowModelFor(owner.id) });
   }
 
-  // Instant first run: never make someone wait until 8am for their first payoff.
-  try {
-    await workflows.startRun(finalized, "manual");
-  } catch (e) {
-    console.error(`liana: first run of ${workflowId} failed to start:`, e);
+  // Instant first run: never make someone wait until 8am for their first payoff. A one-time
+  // workflow is the exception — its whole point is to fire once at the chosen time, so we let the
+  // backing schedule (created in finalize) do it rather than running immediately.
+  if (finalized.trigger.type !== "once") {
+    try {
+      await workflows.startRun(finalized, "manual");
+    } catch (e) {
+      console.error(`liana: first run of ${workflowId} failed to start:`, e);
+    }
   }
 
   const statuses = await connectionStatus(owner, finalized.roster[0]?.integrations ?? []);
@@ -904,7 +959,7 @@ async function handleConversationalTurn(text: string, ctx: ConversationalCtx): P
       const result = await confirmLianaWorkflow(draftId);
       await replyAndRemember(
         ctx,
-        `🌿 ${result.wf.name} is live — ${cadenceSentence(result.wf)}. I'm doing a first run now.` +
+        `🌿 ${result.wf.name} is live — ${cadenceSentence(result.wf)}. ${firstRunNotice(result.wf)}` +
           (result.unconnected.length
             ? `\nHeads up: connect ${result.unconnected.map((k) => KEY_LABELS[k] ?? k).join(", ")} so I can use ${result.unconnected.length > 1 ? "them" : "it"}: ${result.url}`
             : ""),
@@ -1182,7 +1237,7 @@ export async function processTelegramCallback(cb: tg.TelegramCallback): Promise<
       await tg.editMessageText(
         cb.chatId,
         cb.messageId,
-        `🌿 ${result.wf.name} is live — ${cadenceSentence(result.wf)}. I'm doing a first run now.` +
+        `🌿 ${result.wf.name} is live — ${cadenceSentence(result.wf)}. ${firstRunNotice(result.wf)}` +
           (result.unconnected.length
             ? `\nHeads up: connect ${result.unconnected.map((k) => KEY_LABELS[k] ?? k).join(", ")} so I can use ${result.unconnected.length > 1 ? "them" : "it"}: ${result.url}`
             : ""),
@@ -1430,12 +1485,16 @@ export async function editLianaWorkflow(
     name?: string;
     prompt?: string;
     cron?: string | null; // null = switch to on-demand
+    runAt?: string | null; // local "YYYY-MM-DDTHH:MM" for a one-time run; null = switch to on-demand
     timezone?: string;
     paused?: boolean;
     deliverTo?: string[];
     integrations?: string[];
   },
 ): Promise<db.WorkflowRow> {
+  if (args.cron != null && args.runAt != null) {
+    throw new ApiError(400, "a workflow is either recurring (cron) or one-time (runAt), not both");
+  }
   if (args.deliverTo !== undefined) {
     const channels = [...new Set(args.deliverTo)];
     if (!channels.length) throw new ApiError(400, "pick at least one delivery channel");
@@ -1511,6 +1570,45 @@ export async function editLianaWorkflow(
           workflowId: wf.id,
         });
       }
+      // Re-scheduling a completed one-time workflow revives it.
+      if (wf.status === "completed") patch.status = "active";
+    }
+  }
+
+  // One-time cadence (mirrors the cron branch): a local wall-clock + tz resolved server-side to an
+  // absolute instant, backed by a one-shot schedules row (run_at set, cron/timezone null).
+  if (args.runAt !== undefined) {
+    if (args.runAt === null) {
+      patch.trigger = { type: "manual" };
+      await db.pool.query(`delete from schedules where workflow_id = $1`, [wf.id]);
+    } else {
+      const tz =
+        args.timezone && isValidTimeZone(args.timezone)
+          ? args.timezone
+          : wf.trigger.type === "once" || wf.trigger.type === "schedule"
+            ? wf.trigger.timezone
+            : DEFAULT_TZ;
+      const runAt = resolveRunAt(args.runAt, tz);
+      if (!runAt) throw new ApiError(400, "pick a future date and time");
+      patch.trigger = { type: "once", runAt, timezone: tz };
+      const existing = await db.getWorkflowBackingSchedule(wf.id);
+      if (existing) {
+        await db.updateBackingScheduleOnce(wf.id, runAt);
+      } else if (wf.status !== "draft" && wf.home_channel_id && wf.roster[0]?.participant_id) {
+        await db.createSchedule({
+          workspaceId: wf.workspace_id,
+          agentId: wf.roster[0].participant_id,
+          channelId: wf.home_channel_id,
+          createdBy: owner.id,
+          prompt: `[workflow trigger] ${wf.name}`,
+          cron: null,
+          timezone: null,
+          runAt,
+          nextRunAt: runAt,
+          workflowId: wf.id,
+        });
+      }
+      if (wf.status === "completed") patch.status = "active";
     }
   }
 

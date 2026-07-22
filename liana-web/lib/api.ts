@@ -58,9 +58,10 @@ export interface WireRun {
 export interface WireWorkflow {
   id: string;
   name: string;
-  status: "draft" | "active" | "paused";
+  status: "draft" | "active" | "paused" | "completed";
   prompt: string;
-  trigger: { type: string; cron?: string; timezone?: string };
+  // trigger.runAt is an absolute ISO timestamp for one-time ('once') workflows.
+  trigger: { type: string; cron?: string; runAt?: string; timezone?: string };
   cadence: string;
   integrations: string[];
   model: string | null; // null on drafts (agent not materialized yet)

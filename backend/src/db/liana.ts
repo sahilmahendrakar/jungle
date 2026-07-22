@@ -478,7 +478,9 @@ export async function recentLianaMessages(
 }
 
 // Cadence edit for a workflow's backing schedule row (web PATCH). The ticker reads cron/timezone
-// on each fire, so updating the row + next_run_at is the whole change.
+// on each fire, so updating the row + next_run_at is the whole change. run_at is nulled so a row
+// that was previously one-shot flips cleanly back to recurring (the mig-012 check requires
+// cron+timezone set XOR run_at set).
 export async function updateBackingScheduleCadence(
   workflowId: string,
   cron: string,
@@ -486,7 +488,17 @@ export async function updateBackingScheduleCadence(
   nextRunAt: string,
 ): Promise<void> {
   await pool.query(
-    `update schedules set cron = $2, timezone = $3, next_run_at = $4 where workflow_id = $1`,
+    `update schedules set cron = $2, timezone = $3, run_at = null, next_run_at = $4 where workflow_id = $1`,
     [workflowId, cron, timezone, nextRunAt],
+  );
+}
+
+// Flip a workflow's backing schedule row to a one-shot at `runAt` (recurring -> one-time edit).
+// cron/timezone are nulled to satisfy the mig-012 check constraint; next_run_at = run_at so the
+// ticker fires it once, then completes it.
+export async function updateBackingScheduleOnce(workflowId: string, runAt: string): Promise<void> {
+  await pool.query(
+    `update schedules set cron = null, timezone = null, run_at = $2, next_run_at = $2 where workflow_id = $1`,
+    [workflowId, runAt],
   );
 }

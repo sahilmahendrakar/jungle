@@ -33,6 +33,9 @@ export interface IntakeWorkflowSpec {
   prompt: string;
   integrations: string[];
   cron: string | null;
+  // Local datetime "YYYY-MM-DDTHH:MM" for a ONE-TIME run at a specific future time; null otherwise.
+  // At most one of cron / runAt is non-null (both null = run on demand).
+  runAt: string | null;
   timezone: string | null;
   repo: string | null;
 }
@@ -71,18 +74,25 @@ const OUTPUT_SCHEMA = {
             },
             cron: {
               anyOf: [{ type: "string" }, { type: "null" }],
-              description: "5-field cron for recurring workflows, null for run-on-demand only.",
+              description: "5-field cron for RECURRING workflows, null otherwise.",
+            },
+            runAt: {
+              anyOf: [{ type: "string" }, { type: "null" }],
+              description:
+                "Local datetime 'YYYY-MM-DDTHH:MM' for a ONE-TIME run at a specific future time " +
+                "(e.g. 'tomorrow at 3pm', 'next Monday at 9am'), resolved in the user's timezone " +
+                "from today's date. null otherwise. At most one of cron / runAt is non-null.",
             },
             timezone: {
               anyOf: [{ type: "string" }, { type: "null" }],
-              description: "IANA timezone for the cron. Default to the user's Slack timezone.",
+              description: "IANA timezone for cron or runAt. Default to the user's Slack timezone.",
             },
             repo: {
               anyOf: [{ type: "string" }, { type: "null" }],
               description: "owner/name GitHub repo, only when the user names one and github is used.",
             },
           },
-          required: ["name", "prompt", "integrations", "cron", "timezone", "repo"],
+          required: ["name", "prompt", "integrations", "cron", "runAt", "timezone", "repo"],
           additionalProperties: false,
         },
         { type: "null" },
@@ -100,10 +110,15 @@ function systemPrompt(ctx: IntakeContext): string {
     `briefing across email/calendar/GitHub at 8am; a weekly Linear digest; a meeting-prep note ` +
     `before each day. You are the intake step: parse the user's message into a decision.\n\n` +
     `Intents:\n` +
-    `- create_workflow: the user is asking for something automatable (recurring or on-demand). ` +
-    `Fill the workflow object. Recurring language ("every morning", "weekly") -> a 5-field cron in ` +
-    `the user's timezone; workflows may fire at most every 30 minutes. One-off or on-demand asks ` +
-    `("whenever I say", "on demand") -> cron null.\n` +
+    `- create_workflow: the user is asking for something automatable (recurring, one-time, or ` +
+    `on-demand). Fill the workflow object. Choose the cadence:\n` +
+    `  • Recurring language ("every morning", "weekly", "each weekday at 8am") -> a 5-field cron in ` +
+    `the user's timezone (runAt null); workflows may fire at most every 30 minutes.\n` +
+    `  • A specific future time ("tomorrow at 3pm", "next Monday at 9am", "on Friday at noon", ` +
+    `"in 2 hours") -> runAt as local "YYYY-MM-DDTHH:MM" resolved from today's date in the user's ` +
+    `timezone (cron null). Compute the calendar date carefully from today's date and weekday below.\n` +
+    `  • Open-ended / on-demand ("whenever I say", "on demand", no time given) -> both cron and ` +
+    `runAt null.\n` +
     `- list_workflows: the user asks what workflows they have.\n` +
     `- chat: anything else (greetings, questions about what you can do). Answer briefly and steer ` +
     `toward what you're for. You cannot do ad-hoc tasks yourself — you only set up workflows.\n\n` +
@@ -228,6 +243,9 @@ export async function runIntake(message: string, ctx: IntakeContext, model: stri
     parsed.workflow.integrations = (parsed.workflow.integrations ?? []).filter((k) =>
       (INTAKE_INTEGRATION_KEYS as readonly string[]).includes(k),
     );
+    // Cron and runAt are mutually exclusive; if a looser model returns both, one-time wins.
+    if (parsed.workflow.runAt) parsed.workflow.cron = null;
+    else if (parsed.workflow.runAt === undefined) parsed.workflow.runAt = null;
   }
   return parsed;
 }

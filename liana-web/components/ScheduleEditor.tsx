@@ -2,13 +2,22 @@
 
 import { useMemo, useState } from "react";
 
-// The schedule editor: dropdowns that read as a sentence — "Every day at 8:00 AM in <tz>" —
-// composing to cron underneath. Covers the shapes people actually schedule (daily, weekdays,
-// chosen days, monthly day-N, every N hours, on demand); anything else round-trips through the
-// Advanced cron field, so no expressible schedule is lost. Cron itself never appears unless you
+// The schedule editor: dropdowns that read as a sentence — "Every day at 8:00 AM in <tz>" or
+// "Once on <date> at <time> in <tz>" — composing to a cron, a one-time runAt, or on-demand
+// underneath. Covers the shapes people actually schedule (daily, weekdays, chosen days, monthly
+// day-N, every N hours, a single future time, on demand); any cron it can't round-trip lands in
+// the Advanced field, so no expressible schedule is lost. Cron itself never appears unless you
 // open Advanced.
 
-type Freq = "daily" | "weekdays" | "weekly" | "monthly" | "hourly" | "manual" | "custom";
+type Freq = "daily" | "weekdays" | "weekly" | "monthly" | "hourly" | "once" | "manual" | "custom";
+
+// What the editor emits on save. The parent maps it to a PATCH: cron+timezone (recurring),
+// runAt+timezone (one-time; runAt is a LOCAL "YYYY-MM-DDTHH:MM" the server resolves in the tz),
+// or cron:null (on demand).
+export type ScheduleValue =
+  | { kind: "cron"; cron: string; timezone: string }
+  | { kind: "once"; runAt: string; timezone: string }
+  | { kind: "manual" };
 
 interface ScheduleState {
   freq: Freq;
@@ -18,6 +27,7 @@ interface ScheduleState {
   days: number[]; // 0=Sun..6=Sat, for freq=weekly
   dayOfMonth: number; // 1-28, for freq=monthly
   everyHours: number; // for freq=hourly
+  onceLocal: string; // "YYYY-MM-DDTHH:MM", for freq=once
   customCron: string; // for freq=custom
   timezone: string;
 }
@@ -31,44 +41,63 @@ function to24h(hour12: number, ampm: "AM" | "PM"): number {
 function from24h(h: number): { hour12: number; ampm: "AM" | "PM" } {
   return { hour12: h % 12 === 0 ? 12 : h % 12, ampm: h < 12 ? "AM" : "PM" };
 }
+function pad(n: number): string {
+  return String(n).padStart(2, "0");
+}
 
-// State -> cron (null = on demand). Weekly with no days selected composes nothing (caller guards).
-function toCron(s: ScheduleState): string | null {
+// An absolute ISO instant -> the "YYYY-MM-DDTHH:MM" wall-clock it reads as in `tz`, for the
+// datetime-local input. Mirrors the server's tz handling so the value round-trips unchanged.
+function isoToLocalInput(iso: string, tz: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return defaultOnceLocal();
+  try {
+    const p: Record<string, string> = {};
+    for (const part of new Intl.DateTimeFormat("en-CA", {
+      timeZone: tz, hour12: false,
+      year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+    }).formatToParts(d)) {
+      p[part.type] = part.value;
+    }
+    const hour = p.hour === "24" ? "00" : p.hour;
+    return `${p.year}-${p.month}-${p.day}T${hour}:${p.minute}`;
+  } catch {
+    return defaultOnceLocal();
+  }
+}
+
+// Default one-time target when there's nothing to seed from: tomorrow at 9:00 (browser-local).
+function defaultOnceLocal(): string {
+  const d = new Date(Date.now() + 24 * 3600_000);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T09:00`;
+}
+
+// State -> the value to save. Weekly with no days selected composes nothing (caller guards).
+function toValue(s: ScheduleState): ScheduleValue {
   const m = s.minute;
   const h = to24h(s.hour12, s.ampm);
   switch (s.freq) {
     case "manual":
-      return null;
+      return { kind: "manual" };
+    case "once":
+      return { kind: "once", runAt: s.onceLocal, timezone: s.timezone };
     case "daily":
-      return `${m} ${h} * * *`;
+      return { kind: "cron", cron: `${m} ${h} * * *`, timezone: s.timezone };
     case "weekdays":
-      return `${m} ${h} * * 1-5`;
+      return { kind: "cron", cron: `${m} ${h} * * 1-5`, timezone: s.timezone };
     case "weekly":
-      return `${m} ${h} * * ${[...s.days].sort((a, b) => a - b).join(",")}`;
+      return { kind: "cron", cron: `${m} ${h} * * ${[...s.days].sort((a, b) => a - b).join(",")}`, timezone: s.timezone };
     case "monthly":
-      return `${m} ${h} ${s.dayOfMonth} * *`;
+      return { kind: "cron", cron: `${m} ${h} ${s.dayOfMonth} * *`, timezone: s.timezone };
     case "hourly":
-      return s.everyHours === 1 ? `${m} * * * *` : `${m} */${s.everyHours} * * *`;
+      return { kind: "cron", cron: s.everyHours === 1 ? `${m} * * * *` : `${m} */${s.everyHours} * * *`, timezone: s.timezone };
     case "custom":
-      return s.customCron.trim() || null;
+      return s.customCron.trim() ? { kind: "cron", cron: s.customCron.trim(), timezone: s.timezone } : { kind: "manual" };
   }
 }
 
-// Cron -> state. Recognizes exactly the shapes toCron produces; anything else lands in Advanced
+// Cron -> state. Recognizes exactly the shapes toValue produces; anything else lands in Advanced
 // with the raw expression preserved.
-function parseCron(cron: string | null, timezone: string): ScheduleState {
-  const base: ScheduleState = {
-    freq: "manual",
-    hour12: 8,
-    minute: 0,
-    ampm: "AM",
-    days: [1],
-    dayOfMonth: 1,
-    everyHours: 6,
-    customCron: "",
-    timezone,
-  };
-  if (!cron) return base;
+function parseCron(cron: string, base: ScheduleState): ScheduleState {
   const parts = cron.trim().split(/\s+/);
   if (parts.length === 5) {
     const [min, hour, dom, mon, dow] = parts;
@@ -97,24 +126,55 @@ function parseCron(cron: string | null, timezone: string): ScheduleState {
   return { ...base, freq: "custom", customCron: cron };
 }
 
+function initialState(
+  trigger: { type: string; cron?: string; runAt?: string; timezone?: string },
+  fallbackTz: string,
+): ScheduleState {
+  const tz = trigger.timezone || fallbackTz;
+  const base: ScheduleState = {
+    freq: "manual",
+    hour12: 8,
+    minute: 0,
+    ampm: "AM",
+    days: [1],
+    dayOfMonth: 1,
+    everyHours: 6,
+    onceLocal: defaultOnceLocal(),
+    customCron: "",
+    timezone: tz,
+  };
+  if (trigger.type === "schedule" && trigger.cron) return parseCron(trigger.cron, base);
+  if (trigger.type === "once" && trigger.runAt) return { ...base, freq: "once", onceLocal: isoToLocalInput(trigger.runAt, tz) };
+  return base;
+}
+
 const TIMEZONES: string[] =
   typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : ["America/Los_Angeles", "America/New_York", "UTC"];
 
+function sameAsSaved(v: ScheduleValue, trigger: { type: string; cron?: string; runAt?: string; timezone?: string }): boolean {
+  if (v.kind === "manual") return trigger.type !== "schedule" && trigger.type !== "once";
+  if (v.kind === "cron") return trigger.type === "schedule" && trigger.cron === v.cron && trigger.timezone === v.timezone;
+  // 'once': the stored runAt is absolute while our value is a local wall-clock — treat any once
+  // edit as dirty (cheap; an exact compare would need a full tz resolve).
+  return false;
+}
+
 export default function ScheduleEditor(props: {
-  cron: string | null;
-  timezone: string | null;
-  onSave: (cron: string | null, timezone?: string) => void;
+  trigger: { type: string; cron?: string; runAt?: string; timezone?: string };
+  onSave: (value: ScheduleValue) => void;
 }) {
-  const initialTz = props.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const initial = useMemo(() => parseCron(props.cron, initialTz), [props.cron, initialTz]);
+  const fallbackTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const initial = useMemo(() => initialState(props.trigger, fallbackTz), [props.trigger, fallbackTz]);
   const [s, setS] = useState<ScheduleState>(initial);
 
   const set = (patch: Partial<ScheduleState>) => setS((prev) => ({ ...prev, ...patch }));
 
-  const composed = toCron(s);
-  const incomplete = s.freq === "weekly" && s.days.length === 0;
-  const dirty = composed !== props.cron || (composed !== null && s.timezone !== (props.timezone ?? initialTz));
+  const value = toValue(s);
+  const incompleteDays = s.freq === "weekly" && s.days.length === 0;
+  const oncePast = s.freq === "once" && new Date(s.onceLocal).getTime() <= Date.now();
+  const dirty = !sameAsSaved(value, props.trigger);
   const showsTime = s.freq === "daily" || s.freq === "weekdays" || s.freq === "weekly" || s.freq === "monthly";
+  const showsTz = value.kind !== "manual" && s.freq !== "custom";
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -125,9 +185,21 @@ export default function ScheduleEditor(props: {
           <option value="weekly">Specific days</option>
           <option value="monthly">Monthly</option>
           <option value="hourly">Every few hours</option>
+          <option value="once">Just once</option>
           <option value="manual">On demand only</option>
           <option value="custom">Advanced (cron)</option>
         </select>
+
+        {s.freq === "once" && (
+          <>
+            <span className="muted">on</span>
+            <input
+              type="datetime-local"
+              value={s.onceLocal}
+              onChange={(e) => set({ onceLocal: e.target.value })}
+            />
+          </>
+        )}
 
         {s.freq === "weekly" && (
           <span style={{ display: "flex", gap: 4 }}>
@@ -213,7 +285,7 @@ export default function ScheduleEditor(props: {
           />
         )}
 
-        {composed !== null && s.freq !== "custom" && (
+        {showsTz && (
           <>
             <span className="muted">in</span>
             <select value={s.timezone} onChange={(e) => set({ timezone: e.target.value })} style={{ maxWidth: 180 }}>
@@ -228,14 +300,15 @@ export default function ScheduleEditor(props: {
         )}
       </span>
 
-      {dirty && !incomplete && (
+      {dirty && !incompleteDays && !oncePast && (
         <span>
-          <button className="btn primary" onClick={() => props.onSave(composed, composed ? s.timezone : undefined)}>
+          <button className="btn primary" onClick={() => props.onSave(value)}>
             Save schedule
           </button>
         </span>
       )}
-      {incomplete && <span className="muted" style={{ fontSize: 13 }}>Pick at least one day.</span>}
+      {incompleteDays && <span className="muted" style={{ fontSize: 13 }}>Pick at least one day.</span>}
+      {oncePast && <span className="muted" style={{ fontSize: 13 }}>Pick a time in the future.</span>}
     </div>
   );
 }

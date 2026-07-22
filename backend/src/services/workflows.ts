@@ -426,9 +426,11 @@ export async function finalizeWorkflow(
   await db.addChannelMember(homeChannelId!, actor.id);
   broadcastWorkspace(wf.workspace_id, { type: "members_changed", channelId: homeChannelId! });
 
-  // 4. Backing schedule for cron triggers (ticker branches on workflow_id — see scheduler.ts).
+  // 4. Backing schedule for scheduled/one-time triggers (ticker branches on workflow_id — see
+  // scheduler.ts). A 'once' trigger backs a one-shot row (run_at set, cron/timezone null): the
+  // ticker fires it a single time, then next_run_at goes null and the run-close hook completes it.
   const trigger = wf.trigger;
-  if (trigger.type === "schedule") {
+  if (trigger.type === "schedule" || trigger.type === "once") {
     const existing = await db.getWorkflowBackingSchedule(wf.id);
     if (!existing) {
       await db.createSchedule({
@@ -437,10 +439,10 @@ export async function finalizeWorkflow(
         channelId: homeChannelId!,
         createdBy: actor.id,
         prompt: `[workflow trigger] ${wf.name}`, // never dispatched as a prompt; ticker branches
-        cron: trigger.cron,
-        timezone: trigger.timezone,
-        runAt: null,
-        nextRunAt: computeNextRun(trigger.cron, trigger.timezone),
+        cron: trigger.type === "schedule" ? trigger.cron : null,
+        timezone: trigger.type === "schedule" ? trigger.timezone : null,
+        runAt: trigger.type === "once" ? trigger.runAt : null,
+        nextRunAt: trigger.type === "schedule" ? computeNextRun(trigger.cron, trigger.timezone) : trigger.runAt,
         workflowId: wf.id,
       });
     }
@@ -610,6 +612,19 @@ export async function completeRunFromMessage(msg: {
   // Liana-owned workflows deliver the run's output to the owner's Slack DM. Dynamic import —
   // liana.ts statically imports this module, so a static import here would cycle.
   void import("./liana").then((l) => l.onRunClosed(run.id)).catch((e) => console.error("liana delivery:", e));
+  await completeOnceWorkflow(wf);
+}
+
+// A one-time ('once') workflow fires exactly one run; when that run closes it is done, so move it
+// to the terminal 'completed' status (its backing schedule already won't refire — the ticker
+// nulled next_run_at after the single fire). No-op for recurring/manual/draft workflows.
+async function completeOnceWorkflow(wf: db.WorkflowRow): Promise<void> {
+  if (wf.trigger.type !== "once" || wf.status === "completed" || wf.status === "draft") return;
+  await db.updateWorkflow(wf.id, { status: "completed" });
+  // Disarm the backing schedule so it can never refire — covers a manual Run-now that closed the
+  // run before the scheduled time (the ticker nulls next_run_at itself when it does the firing).
+  await db.pool.query(`update schedules set next_run_at = null where workflow_id = $1`, [wf.id]);
+  broadcastWorkspace(wf.workspace_id, { type: "workflow_changed", workflowId: wf.id, action: "updated" });
 }
 
 // The workflow section of a member agent's system prompt: its role, the playbook, the team, and
@@ -918,6 +933,7 @@ async function sweep(): Promise<void> {
       broadcastWorkspace(run.workspace_id, { type: "workflow_run_changed", workflowId: wf.id, runId: run.id });
       // Quiescence-done still counts as a close for Liana DM delivery (see completeRunFromMessage).
       void import("./liana").then((l) => l.onRunClosed(run.id)).catch((e) => console.error("liana delivery:", e));
+      await completeOnceWorkflow(wf);
     } else if (run.status === "running" && idleMinutes >= WORKFLOW_STALL_MINUTES) {
       await db.setWorkflowRunStatus(run.id, "stalled");
       broadcastWorkspace(run.workspace_id, { type: "workflow_run_changed", workflowId: wf.id, runId: run.id });
@@ -944,6 +960,7 @@ async function sweep(): Promise<void> {
 
 export async function setWorkflowPaused(wf: db.WorkflowRow, paused: boolean): Promise<db.WorkflowRow> {
   if (wf.status === "draft") throw new ApiError(400, "drafts can't be paused — finalize the workflow first");
+  if (wf.status === "completed") throw new ApiError(400, "this one-time workflow has already run");
   const status = paused ? "paused" : "active";
   const backing = await db.getWorkflowBackingSchedule(wf.id);
   if (backing) {

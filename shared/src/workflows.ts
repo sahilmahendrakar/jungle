@@ -7,11 +7,15 @@
 // here only make the team legible and its runs observable.
 
 // How a workflow starts a run. 'schedule' rides the existing schedules ticker (a backing
-// schedules row with workflow_id set); 'manual' is the Run-now button; 'channel_message' means
-// an @mention of the intake agent (roster[0]) in the home channel starts a run rooted at that
-// message's thread. Every workflow also supports Run-now regardless of trigger type.
+// schedules row with workflow_id set); 'once' is a one-shot at a specific absolute time (a
+// backing schedules row with run_at set — the ticker fires it once, then next_run_at goes null
+// and the workflow moves to status 'completed'); 'manual' is the Run-now button; 'channel_message'
+// means an @mention of the intake agent (roster[0]) in the home channel starts a run rooted at
+// that message's thread. Every workflow also supports Run-now regardless of trigger type.
+// For 'once', runAt is an absolute ISO timestamp; timezone is retained for human-readable display.
 export type WorkflowTrigger =
   | { type: "schedule"; cron: string; timezone: string }
+  | { type: "once"; runAt: string; timezone: string }
   | { type: "manual" }
   | { type: "channel_message" };
 
@@ -35,7 +39,9 @@ export interface WorkflowRole {
   edge_label?: string;
 }
 
-export type WorkflowStatus = "draft" | "active" | "paused";
+// 'completed' is terminal: a 'once' workflow that has fired its single run. It stays in the list
+// (its run output is useful history) but is inert — no schedule, not pausable.
+export type WorkflowStatus = "draft" | "active" | "paused" | "completed";
 
 // The workflow object as sent to clients.
 export interface Workflow {

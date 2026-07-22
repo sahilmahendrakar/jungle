@@ -153,6 +153,29 @@ a.card-link:hover .card {
 .dot.draft {
   background: var(--accent);
 }
+.dot.completed {
+  background: #9aa79a;
+}
+
+/* A finished one-time workflow reads as quiet history — dimmed until hovered. */
+.card-done {
+  opacity: 0.7;
+}
+a.card-link:hover .card-done {
+  opacity: 1;
+}
+
+/* Small countdown pill on an upcoming one-time card, e.g. "in 3 days". */
+.pill-when {
+  margin-left: auto;
+  font-family: var(--font-ui);
+  font-weight: 500;
+  font-size: 12px;
+  color: var(--leaf);
+  background: var(--leaf-soft);
+  border-radius: 999px;
+  padding: 2px 10px;
+}
 
 /* --- Chips --- */
 .chips {
@@ -394,6 +417,22 @@ a.card-link:hover .card {
 }
 .model-select:focus,
 .field-row select:focus {
+  outline: none;
+  border-color: var(--leaf);
+}
+/* The schedule editor's free-form inputs (one-time datetime, Advanced cron) match the selects. */
+.field-row input[type="datetime-local"],
+.field-row input[type="text"] {
+  font-family: var(--font-ui);
+  font-size: 14px;
+  padding: 6px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--ink);
+}
+.field-row input[type="datetime-local"]:focus,
+.field-row input[type="text"]:focus {
   outline: none;
   border-color: var(--leaf);
 }

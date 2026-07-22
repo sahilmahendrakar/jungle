@@ -516,7 +516,7 @@ create table if not exists workflows (
   name            text not null,
   description     text not null default '',
   emoji           text,
-  status          text not null default 'draft' check (status in ('draft','active','paused')),
+  status          text not null default 'draft' check (status in ('draft','active','paused','completed')),
   template_id     text,
   home_channel_id uuid references channels(id) on delete set null,
   trigger         jsonb not null default '{"type":"manual"}'::jsonb,

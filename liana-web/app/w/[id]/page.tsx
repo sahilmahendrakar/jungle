@@ -5,7 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import ScheduleEditor from "@/components/ScheduleEditor";
 import { api, INTEGRATION_LABELS, type WireChannels, type WireConnection, type WireModels, type WireRun, type WireWorkflow } from "@/lib/api";
-import { capitalize, timeAgo } from "@/lib/format";
+import { capitalize, countdown, friendlyDate, timeAgo } from "@/lib/format";
 
 // Workflow detail: the prompt as editable prose (the centerpiece), the cadence as a sentence,
 // integrations with connect state, run-now, and the run history as a stem of nodes.
@@ -113,10 +113,23 @@ export default function WorkflowPage() {
         {wf.name}
       </h1>
       <p className="page-sub">
-        {capitalize(wf.cadence)}
-        {wf.nextRunAt && wf.status === "active" ? ` · next run ${new Date(wf.nextRunAt).toLocaleString()}` : ""}
-        {wf.status === "paused" ? " · paused" : ""}
-        {wf.status === "draft" ? " · draft — confirm it in Slack first" : ""}
+        {wf.status === "completed" ? (
+          <>Ran {wf.lastRun ? friendlyDate(wf.lastRun.endedAt ?? wf.lastRun.startedAt) : "—"} · done</>
+        ) : (
+          <>
+            {capitalize(wf.cadence)}
+            {/* One-time: the cadence already names the date, so add just a countdown. Recurring:
+                surface the next absolute fire time. */}
+            {wf.trigger.type === "once" && wf.nextRunAt && wf.status === "active" && countdown(wf.nextRunAt)
+              ? ` · ${countdown(wf.nextRunAt)}`
+              : ""}
+            {wf.trigger.type !== "once" && wf.nextRunAt && wf.status === "active"
+              ? ` · next run ${friendlyDate(wf.nextRunAt)}`
+              : ""}
+            {wf.status === "paused" ? " · paused" : ""}
+            {wf.status === "draft" ? " · draft — confirm it where you asked" : ""}
+          </>
+        )}
       </p>
 
       <div className="prompt-frame">
@@ -173,10 +186,17 @@ export default function WorkflowPage() {
       <div className="field-row" style={{ marginTop: 22, alignItems: "flex-start" }}>
         <label style={{ paddingTop: 8 }}>Schedule</label>
         <ScheduleEditor
-          key={`${wf.trigger.type}:${wf.trigger.cron ?? ""}:${wf.trigger.timezone ?? ""}`}
-          cron={wf.trigger.type === "schedule" ? (wf.trigger.cron ?? null) : null}
-          timezone={wf.trigger.type === "schedule" ? (wf.trigger.timezone ?? null) : null}
-          onSave={(cron, timezone) => void patch(cron === null ? { cron: null } : { cron, timezone })}
+          key={`${wf.trigger.type}:${wf.trigger.cron ?? wf.trigger.runAt ?? ""}:${wf.trigger.timezone ?? ""}`}
+          trigger={wf.trigger}
+          onSave={(v) =>
+            void patch(
+              v.kind === "manual"
+                ? { cron: null }
+                : v.kind === "cron"
+                  ? { cron: v.cron, timezone: v.timezone }
+                  : { runAt: v.runAt, timezone: v.timezone },
+            )
+          }
         />
       </div>
 
@@ -283,10 +303,14 @@ export default function WorkflowPage() {
       )}
 
       <div style={{ display: "flex", gap: 10, marginTop: 22 }}>
-        <button className="btn primary" onClick={() => void runNow()} disabled={runningNow || wf.status === "draft"}>
+        <button
+          className="btn primary"
+          onClick={() => void runNow()}
+          disabled={runningNow || wf.status === "draft" || wf.status === "completed"}
+        >
           {runningNow ? "Starting…" : "Run now"}
         </button>
-        {wf.status !== "draft" && (
+        {wf.status !== "draft" && wf.status !== "completed" && (
           <button className="btn" onClick={() => void patch({ paused: wf.status !== "paused" })}>
             {wf.status === "paused" ? "Resume" : "Pause"}
           </button>

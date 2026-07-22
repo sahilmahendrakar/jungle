@@ -384,6 +384,7 @@ lianaRouter.patch("/api/liana/workflows/:id", async (req, res) => {
     name: typeof body.name === "string" ? body.name : undefined,
     prompt: typeof body.prompt === "string" ? body.prompt : undefined,
     cron: body.cron === null ? null : typeof body.cron === "string" ? body.cron : undefined,
+    runAt: body.runAt === null ? null : typeof body.runAt === "string" ? body.runAt : undefined,
     timezone: typeof body.timezone === "string" ? body.timezone : undefined,
     paused: typeof body.paused === "boolean" ? body.paused : undefined,
     deliverTo: Array.isArray(body.deliverTo) ? body.deliverTo.map(String) : undefined,

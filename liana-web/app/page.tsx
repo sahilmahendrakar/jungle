@@ -5,10 +5,11 @@ import Link from "next/link";
 import { api, INTEGRATION_LABELS, type WireWorkflow } from "@/lib/api";
 import { useAuth } from "@/components/AuthProvider";
 import { ChannelCards } from "@/components/ChannelCards";
-import { capitalize, timeAgo, truncate } from "@/lib/format";
+import { capitalize, countdown, friendlyDate, timeAgo, truncate } from "@/lib/format";
 
 // Home: the workflows list. Cards, not a table — a person has a handful of workflows, and each
-// card reads as a sentence: name, cadence, integrations, last-run snippet. First run (no
+// card reads as a sentence: name, cadence, integrations, last-run snippet. Grouped so one-time
+// workflows read right: what's live, what's coming up once, and what's already done. First run (no
 // workflows yet) doubles as setup: the example ask plus the channel cards.
 
 export default function HomePage() {
@@ -27,36 +28,66 @@ export default function HomePage() {
   if (!workflows) return <p className="muted">Loading…</p>;
   if (!workflows.length) return <FirstRun />;
 
+  // A one-time workflow that hasn't fired is "upcoming"; a fired one is "done". Recurring and
+  // on-demand (plus in-progress drafts) are the standing set.
+  const upcoming = workflows.filter((w) => w.trigger.type === "once" && w.status === "active");
+  const done = workflows.filter((w) => w.status === "completed");
+  const standing = workflows.filter((w) => !upcoming.includes(w) && !done.includes(w));
+  const multi = [standing, upcoming, done].filter((g) => g.length).length > 1;
+
   return (
     <>
       <h1 className="page-title">Your workflows</h1>
       <p className="page-sub">Standing instructions that run themselves and land where you talk.</p>
-      {workflows.map((wf) => (
-        <Link key={wf.id} href={`/w/${wf.id}`} className="card-link">
-          <div className="card">
-            <p className="wf-name">
-              <span className={`dot ${wf.status}`} />
-              {wf.name}
-            </p>
-            <p className="sentence">
-              {capitalize(wf.cadence)}
-              {wf.integrations.length > 0 && (
-                <> · using {wf.integrations.map((k) => INTEGRATION_LABELS[k] ?? k).join(", ")}</>
-              )}
-              {wf.status === "paused" && <> · paused</>}
-              {wf.status === "draft" && <> · draft — confirm it where you asked</>}
-            </p>
-            {wf.lastRun && (
-              <p className="lastrun">
-                Last run {timeAgo(wf.lastRun.startedAt)}
-                {wf.lastRun.status !== "done" ? ` — ${wf.lastRun.status}` : ""}
-                {wf.lastRun.summary ? ` · ${truncate(wf.lastRun.summary, 110)}` : ""}
-              </p>
-            )}
-          </div>
-        </Link>
+      <Group title={multi ? "Active" : null} items={standing} />
+      <Group title="Coming up once" items={upcoming} />
+      <Group title="Done" items={done} muted />
+    </>
+  );
+}
+
+function Group({ title, items, muted }: { title: string | null; items: WireWorkflow[]; muted?: boolean }) {
+  if (!items.length) return null;
+  return (
+    <>
+      {title && <h2 className="section-title">{title}</h2>}
+      {items.map((wf) => (
+        <WorkflowCard key={wf.id} wf={wf} muted={muted} />
       ))}
     </>
+  );
+}
+
+function WorkflowCard({ wf, muted }: { wf: WireWorkflow; muted?: boolean }) {
+  const isOnce = wf.trigger.type === "once";
+  const soon = isOnce && wf.status === "active" && wf.nextRunAt ? countdown(wf.nextRunAt) : "";
+  return (
+    <Link href={`/w/${wf.id}`} className="card-link">
+      <div className={`card${muted ? " card-done" : ""}`}>
+        <p className="wf-name">
+          <span className={`dot ${wf.status}`} />
+          {wf.name}
+          {soon && <span className="pill-when">{soon}</span>}
+        </p>
+        <p className="sentence">
+          {wf.status === "completed" && wf.lastRun
+            ? `Ran once · ${friendlyDate(wf.lastRun.endedAt ?? wf.lastRun.startedAt)}`
+            : capitalize(wf.cadence)}
+          {wf.integrations.length > 0 && (
+            <> · using {wf.integrations.map((k) => INTEGRATION_LABELS[k] ?? k).join(", ")}</>
+          )}
+          {wf.status === "paused" && <> · paused</>}
+          {wf.status === "draft" && <> · draft — confirm it where you asked</>}
+        </p>
+        {wf.status !== "completed" && wf.lastRun && (
+          <p className="lastrun">
+            Last run {timeAgo(wf.lastRun.startedAt)}
+            {wf.lastRun.status !== "done" ? ` — ${wf.lastRun.status}` : ""}
+            {wf.lastRun.summary ? ` · ${truncate(wf.lastRun.summary, 110)}` : ""}
+          </p>
+        )}
+      </div>
+    </Link>
   );
 }
 
@@ -68,6 +99,7 @@ function FirstRun() {
         <h2>Let&apos;s set up your first workflow</h2>
         <p>Connect a place to talk below, then just ask — try:</p>
         <span className="example">&ldquo;Give me a morning briefing every day at 8am&rdquo;</span>
+        <span className="example">&ldquo;Remind me to send the report next Monday at 9am&rdquo;</span>
       </div>
       <h2 className="section-title">Where you talk to Liana</h2>
       <ChannelCards />
