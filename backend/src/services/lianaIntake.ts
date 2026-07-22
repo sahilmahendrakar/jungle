@@ -103,12 +103,13 @@ const OUTPUT_SCHEMA = {
               anyOf: [{ type: "string" }, { type: "null" }],
               description:
                 "Local datetime 'YYYY-MM-DDTHH:MM' for a ONE-TIME run at a specific future time " +
-                "(e.g. 'tomorrow at 3pm', 'next Monday at 9am'), resolved in the user's timezone " +
-                "from today's date. null otherwise. At most one of cron / runAt is non-null.",
+                "(e.g. 'tomorrow at 3pm', 'next Monday at 9am') or a relative one ('in 5 minutes', " +
+                "'in 2 hours'), computed in the user's timezone from the CURRENT date and time given " +
+                "in the system prompt. null otherwise. At most one of cron / runAt is non-null.",
             },
             timezone: {
               anyOf: [{ type: "string" }, { type: "null" }],
-              description: "IANA timezone for cron or runAt. Default to the user's Slack timezone.",
+              description: "IANA timezone for cron or runAt. Default to the user's timezone from the system prompt.",
             },
             repo: {
               anyOf: [{ type: "string" }, { type: "null" }],
@@ -183,9 +184,12 @@ function systemPrompt(ctx: IntakeContext): string {
     `on-demand). Fill the workflow object. Choose the cadence:\n` +
     `  • Recurring language ("every morning", "weekly", "each weekday at 8am") -> a 5-field cron in ` +
     `the user's timezone (runAt null); workflows may fire at most every 30 minutes.\n` +
-    `  • A specific future time ("tomorrow at 3pm", "next Monday at 9am", "on Friday at noon", ` +
-    `"in 2 hours") -> runAt as local "YYYY-MM-DDTHH:MM" resolved from today's date in the user's ` +
-    `timezone (cron null). Compute the calendar date carefully from today's date and weekday below.\n` +
+    `  • A specific future time ("tomorrow at 3pm", "next Monday at 9am", "on Friday at noon") or a ` +
+    `RELATIVE time ("in 5 minutes", "in 2 hours") -> runAt as local "YYYY-MM-DDTHH:MM" in the ` +
+    `user's timezone (cron null). Compute it from the CURRENT date AND time given below: for ` +
+    `relative times add the offset to the current time (e.g. current time 2:28 PM + "5 minutes" = ` +
+    `2:33 PM the same day); for named days compute the calendar date carefully from the current ` +
+    `date and weekday. Do the arithmetic precisely — do not round or approximate.\n` +
     `  • Open-ended / on-demand ("whenever I say", "on demand", no time given) -> both cron and ` +
     `runAt null.\n` +
     `- edit_workflow: the user wants to CHANGE one of their EXISTING workflows (listed below with ` +
@@ -214,8 +218,8 @@ function systemPrompt(ctx: IntakeContext): string {
     `EXISTING workflows listed below is intent edit_workflow. The facts in THIS prompt (today's ` +
     `date, the workflow list) are current and authoritative — trust them over anything older in ` +
     `the transcript.\n\n` +
-    `Context: today is ${ctx.today}. The user is ${ctx.userName}` +
-    `${ctx.userTz ? ` (timezone ${ctx.userTz})` : ""}.` +
+    `Context: right now it is ${ctx.now} in the user's timezone (${ctx.userTz}) — use this exact ` +
+    `current date and time to resolve any relative or named future time. The user is ${ctx.userName}.` +
     `${
       ctx.existingWorkflows.length
         ? ` Their existing workflows: ${ctx.existingWorkflows.join("; ")}.`
@@ -226,8 +230,8 @@ function systemPrompt(ctx: IntakeContext): string {
 
 export interface IntakeContext {
   userName: string;
-  userTz: string | null;
-  today: string; // e.g. "Monday 2026-07-20"
+  userTz: string; // resolved IANA zone (falls back to a default), never null — see call sites
+  now: string; // current date AND time-of-day in userTz, e.g. "Monday, July 20, 2026 at 2:28 PM"
   existingWorkflows: string[]; // "Morning briefing (daily 8:00 AM)"
   // Bounded rolling transcript of this conversation (oldest first), from liana_messages. The
   // intake stays a single stateless parse — history is just wider input.

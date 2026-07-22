@@ -346,12 +346,13 @@ export async function processLianaEvent(payload: LianaEventEnvelope): Promise<vo
     thinkingTs = await postThinking(install, reply);
 
     const existing = await describeOwnerWorkflows(owner.id);
+    const userTz = profile?.tz && isValidTimeZone(profile.tz) ? profile.tz : DEFAULT_TZ;
     const intake = await runIntake(
       text,
       {
         userName: profile?.displayName ?? owner.display_name,
-        userTz: profile?.tz ?? null,
-        today: new Intl.DateTimeFormat("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" }).format(new Date()),
+        userTz,
+        now: formatNow(userTz),
         existingWorkflows: existing.map((w) => w.line),
         history,
       },
@@ -564,6 +565,18 @@ async function applyIntakeEdit(
     console.error("liana edit:", e);
     return "Something went wrong applying that change — mind trying again?";
   }
+}
+
+// Current date AND time-of-day rendered in `tz`, for the intake prompt so the model can resolve
+// relative ("in 5 minutes") and named ("next Monday at 9am") future times against a real "now".
+// e.g. "Wednesday, July 22, 2026 at 2:28 PM".
+export function formatNow(tz: string): string {
+  const validTz = isValidTimeZone(tz) ? tz : DEFAULT_TZ;
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: validTz,
+    weekday: "long", year: "numeric", month: "long", day: "numeric",
+    hour: "numeric", minute: "2-digit", hour12: true,
+  }).format(new Date());
 }
 
 // "Mon, Jul 28 at 9:00 AM" — an absolute instant rendered in its display timezone.
@@ -1106,12 +1119,14 @@ async function handleConversationalTurn(text: string, ctx: ConversationalCtx): P
   }
 
   const existing = await describeOwnerWorkflows(owner.id);
+  // No Slack profile on this surface (iMessage/Telegram), so use the same default zone that draft
+  // creation falls back to (defaultTz: null → DEFAULT_TZ) — intake and creation must share a clock.
   const intake = await runIntake(
     text,
     {
       userName: owner.display_name,
-      userTz: null,
-      today: new Intl.DateTimeFormat("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" }).format(new Date()),
+      userTz: DEFAULT_TZ,
+      now: formatNow(DEFAULT_TZ),
       existingWorkflows: existing.map((w) => w.line),
       history,
     },
