@@ -4,7 +4,19 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import ScheduleEditor from "@/components/ScheduleEditor";
-import { api, INTEGRATION_LABELS, type WireChannels, type WireConnection, type WireModels, type WireRun, type WireWorkflow } from "@/lib/api";
+import {
+  api,
+  approvalIsOn,
+  fetchGithubRepos,
+  INTEGRATION_LABELS,
+  INTEGRATION_SETTINGS_UI,
+  type WireChannels,
+  type WireConnection,
+  type WireModels,
+  type WireRepo,
+  type WireRun,
+  type WireWorkflow,
+} from "@/lib/api";
 import { capitalize, countdown, friendlyDate, timeAgo } from "@/lib/format";
 
 // Workflow detail: the prompt as editable prose (the centerpiece), the cadence as a sentence,
@@ -23,7 +35,15 @@ export default function WorkflowPage() {
   const [saving, setSaving] = useState<"idle" | "saving" | "saved">("idle");
   const [runningNow, setRunningNow] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [openSettings, setOpenSettings] = useState<string | null>(null); // which integration's settings popover is open
+  const [repos, setRepos] = useState<WireRepo[] | null>(null); // lazy-loaded for the GitHub repo picker
+  const [notice, setNotice] = useState<string | null>(null); // transient "saved but…" from a PATCH warning
   const promptRef = useRef<HTMLTextAreaElement>(null);
+
+  async function loadRepos() {
+    setRepos(null);
+    setRepos(await fetchGithubRepos());
+  }
 
   const load = useCallback(async () => {
     try {
@@ -52,12 +72,14 @@ export default function WorkflowPage() {
 
   async function patch(body: Record<string, unknown>) {
     setSaving("saving");
+    setNotice(null);
     try {
-      const r = await api<{ workflow: WireWorkflow }>(`/api/liana/workflows/${id}`, {
+      const r = await api<{ workflow: WireWorkflow; warning?: string }>(`/api/liana/workflows/${id}`, {
         method: "PATCH",
         body: JSON.stringify(body),
       });
       setWf(r.workflow);
+      if (r.warning) setNotice(r.warning);
       setSaving("saved");
       setTimeout(() => setSaving("idle"), 1500);
     } catch (e) {
@@ -149,13 +171,70 @@ export default function WorkflowPage() {
         </div>
       </div>
 
+      {notice && <p className="notice-note">Saved — {notice}.</p>}
+
       <div className="chips">
         {wf.integrations.map((k) => {
           const c = connByKey.get(k);
           const ok = c?.connected;
+          const cfg = wf.integrationSettings?.[k]?.config ?? {};
+          const ui = INTEGRATION_SETTINGS_UI[k];
+          const repo = ui?.repo && typeof cfg.repo === "string" ? (cfg.repo as string) : null;
+          const askOff = ui?.approval && !approvalIsOn(cfg[ui.approval.key]);
+          const canConfig = !!ui; // read-only integrations have nothing to configure
           return (
-            <span key={k} className={`chip ${ok ? "" : "unconnected"}`} title={ok ? `Connected${c?.account ? ` as ${c.account}` : ""}` : "Not connected — visit Connections"}>
-              {ok ? "✓" : "•"} {INTEGRATION_LABELS[k] ?? k}
+            <span key={k} style={{ position: "relative", display: "inline-block" }}>
+              <button
+                className={`chip ${ok ? "" : "unconnected"} ${canConfig ? "chip-config" : "chip-static"}`}
+                title={ok ? `Connected${c?.account ? ` as ${c.account}` : ""}` : "Not connected — visit Connections"}
+                onClick={() => {
+                  if (!canConfig) return;
+                  const opening = openSettings !== k;
+                  setOpenSettings(opening ? k : null);
+                  if (opening && k === "github" && repos === null) void loadRepos();
+                }}
+              >
+                {ok ? "✓" : "•"} {INTEGRATION_LABELS[k] ?? k}
+                {repo ? <span className="chip-detail"> · {repo}</span> : null}
+                {askOff ? <span className="chip-detail muted"> · acts without asking</span> : null}
+              </button>
+              {openSettings === k && canConfig && (
+                <>
+                  <div className="chip-menu-backdrop" onClick={() => setOpenSettings(null)} />
+                  <div className="chip-menu chip-settings">
+                    {ui?.repo && (
+                      <RepoField
+                        value={repo ?? ""}
+                        repos={repos}
+                        connected={!!ok}
+                        onSave={(v) => {
+                          void patch({ settings: { github: { repo: v } } });
+                          setOpenSettings(null);
+                        }}
+                      />
+                    )}
+                    {ui?.approval && (
+                      <label className="chip-approval">
+                        <input
+                          type="checkbox"
+                          checked={approvalIsOn(cfg[ui.approval.key])}
+                          onChange={(e) => void patch({ settings: { [k]: { [ui.approval!.key]: e.target.checked } } })}
+                        />
+                        <span>{ui.approval.label}</span>
+                      </label>
+                    )}
+                    <button
+                      className="chip-menu-item chip-remove"
+                      onClick={() => {
+                        void toggleIntegration(k);
+                        setOpenSettings(null);
+                      }}
+                    >
+                      Remove from workflow
+                    </button>
+                  </div>
+                </>
+              )}
             </span>
           );
         })}
@@ -332,6 +411,51 @@ export default function WorkflowPage() {
   );
 }
 
+// The GitHub repo control in the settings popover: a dropdown of the user's repos when we could
+// list them (GitHub connected), otherwise a manual "owner/name" input. Saves on pick / blur.
+function RepoField({
+  value,
+  repos,
+  connected,
+  onSave,
+}: {
+  value: string;
+  repos: WireRepo[] | null;
+  connected: boolean;
+  onSave: (v: string) => void;
+}) {
+  if (repos === null) return <div className="repo-field muted">Loading repos…</div>;
+  if (repos.length) {
+    return (
+      <div className="repo-field">
+        <select defaultValue={value} onChange={(e) => e.target.value && onSave(e.target.value)}>
+          <option value="" disabled>
+            Pick a repo…
+          </option>
+          {repos.map((r) => (
+            <option key={r.full_name} value={r.full_name}>
+              {r.full_name}
+            </option>
+          ))}
+        </select>
+      </div>
+    );
+  }
+  return (
+    <div className="repo-field">
+      <input
+        placeholder="owner/name"
+        defaultValue={value}
+        onBlur={(e) => {
+          const v = e.target.value.trim();
+          if (v && v !== value) onSave(v);
+        }}
+      />
+      {!connected && <span className="chip-menu-hint">Connect GitHub for a repo list</span>}
+    </div>
+  );
+}
+
 function RunNode({ workflowId, run }: { workflowId: string; run: WireRun }) {
   const [open, setOpen] = useState(false);
   const [output, setOutput] = useState<string | null>(null);
@@ -350,6 +474,9 @@ function RunNode({ workflowId, run }: { workflowId: string; run: WireRun }) {
   }
 
   const cls = run.status === "done" ? "" : run.status === "running" ? "running" : "failed";
+  // Show per-channel delivery only when something didn't cleanly deliver (deviation-only).
+  const delivery = Object.entries(run.delivery ?? {});
+  const showDelivery = delivery.some(([, out]) => !out.startsWith("ok"));
   return (
     <div className={`run ${cls}`}>
       <div className="run-head" onClick={() => void toggle()}>
@@ -359,6 +486,15 @@ function RunNode({ workflowId, run }: { workflowId: string; run: WireRun }) {
           {run.summary ? ` · ${run.summary}` : ""}
         </span>
       </div>
+      {showDelivery && (
+        <div className="run-delivery">
+          {delivery.map(([ch, out]) => (
+            <span key={ch} className={out.startsWith("ok") ? "ok" : "bad"}>
+              {ch}: {out}
+            </span>
+          ))}
+        </div>
+      )}
       {open && <div className="run-output">{output ?? "Loading…"}</div>}
     </div>
   );
