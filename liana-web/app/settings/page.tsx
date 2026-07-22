@@ -101,6 +101,12 @@ export default function SettingsPage() {
               onChanged={() => void api<WireChannels>("/api/liana/channels").then((c) => setChannels(c.channels))}
             />
           )}
+          {channels.telegram && (
+            <TelegramCard
+              state={channels.telegram}
+              onChanged={() => void api<WireChannels>("/api/liana/channels").then((c) => setChannels(c.channels))}
+            />
+          )}
         </>
       )}
     </>
@@ -185,6 +191,92 @@ function IMessageCard(props: {
               }
             >
               Text me a code
+            </button>
+          </div>
+        </>
+      )}
+      {err && <p className="error-note" style={{ marginTop: 8 }}>{err}</p>}
+    </div>
+  );
+}
+
+function TelegramCard(props: {
+  state: { linked: boolean; username: string | null };
+  onChanged: () => void;
+}) {
+  const [waiting, setWaiting] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  // After opening the t.me link, the bind lands out-of-band (the user presses Start in
+  // Telegram) — poll for up to 2 minutes so the card flips without a manual refresh.
+  useEffect(() => {
+    if (!waiting || props.state.linked) return;
+    const started = Date.now();
+    const timer = setInterval(() => {
+      if (Date.now() - started > 120_000) {
+        setWaiting(false);
+        return;
+      }
+      props.onChanged();
+    }, 3000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [waiting, props.state.linked]);
+
+  async function run(action: () => Promise<unknown>) {
+    setBusy(true);
+    setErr(null);
+    try {
+      await action();
+      props.onChanged();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card">
+      <p className="wf-name" style={{ fontSize: 17 }}>
+        Telegram
+      </p>
+      {props.state.linked ? (
+        <>
+          <p className="sentence">
+            ✓ Linked{props.state.username ? ` — @${props.state.username}` : ""}. Message the bot like you would a friend; results arrive in Telegram.
+          </p>
+          <div style={{ marginTop: 10 }}>
+            <button
+              className="btn danger"
+              disabled={busy}
+              onClick={() => void run(() => api("/api/liana/channels/telegram", { method: "DELETE" }))}
+            >
+              Unlink
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          <p className="sentence">
+            {waiting
+              ? "Waiting for you to press Start in Telegram…"
+              : "Chat with Liana and get workflow results in Telegram. One tap — no codes."}
+          </p>
+          <div style={{ marginTop: 10 }}>
+            <button
+              className="btn primary"
+              disabled={busy}
+              onClick={() =>
+                void run(async () => {
+                  const { url } = await api<{ url: string }>("/api/liana/channels/telegram/start", { method: "POST" });
+                  window.open(url, "_blank", "noopener");
+                  setWaiting(true);
+                })
+              }
+            >
+              {waiting ? "Reopen link" : "Link Telegram"}
             </button>
           </div>
         </>

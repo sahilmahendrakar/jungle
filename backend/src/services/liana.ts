@@ -11,10 +11,11 @@ import { uniqueHandle } from "./slackBridge";
 import { computeNextRun, isValidTimeZone } from "./scheduler";
 import { runIntake, type IntakeWorkflowSpec } from "./lianaIntake";
 import * as imsg from "./imessage";
+import * as tg from "./telegram";
 
-// Delivery channels a workflow can target. A list (not flags) so future channels (telegram, …)
+// Delivery channels a workflow can target. A list (not flags) so future channels
 // extend the value set, not the schema.
-export const DELIVERY_CHANNELS = ["slack", "imessage"] as const;
+export const DELIVERY_CHANNELS = ["slack", "imessage", "telegram"] as const;
 export type DeliveryChannel = (typeof DELIVERY_CHANNELS)[number];
 
 // Liana: the Slack-first workflow product. This service owns everything between the Liana Slack
@@ -616,9 +617,101 @@ export async function confirmPhoneVerify(me: db.Participant, code: string): Prom
 const YES_RE = /^\s*(yes|y|yep|yeah|confirm|create( it)?|do it|go|👍)\s*[.!]*\s*$/i;
 const NO_RE = /^\s*(no|n|nope|cancel|stop|nevermind|never mind)\s*[.!]*\s*$/i;
 
-// Inbound text from a linked phone: the same brain as Slack, with a conversational YES/NO
-// confirm instead of buttons (texting has no Block Kit). Unlinked numbers get one pointer to
-// the web app (deduped upstream, so no loops).
+// One brain for every buttonless chat surface (iMessage, Telegram): pending-draft YES/NO
+// confirm, then the same intake as Slack. Channel specifics — how to reply, where pending-draft
+// state lives, which delivery channel new drafts default to — come in via ctx.
+interface ConversationalCtx {
+  owner: db.Participant;
+  install: db.LianaInstall;
+  channel: DeliveryChannel; // new drafts deliver here — "Liana answers where you ask"
+  pendingDraftId: string | null;
+  reply: (text: string) => Promise<void>;
+  setPendingDraft: (draftId: string | null) => Promise<void>;
+  toPlain: (md: string) => string; // channel's markdown handling for freeform intake replies
+}
+
+async function handleConversationalTurn(text: string, ctx: ConversationalCtx): Promise<void> {
+  const { owner, install, reply } = ctx;
+  const slackUserId = (await db.getSlackUserIdForParticipant(install.team_id, owner.id)) ?? "";
+
+  // Pending draft: YES/NO resolves it; anything else falls through to a fresh intake turn
+  // (which replaces the pending draft if it drafts a new workflow).
+  if (ctx.pendingDraftId) {
+    if (YES_RE.test(text)) {
+      const draftId = ctx.pendingDraftId;
+      await ctx.setPendingDraft(null);
+      const result = await confirmLianaWorkflow(draftId);
+      await reply(
+        `🌿 ${result.wf.name} is live — ${cadenceSentence(result.wf)}. I'm doing a first run now.` +
+          (result.unconnected.length
+            ? `\nHeads up: connect ${result.unconnected.map((k) => KEY_LABELS[k] ?? k).join(", ")} so I can use ${result.unconnected.length > 1 ? "them" : "it"}: ${result.url}`
+            : ""),
+      );
+      return;
+    }
+    if (NO_RE.test(text)) {
+      const draftId = ctx.pendingDraftId;
+      await ctx.setPendingDraft(null);
+      await cancelLianaDraft(draftId).catch(() => {});
+      await reply("No problem — canceled.");
+      return;
+    }
+  }
+
+  const existing = await describeOwnerWorkflows(install.team_id, slackUserId);
+  const intake = await runIntake(
+    text,
+    {
+      userName: owner.display_name,
+      userTz: null,
+      today: new Intl.DateTimeFormat("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" }).format(new Date()),
+      existingWorkflows: existing.map((w) => w.line),
+    },
+    await intakeModelFor(owner.id),
+  );
+
+  if (intake.intent === "list_workflows") {
+    if (!existing.length) {
+      await reply(`You don't have any workflows yet. Try: "morning briefing every day at 8am".`);
+    } else {
+      const lines = existing.map((w) => `• ${w.wf.name} — ${cadenceSentence(w.wf)}${w.wf.status === "paused" ? " (paused)" : ""}`);
+      await reply(`Your workflows:\n${lines.join("\n")}\nManage them: ${await webLink(install.team_id, owner)}`);
+    }
+    return;
+  }
+
+  if (intake.intent === "create_workflow" && intake.workflow) {
+    // A new draft replaces any dangling pending one.
+    if (ctx.pendingDraftId) {
+      await cancelLianaDraft(ctx.pendingDraftId).catch(() => {});
+      await ctx.setPendingDraft(null);
+    }
+    const { wf } = await createLianaDraft({
+      install,
+      owner,
+      slackUserId,
+      spec: intake.workflow,
+      defaultTz: null,
+      deliverTo: [ctx.channel],
+    });
+    await ctx.setPendingDraft(wf.id);
+    const statuses = await connectionStatus(owner, intake.workflow.integrations);
+    const integrationLines = statuses.map((s) =>
+      s.connected ? `✓ ${KEY_LABELS[s.key] ?? s.key}` : `→ ${KEY_LABELS[s.key] ?? s.key} (connect on the web)`,
+    );
+    await reply(
+      `${intake.reply}\n\n${wf.name} — ${cadenceSentence(wf)}` +
+        (integrationLines.length ? `\n${integrationLines.join("\n")}` : "") +
+        `\n\nReply YES to create it, or NO to cancel.`,
+    );
+    return;
+  }
+
+  await reply(ctx.toPlain(intake.reply));
+}
+
+// Inbound text from a linked phone. Unlinked numbers get one pointer to the web app (deduped
+// upstream, so no loops).
 export async function processIMessageInbound(inbound: imsg.InboundText): Promise<void> {
   const link = await db.getPhoneLinkByPhone(inbound.fromPhone);
   if (!link || !link.verified_at) {
@@ -643,84 +736,90 @@ export async function processIMessageInbound(inbound: imsg.InboundText): Promise
       await reply("Your Slack workspace's Liana install is gone — reinstall from Slack first.");
       return;
     }
-    const slackUserId = (await db.getSlackUserIdForParticipant(install.team_id, owner.id)) ?? "";
-
-    // Pending draft: YES/NO resolves it; anything else falls through to a fresh intake turn
-    // (which replaces the pending draft if it drafts a new workflow).
-    if (link.pending_draft_id) {
-      if (YES_RE.test(inbound.text)) {
-        const draftId = link.pending_draft_id;
-        await db.setPhonePendingDraft(owner.id, null);
-        const result = await confirmLianaWorkflow(draftId);
-        await reply(
-          `🌿 ${result.wf.name} is live — ${cadenceSentence(result.wf)}. I'm doing a first run now.` +
-            (result.unconnected.length
-              ? `\nHeads up: connect ${result.unconnected.map((k) => KEY_LABELS[k] ?? k).join(", ")} so I can use ${result.unconnected.length > 1 ? "them" : "it"}: ${result.url}`
-              : ""),
-        );
-        return;
-      }
-      if (NO_RE.test(inbound.text)) {
-        const draftId = link.pending_draft_id;
-        await db.setPhonePendingDraft(owner.id, null);
-        await cancelLianaDraft(draftId).catch(() => {});
-        await reply("No problem — canceled.");
-        return;
-      }
-    }
-
-    const existing = await describeOwnerWorkflows(install.team_id, slackUserId);
-    const intake = await runIntake(
-      inbound.text,
-      {
-        userName: owner.display_name,
-        userTz: null,
-        today: new Intl.DateTimeFormat("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" }).format(new Date()),
-        existingWorkflows: existing.map((w) => w.line),
-      },
-      await intakeModelFor(owner.id),
-    );
-
-    if (intake.intent === "list_workflows") {
-      if (!existing.length) {
-        await reply(`You don't have any workflows yet. Try: "morning briefing every day at 8am".`);
-      } else {
-        const lines = existing.map((w) => `• ${w.wf.name} — ${cadenceSentence(w.wf)}${w.wf.status === "paused" ? " (paused)" : ""}`);
-        await reply(`Your workflows:\n${lines.join("\n")}\nManage them: ${await webLink(install.team_id, owner)}`);
-      }
-      return;
-    }
-
-    if (intake.intent === "create_workflow" && intake.workflow) {
-      // A new draft replaces any dangling pending one.
-      if (link.pending_draft_id) {
-        await cancelLianaDraft(link.pending_draft_id).catch(() => {});
-        await db.setPhonePendingDraft(owner.id, null);
-      }
-      const { wf } = await createLianaDraft({
-        install,
-        owner,
-        slackUserId,
-        spec: intake.workflow,
-        defaultTz: null,
-        deliverTo: ["imessage"], // answers where you ask
-      });
-      await db.setPhonePendingDraft(owner.id, wf.id);
-      const statuses = await connectionStatus(owner, intake.workflow.integrations);
-      const integrationLines = statuses.map((s) =>
-        s.connected ? `✓ ${KEY_LABELS[s.key] ?? s.key}` : `→ ${KEY_LABELS[s.key] ?? s.key} (connect on the web)`,
-      );
-      await reply(
-        `${intake.reply}\n\n${wf.name} — ${cadenceSentence(wf)}` +
-          (integrationLines.length ? `\n${integrationLines.join("\n")}` : "") +
-          `\n\nReply YES to create it, or NO to cancel.`,
-      );
-      return;
-    }
-
-    await reply(imsg.toPlainText(intake.reply));
+    await handleConversationalTurn(inbound.text, {
+      owner,
+      install,
+      channel: "imessage",
+      pendingDraftId: link.pending_draft_id,
+      reply,
+      setPendingDraft: (id) => db.setPhonePendingDraft(owner.id, id),
+      toPlain: imsg.toPlainText,
+    });
   } catch (e) {
     console.error("liana imessage inbound:", e);
+    await reply("Something went wrong on my end — mind trying that again?").catch(() => {});
+  }
+}
+
+// ============================ Telegram channel ============================
+
+// Linking (web Settings): mint a code, hand back a t.me deep link; the bot's /start handler
+// completes the bind. No code typing — pressing Start in Telegram IS the verification (only the
+// person who opened the link can send it).
+export async function startTelegramLink(me: db.Participant): Promise<string> {
+  if (!tg.telegramConfigured()) throw new ApiError(400, "Telegram isn't enabled on this deployment");
+  const code = randomBytes(16).toString("hex"); // 32 chars — within the 64-char /start payload limit
+  await db.upsertTelegramLinkCode(me.id, code, new Date(Date.now() + 15 * 60_000).toISOString());
+  return `https://t.me/${await tg.getBotUsername()}?start=${code}`;
+}
+
+export async function processTelegramInbound(inbound: tg.TelegramInbound): Promise<void> {
+  const reply = (text: string) => tg.sendTelegram(inbound.chatId, text);
+
+  // Deep-link /start: complete the link minted in web Settings.
+  if (inbound.startPayload !== null) {
+    try {
+      if (inbound.startPayload) {
+        const linked = await db.completeTelegramLink({
+          code: inbound.startPayload,
+          chatId: inbound.chatId,
+          telegramUserId: inbound.fromId,
+          username: inbound.username,
+        });
+        if (linked) {
+          await reply(`🌿 You're linked. Message me what you'd like automated — try "morning briefing every day at 8am".`);
+          return;
+        }
+      }
+      const existing = await db.getTelegramLinkByChat(inbound.chatId);
+      await reply(
+        existing?.verified_at
+          ? "You're already linked. Tell me what you'd like automated!"
+          : `That link is expired or already used — get a fresh one from Settings: ${LIANA_WEB_URL}/settings`,
+      );
+    } catch (e) {
+      console.error("liana telegram /start:", e);
+    }
+    return;
+  }
+
+  const link = await db.getTelegramLinkByChat(inbound.chatId);
+  if (!link || !link.verified_at) {
+    await reply(
+      `This Telegram account isn't linked to Liana yet. Link it from Settings: ${LIANA_WEB_URL}/settings`,
+    ).catch((e) => console.error("liana telegram: unlinked reply failed:", e));
+    return;
+  }
+
+  try {
+    const owner = await db.getParticipant(link.participant_id);
+    if (!owner) throw new Error("telegram link points at a missing participant");
+    const install = await db.getLianaInstallByWorkspace(owner.workspace_id);
+    if (!install) {
+      await reply("Your Slack workspace's Liana install is gone — reinstall from Slack first.");
+      return;
+    }
+    await handleConversationalTurn(inbound.text, {
+      owner,
+      install,
+      channel: "telegram",
+      pendingDraftId: link.pending_draft_id,
+      reply,
+      setPendingDraft: (id) => db.setTelegramPendingDraft(owner.id, id),
+      toPlain: (md) => md, // sendTelegram renders light markdown itself
+    });
+  } catch (e) {
+    console.error("liana telegram inbound:", e);
     await reply("Something went wrong on my end — mind trying that again?").catch(() => {});
   }
 }
@@ -737,6 +836,13 @@ export async function channelStatus(me: db.Participant, install: db.LianaInstall
       phone: link?.phone ?? null,
       verified: !!link?.verified_at,
       pendingCode: !!link && !link.verified_at && !!link.verify_code,
+    };
+  }
+  if (tg.telegramConfigured()) {
+    const link = await db.getTelegramLink(me.id);
+    out.telegram = {
+      linked: !!link?.verified_at,
+      username: link?.telegram_username ?? null,
     };
   }
   return out;
@@ -800,6 +906,19 @@ export async function onRunClosed(runId: string): Promise<void> {
       }
     } catch (e) {
       failures.push(`imessage: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  if (channels.includes("telegram") && tg.telegramConfigured()) {
+    try {
+      const link = owner ? await db.getTelegramLink(owner.id) : null;
+      if (link?.verified_at && link.chat_id) {
+        await tg.sendTelegram(link.chat_id, body);
+      } else {
+        failures.push("telegram: no linked Telegram account");
+      }
+    } catch (e) {
+      failures.push(`telegram: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
@@ -886,6 +1005,11 @@ export async function editLianaWorkflow(
       if (!imsg.imessageConfigured()) throw new ApiError(400, "iMessage isn't enabled on this deployment");
       const link = await db.getPhoneLink(owner.id);
       if (!link?.verified_at) throw new ApiError(400, "verify your phone number in Settings first");
+    }
+    if (channels.includes("telegram")) {
+      if (!tg.telegramConfigured()) throw new ApiError(400, "Telegram isn't enabled on this deployment");
+      const link = await db.getTelegramLink(owner.id);
+      if (!link?.verified_at) throw new ApiError(400, "link your Telegram account in Settings first");
     }
     await db.setLianaDeliverTo(wf.id, channels);
   }

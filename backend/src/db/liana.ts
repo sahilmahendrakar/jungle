@@ -215,6 +215,86 @@ export async function getLianaInstallByWorkspace(workspaceId: string): Promise<L
   return rows[0] ?? null;
 }
 
+// --- Telegram links (Telegram channel, migration 031) ---
+
+export interface LianaTelegramLink {
+  participant_id: string;
+  chat_id: string | null; // bigint — pg returns it as a string
+  telegram_user_id: string | null;
+  telegram_username: string | null;
+  link_code: string | null;
+  link_code_expires_at: string | null;
+  verified_at: string | null;
+  pending_draft_id: string | null;
+}
+
+export async function getTelegramLink(participantId: string): Promise<LianaTelegramLink | null> {
+  const { rows } = await pool.query<LianaTelegramLink>(
+    `select * from liana_telegram_links where participant_id = $1`,
+    [participantId],
+  );
+  return rows[0] ?? null;
+}
+
+export async function getTelegramLinkByChat(chatId: number): Promise<LianaTelegramLink | null> {
+  const { rows } = await pool.query<LianaTelegramLink>(
+    `select * from liana_telegram_links where chat_id = $1`,
+    [chatId],
+  );
+  return rows[0] ?? null;
+}
+
+// Start (or restart) linking: one row per participant, replaceable until /start completes it.
+export async function upsertTelegramLinkCode(
+  participantId: string,
+  code: string,
+  expiresAt: string,
+): Promise<void> {
+  await pool.query(
+    `insert into liana_telegram_links (participant_id, link_code, link_code_expires_at)
+     values ($1, $2, $3)
+     on conflict (participant_id) do update set
+       link_code = excluded.link_code, link_code_expires_at = excluded.link_code_expires_at`,
+    [participantId, code, expiresAt],
+  );
+}
+
+// Complete a deep-link /start: bind the chat to whoever holds the (unexpired) code. Returns the
+// linked row, or null when the code is unknown/expired. Clearing any other row on this chat_id
+// first keeps the unique constraint happy if someone relinks from a fresh Liana account.
+export async function completeTelegramLink(args: {
+  code: string;
+  chatId: number;
+  telegramUserId: number;
+  username: string | null;
+}): Promise<LianaTelegramLink | null> {
+  await pool.query(
+    `update liana_telegram_links set chat_id = null, verified_at = null
+     where chat_id = $1 and link_code is distinct from $2`,
+    [args.chatId, args.code],
+  );
+  const { rows } = await pool.query<LianaTelegramLink>(
+    `update liana_telegram_links set
+       chat_id = $2, telegram_user_id = $3, telegram_username = $4,
+       verified_at = now(), link_code = null, link_code_expires_at = null
+     where link_code = $1 and link_code_expires_at > now()
+     returning *`,
+    [args.code, args.chatId, args.telegramUserId, args.username],
+  );
+  return rows[0] ?? null;
+}
+
+export async function deleteTelegramLink(participantId: string): Promise<void> {
+  await pool.query(`delete from liana_telegram_links where participant_id = $1`, [participantId]);
+}
+
+export async function setTelegramPendingDraft(participantId: string, draftId: string | null): Promise<void> {
+  await pool.query(
+    `update liana_telegram_links set pending_draft_id = $2 where participant_id = $1`,
+    [participantId, draftId],
+  );
+}
+
 // --- Per-user model settings (migration 029) ---
 
 export interface LianaSettings {

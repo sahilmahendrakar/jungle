@@ -169,6 +169,26 @@ export default function WorkflowPage() {
                 iMessage — <Link href="/settings">verify your number first</Link>
               </span>
             ))}
+          {channels?.telegram &&
+            (channels.telegram.linked ? (
+              <label className="check-chip">
+                <input
+                  type="checkbox"
+                  checked={wf.deliverTo.includes("telegram")}
+                  onChange={(e) => {
+                    const next = e.target.checked
+                      ? [...new Set([...wf.deliverTo, "telegram"])]
+                      : wf.deliverTo.filter((c) => c !== "telegram");
+                    if (next.length) void patch({ deliverTo: next });
+                  }}
+                />
+                Telegram
+              </label>
+            ) : (
+              <span className="muted" style={{ fontSize: 13 }}>
+                Telegram — <Link href="/settings">link your account first</Link>
+              </span>
+            ))}
         </span>
       </div>
 

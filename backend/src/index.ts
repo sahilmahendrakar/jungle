@@ -12,6 +12,8 @@ import { triggerMentionedAgents, buildRunnerHooks } from "./services/orchestrato
 import { startScheduler } from "./services/scheduler";
 import { startWorkflowSweeper } from "./services/workflows";
 import { startSlackOutbox } from "./services/slackBridge";
+import * as telegram from "./services/telegram";
+import { BACKEND_ORIGIN } from "./http/routes/liana";
 import { registerBuiltinIntegrations } from "./integrations";
 
 // Entry point / boot: wire the HTTP app, both WebSocket subsystems (app + runner), background
@@ -100,6 +102,10 @@ startScheduler();
 startWorkflowSweeper();
 // Drain the Slack mirror outbox (Jungle -> Slack). Enqueued transactionally in persistMessage.
 startSlackOutbox();
+// Register the Liana Telegram bot's webhook (idempotent; no-op when the bot isn't configured).
+if (telegram.telegramConfigured()) {
+  telegram.ensureWebhook(BACKEND_ORIGIN).catch((e) => console.error("telegram setWebhook failed:", e));
+}
 
 const PORT = Number(process.env.PORT ?? 3001);
 server.listen(PORT, () => console.log(`jungle-backend on http://localhost:${PORT}`));

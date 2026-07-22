@@ -6,6 +6,7 @@ import { verifySlackSignature } from "../../slack/verify";
 import { providerConfigured } from "../../providers";
 import * as liana from "../../services/liana";
 import * as imsg from "../../services/imessage";
+import * as tg from "../../services/telegram";
 import * as workflows from "../../services/workflows";
 import { ApiError } from "../errors";
 
@@ -21,7 +22,7 @@ const CLIENT_ID = process.env.LIANA_SLACK_CLIENT_ID ?? "";
 const CLIENT_SECRET = process.env.LIANA_SLACK_CLIENT_SECRET ?? "";
 const SIGNING_SECRET = process.env.LIANA_SLACK_SIGNING_SECRET ?? "";
 
-const BACKEND_ORIGIN = (() => {
+export const BACKEND_ORIGIN = (() => {
   if (process.env.BACKEND_PUBLIC_URL) return process.env.BACKEND_PUBLIC_URL.replace(/\/$/, "");
   const g = process.env.GOOGLE_OAUTH_REDIRECT_URI;
   if (g) {
@@ -147,6 +148,34 @@ lianaEventsRouter.post("/api/liana/imessage/webhook", (req, res) => {
     }
   })().catch((e) => {
     console.error("liana imessage webhook route:", e);
+    if (!res.headersSent) res.status(500).end();
+  });
+});
+
+// Inbound Telegram webhook. Auth = the secret_token we registered via setWebhook, echoed back
+// by Telegram in a header on every update. At-least-once delivery; dedupe by update_id
+// (shared events table, "tg:" prefixed).
+lianaEventsRouter.post("/api/liana/telegram/webhook", (req, res) => {
+  void (async () => {
+    if (!tg.verifyTelegramWebhook(req.header("x-telegram-bot-api-secret-token"))) {
+      res.status(401).send("bad secret");
+      return;
+    }
+    const raw = await readRaw(req);
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(raw.toString("utf8"));
+    } catch {
+      res.status(400).send("bad json");
+      return;
+    }
+    res.status(200).end(); // ack fast; Telegram retries on non-2xx
+    const inbound = tg.parseUpdate(payload);
+    if (!inbound) return;
+    if (!(await db.recordSlackEvent(`tg:${inbound.updateId}`))) return; // duplicate delivery
+    void liana.processTelegramInbound(inbound).catch((e) => console.error("liana telegram processing:", e));
+  })().catch((e) => {
+    console.error("liana telegram webhook route:", e);
     if (!res.headersSent) res.status(500).end();
   });
 });
@@ -355,6 +384,19 @@ lianaRouter.post("/api/liana/channels/imessage/verify", async (req, res) => {
 lianaRouter.delete("/api/liana/channels/imessage", async (req, res) => {
   const auth = await requireLianaAuth(req);
   await db.deletePhoneLink(auth.me.id);
+  res.json({ ok: true });
+});
+
+// Telegram links via a t.me deep link: this mints the code and returns the URL; the bot's
+// /start handler completes the bind, and the web app polls GET /channels to see it land.
+lianaRouter.post("/api/liana/channels/telegram/start", async (req, res) => {
+  const auth = await requireLianaAuth(req);
+  res.json({ url: await liana.startTelegramLink(auth.me) });
+});
+
+lianaRouter.delete("/api/liana/channels/telegram", async (req, res) => {
+  const auth = await requireLianaAuth(req);
+  await db.deleteTelegramLink(auth.me.id);
   res.json({ ok: true });
 });
 
