@@ -364,7 +364,20 @@ export async function processLianaEvent(payload: LianaEventEnvelope): Promise<vo
       await remember(owner.id, convoKey, "assistant", posted);
       return;
     }
+    if (intake.intent === "edit_workflow" && intake.edit) {
+      const sentence = await applyIntakeEdit(owner, existing, intake.edit, intake.reply);
+      await postReply(install, reply, sentence);
+      await remember(owner.id, convoKey, "assistant", sentence);
+      return;
+    }
     if (intake.intent === "create_workflow" && intake.workflow) {
+      // Slot-fill: github with no repo → ask which one instead of drafting a git-less workflow.
+      const ask = await githubRepoGuard(owner, intake.workflow);
+      if (ask) {
+        await postReply(install, reply, ask);
+        await remember(owner.id, convoKey, "assistant", ask);
+        return;
+      }
       const posted = await createDraftAndPostCard(install, owner, ev.user, intake.workflow, profile, reply, intake.reply);
       await remember(owner.id, convoKey, "assistant", posted);
       return;
@@ -460,14 +473,96 @@ interface OwnedWorkflow {
 }
 
 async function describeOwnerWorkflows(ownerParticipantId: string): Promise<OwnedWorkflow[]> {
+  const { rosterIntegrationSettings } = await import("@jungle/shared");
   const rows = await db.listLianaWorkflowsForOwner(ownerParticipantId);
   const out: OwnedWorkflow[] = [];
   for (const liana of rows) {
     const wf = await db.getWorkflow(liana.workflow_id);
     if (!wf) continue;
-    out.push({ wf, liana, line: `${wf.name} (${cadenceSentence(wf)}${wf.status === "paused" ? ", paused" : wf.status === "draft" ? ", draft" : ""})` });
+    // #N ref (position in this list) + an integration/repo summary so the intake model can target
+    // an edit precisely ("change #2 to 9am", "switch the repo on the digest").
+    const ref = out.length + 1;
+    const seat = wf.roster[0];
+    const ints = (seat?.integrations ?? []).map((k) => {
+      if (k === "github") {
+        const repo = rosterIntegrationSettings(seat!, "github").repo;
+        return typeof repo === "string" && repo ? `github (${repo})` : "github";
+      }
+      return k;
+    });
+    const statusTag = wf.status === "paused" ? ", paused" : wf.status === "draft" ? ", draft" : "";
+    const line =
+      `#${ref} ${wf.name} (${cadenceSentence(wf)}${statusTag})` +
+      (ints.length ? ` · ${ints.join(", ")}` : "") +
+      (liana.deliver_to?.length ? ` · to ${liana.deliver_to.join(" + ")}` : "");
+    out.push({ wf, liana, line });
   }
   return out;
+}
+
+// Slot-fill guard for CREATE: github needs a repo to grant any git tools, but the model only sets
+// repo when the user names one. If github is requested without a repo, try to fill it in — exactly
+// one repo → use it silently; otherwise return a question to ask INSTEAD of drafting (the user's
+// answer lands next turn and intake re-emits the full spec). Returns null to proceed (spec.repo may
+// have been filled in), or a reply string to send instead of creating the draft.
+async function githubRepoGuard(owner: db.Participant, spec: IntakeWorkflowSpec): Promise<string | null> {
+  if (!spec.integrations.includes("github") || (spec.repo && spec.repo.trim())) return null;
+  if (!(await db.getGithubIdentity(owner.id))) {
+    return `That one works on a GitHub repo, but your GitHub isn't connected yet — connect it at ${LIANA_WEB_URL}, then tell me which repo (owner/name) to use.`;
+  }
+  let repos: { full_name: string }[] = [];
+  try {
+    repos = await (await import("../github")).listUserRepos(owner.id);
+  } catch (e) {
+    console.error("liana repo guard:", e);
+  }
+  if (repos.length === 1) {
+    spec.repo = repos[0].full_name;
+    return null;
+  }
+  const sample = repos.slice(0, 6).map((r) => r.full_name);
+  return sample.length
+    ? `Which repo should "${spec.name}" work on? A few of yours: ${sample.join(", ")}. Just tell me the owner/name.`
+    : `Which GitHub repo should "${spec.name}" work on? Tell me the owner/name.`;
+}
+
+// Apply an intake edit_workflow patch to one of the owner's existing workflows, through the same
+// editLianaWorkflow path the web PATCH uses. Translates the model's `approvals` + `repo` shorthands
+// into the per-integration settings map. Returns the sentence to reply with (honest on failure).
+async function applyIntakeEdit(
+  owner: db.Participant,
+  existing: OwnedWorkflow[],
+  edit: import("./lianaIntake").IntakeEdit,
+  confirmSentence: string,
+): Promise<string> {
+  const target = existing[edit.workflowRef - 1];
+  if (!target) return "I couldn't tell which workflow you meant — which one should I change?";
+  const { approvalFieldFor } = await import("@jungle/shared");
+  const p = edit.patch ?? {};
+  const settings: Record<string, Record<string, unknown>> = {};
+  for (const [k, ask] of Object.entries(p.approvals ?? {})) {
+    const field = approvalFieldFor(k);
+    if (field) settings[k] = { ...(settings[k] ?? {}), [field.key]: ask };
+  }
+  if (typeof p.repo === "string" && p.repo.trim()) settings.github = { ...(settings.github ?? {}), repo: p.repo.trim() };
+  try {
+    const updated = await editLianaWorkflow(target.wf, owner, {
+      name: p.name,
+      prompt: p.prompt,
+      cron: p.cron,
+      runAt: p.runAt,
+      timezone: p.timezone ?? undefined,
+      paused: p.paused,
+      deliverTo: p.deliverTo,
+      integrations: p.integrations,
+      settings: Object.keys(settings).length ? settings : undefined,
+    });
+    return confirmSentence.trim() ? confirmSentence.trim() : `Done — updated "${updated.name}".`;
+  } catch (e) {
+    if (e instanceof ApiError) return `I couldn't make that change: ${e.message}`;
+    console.error("liana edit:", e);
+    return "Something went wrong applying that change — mind trying again?";
+  }
 }
 
 // "Mon, Jul 28 at 9:00 AM" — an absolute instant rendered in its display timezone.
@@ -743,10 +838,12 @@ async function createDraftAndPostCard(
   });
 
   const statuses = await connectionStatus(owner, spec.integrations);
+  const label = (key: string): string =>
+    key === "github" && spec.repo ? `${KEY_LABELS[key] ?? key} — ${spec.repo}` : (KEY_LABELS[key] ?? key);
   const integrationLines = statuses.map((s) =>
     s.connected
-      ? `:white_check_mark: ${KEY_LABELS[s.key] ?? s.key}${s.account ? ` — ${s.account}` : ""}`
-      : `:link: ${KEY_LABELS[s.key] ?? s.key} — connect in the web app after creating`,
+      ? `:white_check_mark: ${label(s.key)}${s.key !== "github" && s.account ? ` — ${s.account}` : ""}`
+      : `:link: ${label(s.key)} — connect in the web app after creating`,
   );
   const url = LIANA_WEB_URL;
 
@@ -1030,7 +1127,19 @@ async function handleConversationalTurn(text: string, ctx: ConversationalCtx): P
     return;
   }
 
+  if (intake.intent === "edit_workflow" && intake.edit) {
+    const sentence = await applyIntakeEdit(owner, existing, intake.edit, intake.reply);
+    await replyAndRemember(ctx, ctx.toPlain(sentence));
+    return;
+  }
+
   if (intake.intent === "create_workflow" && intake.workflow) {
+    // Slot-fill: github with no repo → ask which one instead of drafting a git-less workflow.
+    const ask = await githubRepoGuard(owner, intake.workflow);
+    if (ask) {
+      await replyAndRemember(ctx, ctx.toPlain(ask));
+      return;
+    }
     // A new draft replaces any dangling pending one.
     if (ctx.pendingDraftId) {
       await cancelLianaDraft(ctx.pendingDraftId).catch(() => {});
@@ -1046,8 +1155,10 @@ async function handleConversationalTurn(text: string, ctx: ConversationalCtx): P
       originTelegramChatId: ctx.originTelegramChatId ?? null,
     });
     const statuses = await connectionStatus(owner, intake.workflow.integrations);
+    const wfLabel = (key: string): string =>
+      key === "github" && intake.workflow!.repo ? `${KEY_LABELS[key] ?? key} — ${intake.workflow!.repo}` : (KEY_LABELS[key] ?? key);
     const integrationLines = statuses.map((s) =>
-      s.connected ? `✓ ${KEY_LABELS[s.key] ?? s.key}` : `→ ${KEY_LABELS[s.key] ?? s.key} (connect on the web)`,
+      s.connected ? `✓ ${wfLabel(s.key)}` : `→ ${wfLabel(s.key)} (connect on the web)`,
     );
     const card =
       `${intake.reply}\n\n${wf.name} — ${cadenceSentence(wf)}` +
