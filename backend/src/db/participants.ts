@@ -242,6 +242,24 @@ export async function getParticipantByEmail(
   return rows[0] ?? null;
 }
 
+// Adopt a pre-accounts shadow participant into a signed-in account: stamp the Firebase uid
+// (and freshen email/avatar) so their existing workflows and links carry over.
+export async function claimParticipant(
+  id: string,
+  args: { firebaseUid: string; email?: string | null; avatarUrl?: string | null },
+): Promise<Participant> {
+  const { rows } = await pool.query<Participant>(
+    `update participants set
+       firebase_uid = $2,
+       email = coalesce($3, email),
+       avatar_url = coalesce($4, avatar_url)
+     where id = $1
+     returning *`,
+    [id, args.firebaseUid, args.email ?? null, args.avatarUrl ?? null],
+  );
+  return rows[0];
+}
+
 export async function getParticipantByHandle(
   workspaceId: string,
   handle: string,

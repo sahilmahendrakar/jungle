@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { isAllowedModel, type WorkflowRole } from "@jungle/shared";
 import * as db from "../db";
 import * as slack from "../slack/api";
@@ -121,14 +121,17 @@ export async function handleInstallCallback(oauth: slack.OAuthV2Result): Promise
   });
 }
 
-// ============================ Owner resolution ============================
+// ============================ Owner resolution (accounts) ============================
 
-// Slack user -> participant in the install's workspace. Shares slack_user_links with the
-// mirroring bridge so one person is one participant; creates a shadow human on first contact.
-async function getOrCreateOwner(
+// A Liana account is a participant with a firebase_uid — real sign-in, exactly like jungle.
+// Slack user -> that participant via slack_user_links. No more silent shadow creation: an
+// unaccounted Slack user is prompted to create an account (a single-use link code binds their
+// Slack identity to whoever completes Google sign-in on the web). One auto-link shortcut stays:
+// a Slack profile email matching an already-signed-in account in the workspace links silently.
+async function resolveOwner(
   install: db.LianaInstall,
   slackUserId: string,
-): Promise<{ participant: db.Participant; profile: slack.SlackUserProfile | null }> {
+): Promise<{ account: db.Participant | null; profile: slack.SlackUserProfile | null }> {
   let profile: slack.SlackUserProfile | null = null;
   try {
     profile = await slack.usersInfo(install.bot_token, slackUserId);
@@ -139,30 +142,132 @@ async function getOrCreateOwner(
   const existing = await db.getUserLink(install.team_id, slackUserId);
   if (existing) {
     const p = await db.getParticipant(existing.participant_id);
-    if (p) return { participant: p, profile };
+    // A link to a pre-accounts shadow participant is not an account yet — the shadow is adopted
+    // (workflows and all) when its owner redeems a link code.
+    if (p?.firebase_uid) return { account: p, profile };
+    return { account: null, profile };
   }
-  if (!profile) throw new Error("liana: cannot resolve Slack user profile");
 
-  if (profile.email) {
+  if (profile?.email) {
     const human = await db.getParticipantByEmail(install.workspace_id, profile.email);
-    if (human) {
+    if (human?.firebase_uid) {
       await db.insertUserLink({ teamId: install.team_id, slackUserId, participantId: human.id, kind: "linked" });
-      return { participant: human, profile };
+      return { account: human, profile };
     }
   }
+  return { account: null, profile };
+}
 
-  const handle = await uniqueHandle(install.workspace_id, profile.displayName);
-  const shadow = await db.createParticipant({
-    kind: "human",
-    workspaceId: install.workspace_id,
-    handle,
-    displayName: profile.displayName,
-    avatarUrl: profile.avatarUrl,
-    email: profile.email,
-    firebaseUid: null,
+// Mint the sign-up link an unaccounted Slack user is prompted with.
+async function mintSlackLinkUrl(teamId: string, slackUserId: string): Promise<string> {
+  const code = randomBytes(16).toString("hex");
+  await db.insertLianaLinkCode({
+    code,
+    teamId,
+    slackUserId,
+    expiresAt: new Date(Date.now() + 24 * 3600_000).toISOString(),
   });
-  await db.insertUserLink({ teamId: install.team_id, slackUserId, participantId: shadow.id, kind: "shadow" });
-  return { participant: shadow, profile };
+  return `${LIANA_WEB_URL}/?link=${code}`;
+}
+
+// Redeem a link code for a signed-in Google account (POST /api/liana/link/slack). Adopts an
+// existing shadow participant when there is one — their pre-accounts workflows come along.
+export async function completeSlackLink(
+  user: { uid: string; email: string | null; name: string | null; picture: string | null },
+  code: string,
+): Promise<{ teamName: string | null }> {
+  const link = await db.consumeLianaLinkCode(code.trim());
+  if (!link) throw new ApiError(400, "that link expired or was already used — message @Liana in Slack for a fresh one");
+  const install = await db.getLianaInstall(link.team_id);
+  if (!install || install.status !== "active") throw new ApiError(404, "that Slack workspace's Liana install is gone");
+
+  let participant: db.Participant | null = null;
+  const existing = await db.getUserLink(install.team_id, link.slack_user_id);
+  if (existing) {
+    const p = await db.getParticipant(existing.participant_id);
+    if (p) {
+      if (p.firebase_uid && p.firebase_uid !== user.uid) {
+        throw new ApiError(409, "that Slack identity is already linked to a different Google account");
+      }
+      participant = p.firebase_uid
+        ? p
+        : await db.claimParticipant(p.id, { firebaseUid: user.uid, email: user.email, avatarUrl: user.picture });
+    }
+  }
+  if (!participant) {
+    participant =
+      (await db.getParticipantByUidAndWorkspace(user.uid, install.workspace_id)) ??
+      (user.email ? await db.getParticipantByEmail(install.workspace_id, user.email) : null);
+    if (participant && !participant.firebase_uid) {
+      participant = await db.claimParticipant(participant.id, {
+        firebaseUid: user.uid,
+        email: user.email,
+        avatarUrl: user.picture,
+      });
+    }
+    if (participant && participant.firebase_uid !== user.uid) participant = null; // email collision with someone else's account
+    if (!participant) {
+      const displayName = user.name ?? user.email ?? "New member";
+      participant = await db.createParticipant({
+        kind: "human",
+        workspaceId: install.workspace_id,
+        handle: await uniqueHandle(install.workspace_id, displayName),
+        displayName,
+        avatarUrl: user.picture,
+        email: user.email,
+        firebaseUid: user.uid,
+      });
+    }
+    await db.insertUserLink({
+      teamId: install.team_id,
+      slackUserId: link.slack_user_id,
+      participantId: participant.id,
+      kind: "linked",
+    });
+  }
+
+  // Close the loop where the person is: a Slack DM confirming they're set up (best-effort).
+  try {
+    const dm = await slack.conversationsOpen(install.bot_token, link.slack_user_id);
+    await slack.chatPostMessage(install.bot_token, {
+      channel: dm.id,
+      text: `:seedling: You're all set${user.name ? `, ${user.name.split(" ")[0]}` : ""} — your account is ready. Tell me what you'd like automated: try "give me a morning briefing every day at 8am".`,
+    });
+  } catch (e) {
+    console.error("liana: post-link DM failed:", e);
+  }
+  return { teamName: install.team_name };
+}
+
+// The participant behind a signed-in web session. Prefers a membership whose workspace has an
+// active Liana install (the Slack-rooted one); a brand-new web signup gets a personal workspace
+// on the spot, so iMessage/Telegram work without Slack ever entering the picture.
+export async function resolveWebAccount(user: {
+  uid: string;
+  email: string | null;
+  name: string | null;
+  picture: string | null;
+}): Promise<db.Participant> {
+  const memberships = await db.listParticipantsByUid(user.uid);
+  for (const p of memberships) {
+    if (await db.getLianaInstallByWorkspace(p.workspace_id)) return p;
+  }
+  if (memberships.length) return memberships[0];
+
+  const displayName = user.name ?? user.email?.split("@")[0] ?? "You";
+  const first = displayName.split(" ")[0];
+  const handle =
+    (user.email?.split("@")[0] ?? displayName).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 30) ||
+    "user";
+  const { participant } = await db.createWorkspaceWithCreator({
+    name: `${first}'s Liana`,
+    handle,
+    displayName,
+    firebaseUid: user.uid,
+    email: user.email,
+    avatarUrl: user.picture,
+  });
+  return participant;
 }
 
 // ============================ Events (app_mention + DM) ============================
@@ -206,15 +311,36 @@ export async function processLianaEvent(payload: LianaEventEnvelope): Promise<vo
     threadTs: isMention ? (ev.thread_ts ?? ev.ts) : null,
   };
 
+  // Memory is scoped to the conversation, not the user: a thread and a DM don't share context.
+  const convoKey = isMention ? `slack:${ev.channel}:${reply.threadTs}` : `slack:${ev.channel}`;
+
   try {
-    const { participant: owner, profile } = await getOrCreateOwner(install, ev.user);
+    const { account: owner, profile } = await resolveOwner(install, ev.user);
     const text = stripBotMention(ev.text ?? "", install.bot_user_id).trim();
+
+    if (!owner) {
+      const url = await mintSlackLinkUrl(install.team_id, ev.user);
+      const first = profile?.displayName?.split(" ")[0];
+      const hello = `Hi${first ? ` ${first}` : ""}! I set up workflows — briefings, digests, reports that run themselves. First, let's get you an account — it's one click with Google.`;
+      await postReply(install, reply, `${hello}\n${url}`, [
+        { type: "section", text: { type: "mrkdwn", text: hello } },
+        {
+          type: "actions",
+          elements: [{ type: "button", style: "primary", text: { type: "plain_text", text: "Create your account" }, url }],
+        },
+      ]);
+      return;
+    }
+
     if (!text) {
       await postReply(install, reply, `Hi! Tell me what you'd like automated — e.g. "give me a morning briefing every day at 8am".`);
       return;
     }
 
-    const existing = await describeOwnerWorkflows(install.team_id, ev.user);
+    const history = await db.recentLianaMessages(owner.id, convoKey);
+    await remember(owner.id, convoKey, "user", text);
+
+    const existing = await describeOwnerWorkflows(owner.id);
     const intake = await runIntake(
       text,
       {
@@ -222,19 +348,23 @@ export async function processLianaEvent(payload: LianaEventEnvelope): Promise<vo
         userTz: profile?.tz ?? null,
         today: new Intl.DateTimeFormat("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" }).format(new Date()),
         existingWorkflows: existing.map((w) => w.line),
+        history,
       },
       await intakeModelFor(owner.id),
     );
 
     if (intake.intent === "list_workflows") {
-      await postWorkflowList(install, reply, owner, existing);
+      const posted = await postWorkflowList(install, reply, existing);
+      await remember(owner.id, convoKey, "assistant", posted);
       return;
     }
     if (intake.intent === "create_workflow" && intake.workflow) {
-      await createDraftAndPostCard(install, owner, ev.user, intake.workflow, profile, reply, intake.reply);
+      const posted = await createDraftAndPostCard(install, owner, ev.user, intake.workflow, profile, reply, intake.reply);
+      await remember(owner.id, convoKey, "assistant", posted);
       return;
     }
     await postReply(install, reply, intake.reply);
+    await remember(owner.id, convoKey, "assistant", intake.reply);
   } catch (e) {
     console.error("liana event:", e);
     try {
@@ -263,6 +393,20 @@ async function postReply(
   });
 }
 
+// Memory writes are best-effort — losing a transcript row must never fail a turn.
+async function remember(
+  participantId: string,
+  convoKey: string,
+  role: "user" | "assistant",
+  body: string,
+): Promise<void> {
+  try {
+    await db.appendLianaMessage(participantId, convoKey, role, body);
+  } catch (e) {
+    console.error("liana memory:", e);
+  }
+}
+
 // ============================ Workflow list ============================
 
 interface OwnedWorkflow {
@@ -271,8 +415,8 @@ interface OwnedWorkflow {
   line: string;
 }
 
-async function describeOwnerWorkflows(teamId: string, slackUserId: string): Promise<OwnedWorkflow[]> {
-  const rows = await db.listLianaWorkflowsForOwner(teamId, slackUserId);
+async function describeOwnerWorkflows(ownerParticipantId: string): Promise<OwnedWorkflow[]> {
+  const rows = await db.listLianaWorkflowsForOwner(ownerParticipantId);
   const out: OwnedWorkflow[] = [];
   for (const liana of rows) {
     const wf = await db.getWorkflow(liana.workflow_id);
@@ -301,25 +445,27 @@ export function cadenceSentence(wf: Pick<db.WorkflowRow, "trigger">): string {
   return `on schedule (${t.cron} ${t.timezone})`;
 }
 
+// Returns the text it posted, so the caller can record it in conversation memory.
 async function postWorkflowList(
   install: db.LianaInstall,
   reply: { channel: string; threadTs: string | null },
-  owner: db.Participant,
   existing: OwnedWorkflow[],
-): Promise<void> {
+): Promise<string> {
   if (!existing.length) {
-    await postReply(install, reply, `You don't have any workflows yet. Try: "give me a morning briefing every day at 8am".`);
-    return;
+    const text = `You don't have any workflows yet. Try: "give me a morning briefing every day at 8am".`;
+    await postReply(install, reply, text);
+    return text;
   }
   const lines = existing.map((w) => `• *${w.wf.name}* — ${cadenceSentence(w.wf)}${w.wf.status === "paused" ? " (paused)" : ""}`);
-  const url = await webLink(install.team_id, owner);
-  await postReply(install, reply, `Your workflows:\n${lines.join("\n")}`, [
-    { type: "section", text: { type: "mrkdwn", text: `Your workflows:\n${lines.join("\n")}` } },
+  const text = `Your workflows:\n${lines.join("\n")}`;
+  await postReply(install, reply, text, [
+    { type: "section", text: { type: "mrkdwn", text } },
     {
       type: "actions",
-      elements: [{ type: "button", text: { type: "plain_text", text: "Open in Liana" }, url }],
+      elements: [{ type: "button", text: { type: "plain_text", text: "Open in Liana" }, url: LIANA_WEB_URL }],
     },
   ]);
+  return text;
 }
 
 // ============================ Draft creation + confirm card ============================
@@ -343,16 +489,17 @@ function slugify(name: string): string {
 }
 
 export async function createLianaDraft(args: {
-  install: db.LianaInstall;
   owner: db.Participant;
-  slackUserId: string;
+  // Slack ownership context — null for accounts chatting over iMessage/Telegram with no install.
+  teamId: string | null;
+  slackUserId: string | null;
   spec: IntakeWorkflowSpec;
   defaultTz: string | null;
   origin?: { channel: string; threadTs: string | null };
   // "Liana answers where you ask": the creating channel is the default delivery target.
   deliverTo?: DeliveryChannel[];
 }): Promise<{ wf: db.WorkflowRow; liana: db.LianaWorkflowRow }> {
-  const { install, owner, spec } = args;
+  const { owner, spec } = args;
 
   // Cadence: bad cron/timezone from intake degrades to on-demand rather than failing the flow.
   let trigger: db.WorkflowRow["trigger"] = { type: "manual" };
@@ -377,7 +524,7 @@ export async function createLianaDraft(args: {
   ];
 
   let wf = await workflows.createDraft({
-    workspaceId: install.workspace_id,
+    workspaceId: owner.workspace_id,
     createdBy: owner.id,
     name: spec.name,
   });
@@ -391,7 +538,7 @@ export async function createLianaDraft(args: {
 
   const liana = await db.insertLianaWorkflow({
     workflowId: wf.id,
-    teamId: install.team_id,
+    teamId: args.teamId,
     slackUserId: args.slackUserId,
     ownerParticipantId: owner.id,
     originChannelId: args.origin?.channel ?? null,
@@ -439,6 +586,7 @@ const KEY_LABELS: Record<string, string> = {
   mixpanel: "Mixpanel",
 };
 
+// Returns the text it posted, so the caller can record it in conversation memory.
 async function createDraftAndPostCard(
   install: db.LianaInstall,
   owner: db.Participant,
@@ -447,10 +595,15 @@ async function createDraftAndPostCard(
   profile: slack.SlackUserProfile | null,
   reply: { channel: string; threadTs: string | null },
   replySentence: string,
-): Promise<void> {
+): Promise<string> {
+  // With conversation memory, "actually make it 9am" re-drafts — the new draft supersedes any
+  // unconfirmed one from this same conversation instead of stacking cards that all still work.
+  const stale = await db.listLianaDraftsByOrigin(owner.id, reply.channel, reply.threadTs);
+  for (const s of stale) await cancelLianaDraft(s.workflow_id).catch(() => {});
+
   const { wf } = await createLianaDraft({
-    install,
     owner,
+    teamId: install.team_id,
     slackUserId,
     spec,
     defaultTz: profile?.tz ?? null,
@@ -463,7 +616,7 @@ async function createDraftAndPostCard(
       ? `:white_check_mark: ${KEY_LABELS[s.key] ?? s.key}${s.account ? ` — ${s.account}` : ""}`
       : `:link: ${KEY_LABELS[s.key] ?? s.key} — connect in the web app after creating`,
   );
-  const url = await webLink(install.team_id, owner);
+  const url = LIANA_WEB_URL;
 
   const detail =
     `*${wf.name}* — ${cadenceSentence(wf)}\n` +
@@ -492,6 +645,7 @@ async function createDraftAndPostCard(
       ],
     },
   ]);
+  return `${replySentence}\n${detail}`;
 }
 
 // ============================ Interactivity (confirm / cancel) ============================
@@ -511,6 +665,22 @@ export async function handleInteractivity(payload: BlockActionPayload): Promise<
   const responseUrl = payload.response_url;
   if (!action?.action_id || !workflowId || !responseUrl) return;
 
+  // Grab the ownership row up front: cancel deletes it, and we want the origin conversation for
+  // the memory note either way. A missing row means the draft was superseded by a newer one.
+  const row = await db.getLianaWorkflow(workflowId);
+  if (!row) {
+    await respondViaUrl(responseUrl, {
+      replace_original: false,
+      text: "That draft was replaced by a newer one — use the buttons on the latest message.",
+    }).catch(() => {});
+    return;
+  }
+  const noteConvo = row.origin_channel_id
+    ? row.origin_thread_ts
+      ? `slack:${row.origin_channel_id}:${row.origin_thread_ts}`
+      : `slack:${row.origin_channel_id}`
+    : null;
+
   try {
     if (action.action_id === "liana_confirm") {
       const result = await confirmLianaWorkflow(workflowId);
@@ -523,9 +693,11 @@ export async function handleInteractivity(payload: BlockActionPayload): Promise<
             ? `\n:link: Heads up: connect ${result.unconnected.map((k) => KEY_LABELS[k] ?? k).join(", ")} in <${result.url}|the web app> so I can use ${result.unconnected.length > 1 ? "them" : "it"}.`
             : ""),
       });
+      if (noteConvo) await remember(row.owner_participant_id, noteConvo, "assistant", `Workflow "${result.wf.name}" was confirmed and is now live.`);
     } else if (action.action_id === "liana_cancel") {
       await cancelLianaDraft(workflowId);
       await respondViaUrl(responseUrl, { replace_original: true, text: "No problem — canceled." });
+      if (noteConvo) await remember(row.owner_participant_id, noteConvo, "assistant", `The draft workflow was canceled.`);
     }
   } catch (e) {
     console.error("liana interactivity:", e);
@@ -575,7 +747,7 @@ export async function confirmLianaWorkflow(
   return {
     wf: finalized,
     unconnected: statuses.filter((s) => !s.connected).map((s) => s.key),
-    url: await webLink(liana.team_id, owner),
+    url: LIANA_WEB_URL,
   };
 }
 
@@ -625,17 +797,35 @@ const NO_RE = /^\s*(no|n|nope|cancel|stop|nevermind|never mind)\s*[.!]*\s*$/i;
 // state lives, which delivery channel new drafts default to — come in via ctx.
 interface ConversationalCtx {
   owner: db.Participant;
-  install: db.LianaInstall;
+  install: db.LianaInstall | null; // null: an account with no Slack install (web/iMessage/Telegram only)
   channel: DeliveryChannel; // new drafts deliver here — "Liana answers where you ask"
+  convoKey: string; // conversation-scoped memory key, e.g. "imessage:+15551234567"
   pendingDraftId: string | null;
   reply: (text: string) => Promise<void>;
   setPendingDraft: (draftId: string | null) => Promise<void>;
   toPlain: (md: string) => string; // channel's markdown handling for freeform intake replies
 }
 
+// Reply + record in the conversation's memory in one motion.
+async function replyAndRemember(ctx: ConversationalCtx, text: string): Promise<void> {
+  await ctx.reply(text);
+  await remember(ctx.owner.id, ctx.convoKey, "assistant", text);
+}
+
 async function handleConversationalTurn(text: string, ctx: ConversationalCtx): Promise<void> {
-  const { owner, install, reply } = ctx;
-  const slackUserId = (await db.getSlackUserIdForParticipant(install.team_id, owner.id)) ?? "";
+  const { owner, install } = ctx;
+
+  // Account gate: links minted before the sign-in era can point at shadow participants.
+  if (!owner.firebase_uid) {
+    await ctx.reply(
+      `Almost there — Liana now uses accounts. Create yours at ${LIANA_WEB_URL} (one click with Google), then text me again.`,
+    );
+    return;
+  }
+
+  const slackUserId = install ? await db.getSlackUserIdForParticipant(install.team_id, owner.id) : null;
+  const history = await db.recentLianaMessages(owner.id, ctx.convoKey);
+  await remember(owner.id, ctx.convoKey, "user", text);
 
   // Pending draft: YES/NO resolves it; anything else falls through to a fresh intake turn
   // (which replaces the pending draft if it drafts a new workflow).
@@ -644,7 +834,8 @@ async function handleConversationalTurn(text: string, ctx: ConversationalCtx): P
       const draftId = ctx.pendingDraftId;
       await ctx.setPendingDraft(null);
       const result = await confirmLianaWorkflow(draftId);
-      await reply(
+      await replyAndRemember(
+        ctx,
         `🌿 ${result.wf.name} is live — ${cadenceSentence(result.wf)}. I'm doing a first run now.` +
           (result.unconnected.length
             ? `\nHeads up: connect ${result.unconnected.map((k) => KEY_LABELS[k] ?? k).join(", ")} so I can use ${result.unconnected.length > 1 ? "them" : "it"}: ${result.url}`
@@ -656,12 +847,12 @@ async function handleConversationalTurn(text: string, ctx: ConversationalCtx): P
       const draftId = ctx.pendingDraftId;
       await ctx.setPendingDraft(null);
       await cancelLianaDraft(draftId).catch(() => {});
-      await reply("No problem — canceled.");
+      await replyAndRemember(ctx, "No problem — canceled.");
       return;
     }
   }
 
-  const existing = await describeOwnerWorkflows(install.team_id, slackUserId);
+  const existing = await describeOwnerWorkflows(owner.id);
   const intake = await runIntake(
     text,
     {
@@ -669,16 +860,17 @@ async function handleConversationalTurn(text: string, ctx: ConversationalCtx): P
       userTz: null,
       today: new Intl.DateTimeFormat("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" }).format(new Date()),
       existingWorkflows: existing.map((w) => w.line),
+      history,
     },
     await intakeModelFor(owner.id),
   );
 
   if (intake.intent === "list_workflows") {
     if (!existing.length) {
-      await reply(`You don't have any workflows yet. Try: "morning briefing every day at 8am".`);
+      await replyAndRemember(ctx, `You don't have any workflows yet. Try: "morning briefing every day at 8am".`);
     } else {
       const lines = existing.map((w) => `• ${w.wf.name} — ${cadenceSentence(w.wf)}${w.wf.status === "paused" ? " (paused)" : ""}`);
-      await reply(`Your workflows:\n${lines.join("\n")}\nManage them: ${await webLink(install.team_id, owner)}`);
+      await replyAndRemember(ctx, `Your workflows:\n${lines.join("\n")}\nManage them: ${LIANA_WEB_URL}`);
     }
     return;
   }
@@ -690,8 +882,8 @@ async function handleConversationalTurn(text: string, ctx: ConversationalCtx): P
       await ctx.setPendingDraft(null);
     }
     const { wf } = await createLianaDraft({
-      install,
       owner,
+      teamId: install?.team_id ?? null,
       slackUserId,
       spec: intake.workflow,
       defaultTz: null,
@@ -702,7 +894,8 @@ async function handleConversationalTurn(text: string, ctx: ConversationalCtx): P
     const integrationLines = statuses.map((s) =>
       s.connected ? `✓ ${KEY_LABELS[s.key] ?? s.key}` : `→ ${KEY_LABELS[s.key] ?? s.key} (connect on the web)`,
     );
-    await reply(
+    await replyAndRemember(
+      ctx,
       `${intake.reply}\n\n${wf.name} — ${cadenceSentence(wf)}` +
         (integrationLines.length ? `\n${integrationLines.join("\n")}` : "") +
         `\n\nReply YES to create it, or NO to cancel.`,
@@ -710,18 +903,18 @@ async function handleConversationalTurn(text: string, ctx: ConversationalCtx): P
     return;
   }
 
-  await reply(ctx.toPlain(intake.reply));
+  await replyAndRemember(ctx, ctx.toPlain(intake.reply));
 }
 
-// Inbound text from a linked phone. Unlinked numbers get one pointer to the web app (deduped
-// upstream, so no loops).
+// Inbound text from a linked phone. Unaccounted numbers get one pointer to account creation
+// (deduped upstream, so no loops).
 export async function processIMessageInbound(inbound: imsg.InboundText): Promise<void> {
   const link = await db.getPhoneLinkByPhone(inbound.fromPhone);
   if (!link || !link.verified_at) {
     await imsg
       .sendIMessage(
         inbound.fromPhone,
-        `This number isn't linked to a Liana account yet. Link it from Settings: ${LIANA_WEB_URL}/settings`,
+        `Hi! I'm Liana — I set up workflows that run themselves. First, create your account (one click with Google) and link this number: ${LIANA_WEB_URL}`,
       )
       .catch((e) => console.error("liana imessage: unlinked reply failed:", e));
     return;
@@ -735,14 +928,11 @@ export async function processIMessageInbound(inbound: imsg.InboundText): Promise
     const owner = await db.getParticipant(link.participant_id);
     if (!owner) throw new Error("phone link points at a missing participant");
     const install = await db.getLianaInstallByWorkspace(owner.workspace_id);
-    if (!install) {
-      await reply("Your Slack workspace's Liana install is gone — reinstall from Slack first.");
-      return;
-    }
     await handleConversationalTurn(inbound.text, {
       owner,
       install,
       channel: "imessage",
+      convoKey: `imessage:${link.phone}`,
       pendingDraftId: link.pending_draft_id,
       reply,
       setPendingDraft: (id) => db.setPhonePendingDraft(owner.id, id),
@@ -788,7 +978,7 @@ export async function processTelegramInbound(inbound: tg.TelegramInbound): Promi
       await reply(
         existing?.verified_at
           ? "You're already linked. Tell me what you'd like automated!"
-          : `That link is expired or already used — get a fresh one from Settings: ${LIANA_WEB_URL}/settings`,
+          : `That link is expired or already used — sign in and get a fresh one: ${LIANA_WEB_URL}/settings`,
       );
     } catch (e) {
       console.error("liana telegram /start:", e);
@@ -799,7 +989,7 @@ export async function processTelegramInbound(inbound: tg.TelegramInbound): Promi
   const link = await db.getTelegramLinkByChat(inbound.chatId);
   if (!link || !link.verified_at) {
     await reply(
-      `This Telegram account isn't linked to Liana yet. Link it from Settings: ${LIANA_WEB_URL}/settings`,
+      `Hi! I'm Liana — I set up workflows that run themselves. First, create your account (one click with Google) and link Telegram: ${LIANA_WEB_URL}`,
     ).catch((e) => console.error("liana telegram: unlinked reply failed:", e));
     return;
   }
@@ -808,14 +998,11 @@ export async function processTelegramInbound(inbound: tg.TelegramInbound): Promi
     const owner = await db.getParticipant(link.participant_id);
     if (!owner) throw new Error("telegram link points at a missing participant");
     const install = await db.getLianaInstallByWorkspace(owner.workspace_id);
-    if (!install) {
-      await reply("Your Slack workspace's Liana install is gone — reinstall from Slack first.");
-      return;
-    }
     await handleConversationalTurn(inbound.text, {
       owner,
       install,
       channel: "telegram",
+      convoKey: `telegram:${inbound.chatId}`,
       pendingDraftId: link.pending_draft_id,
       reply,
       setPendingDraft: (id) => db.setTelegramPendingDraft(owner.id, id),
@@ -829,9 +1016,9 @@ export async function processTelegramInbound(inbound: tg.TelegramInbound): Promi
 
 // Channel status for the web app (Settings). iMessage is absent entirely when the deployment
 // has no provider configured — no dead UI.
-export async function channelStatus(me: db.Participant, install: db.LianaInstall) {
+export async function channelStatus(me: db.Participant, install: db.LianaInstall | null) {
   const out: Record<string, unknown> = {
-    slack: { connected: true, teamName: install.team_name },
+    slack: { connected: !!install, teamName: install?.team_name ?? null },
   };
   if (imsg.imessageConfigured()) {
     const link = await db.getPhoneLink(me.id);
@@ -860,15 +1047,15 @@ export async function onRunClosed(runId: string): Promise<void> {
   if (!run) return;
   const liana = await db.getLianaWorkflow(run.workflow_id);
   if (!liana) return; // not a Liana workflow — nothing to deliver
-  const install = await db.getLianaInstall(liana.team_id);
-  if (!install || install.status !== "active") return;
+  // Slack context is optional (accounts without an install deliver over iMessage/Telegram only).
+  const install = liana.team_id ? await db.getLianaInstall(liana.team_id) : null;
   const wf = await db.getWorkflow(run.workflow_id);
   if (!wf) return;
 
   if (!(await db.claimLianaDelivery(run.id))) return; // already delivered
 
   const owner = await db.getParticipant(liana.owner_participant_id);
-  const url = owner ? await webLink(liana.team_id, owner) : LIANA_WEB_URL;
+  const url = LIANA_WEB_URL;
   const date = new Intl.DateTimeFormat("en-US", { weekday: "short", month: "short", day: "numeric" }).format(new Date());
 
   let body: string;
@@ -886,14 +1073,20 @@ export async function onRunClosed(runId: string): Promise<void> {
   const channels = liana.deliver_to?.length ? liana.deliver_to : ["slack"];
   const failures: string[] = [];
 
+  // After a successful send, drop a one-line stub into that conversation's memory — enough for
+  // "add calendar to that" to resolve, without dragging a whole briefing into every intake call.
+  const stub = `[Delivered a "${wf.name}" run]`;
+
   if (channels.includes("slack")) {
     try {
+      if (!install || install.status !== "active" || !liana.slack_user_id) throw new Error("no active Slack install for this workflow");
       let dm = liana.dm_channel_id;
       if (!dm) {
         dm = (await slack.conversationsOpen(install.bot_token, liana.slack_user_id)).id;
         await db.setLianaDmChannel(liana.workflow_id, dm);
       }
       await slack.chatPostMessage(install.bot_token, { channel: dm, text: jungleToSlackText(body) });
+      if (owner) await remember(owner.id, `slack:${dm}`, "assistant", stub);
     } catch (e) {
       failures.push(`slack: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -904,6 +1097,7 @@ export async function onRunClosed(runId: string): Promise<void> {
       const link = owner ? await db.getPhoneLink(owner.id) : null;
       if (link?.verified_at) {
         await imsg.sendIMessage(link.phone, imsg.toPlainText(body));
+        if (owner) await remember(owner.id, `imessage:${link.phone}`, "assistant", stub);
       } else {
         failures.push("imessage: no verified phone linked");
       }
@@ -917,6 +1111,7 @@ export async function onRunClosed(runId: string): Promise<void> {
       const link = owner ? await db.getTelegramLink(owner.id) : null;
       if (link?.verified_at && link.chat_id) {
         await tg.sendTelegram(link.chat_id, body);
+        if (owner) await remember(owner.id, `telegram:${link.chat_id}`, "assistant", stub);
       } else {
         failures.push("telegram: no linked Telegram account");
       }
@@ -1092,64 +1287,6 @@ export async function editLianaWorkflow(
     if (attached > 0 || integrationsRemoved.length > 0) void runners.reconfigure(seatId).catch(() => {});
   }
   return updated;
-}
-
-// ============================ Web-app link tokens ============================
-
-// Signed bearer tokens for the Liana web app: payload.b64url + "." + hmac.b64url. Carried in
-// "Open in Liana" links and then used as the Authorization: Bearer credential by the web app.
-// Secret: LIANA_LINK_SECRET, falling back to the Slack signing secret (present whenever the
-// Liana app is configured at all).
-
-interface LianaTokenPayload {
-  t: string; // team id
-  u: string; // slack user id
-  p: string; // participant id
-  exp: number; // unix seconds
-}
-
-function tokenSecret(): string {
-  const s = process.env.LIANA_LINK_SECRET || process.env.LIANA_SLACK_SIGNING_SECRET || "";
-  if (!s) throw new Error("LIANA_LINK_SECRET / LIANA_SLACK_SIGNING_SECRET not set");
-  return s;
-}
-
-export function signLianaToken(p: { teamId: string; slackUserId: string; participantId: string }, ttlDays = 30): string {
-  const payload: LianaTokenPayload = {
-    t: p.teamId,
-    u: p.slackUserId,
-    p: p.participantId,
-    exp: Math.floor(Date.now() / 1000) + ttlDays * 86400,
-  };
-  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
-  const mac = createHmac("sha256", tokenSecret()).update(body).digest("base64url");
-  return `${body}.${mac}`;
-}
-
-export function verifyLianaToken(token: string): LianaTokenPayload | null {
-  const dot = token.lastIndexOf(".");
-  if (dot <= 0) return null;
-  const body = token.slice(0, dot);
-  const mac = token.slice(dot + 1);
-  const expected = createHmac("sha256", tokenSecret()).update(body).digest("base64url");
-  const a = Buffer.from(mac);
-  const b = Buffer.from(expected);
-  if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
-  try {
-    const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as LianaTokenPayload;
-    if (!payload.t || !payload.u || !payload.p) return null;
-    if (payload.exp < Date.now() / 1000) return null;
-    return payload;
-  } catch {
-    return null;
-  }
-}
-
-async function webLink(teamId: string, owner: db.Participant): Promise<string> {
-  // Owner links carry a fresh token; the web app stores it and uses it as its session.
-  const slackUserId = (await db.getSlackUserIdForParticipant(teamId, owner.id)) ?? "";
-  const token = signLianaToken({ teamId, slackUserId, participantId: owner.id });
-  return `${LIANA_WEB_URL}/?t=${encodeURIComponent(token)}`;
 }
 
 // ============================ OAuth install state ============================

@@ -4,7 +4,9 @@ import { resolveProvider } from "../providers";
 // Liana intake: one structured Messages call that turns a raw Slack message
 // ("@Liana give me a morning briefing every day at 8am") into either a workflow draft spec,
 // a list request, or a plain conversational reply. This is deliberately NOT a runner/agent —
-// it's a single parse against a JSON schema, so it's fast, cheap to reason about, and stateless.
+// it's a single parse against a JSON schema: fast and cheap to reason about. Conversation
+// memory (ctx.history, a bounded window from liana_messages) is just wider input to the same
+// stateless parse — no session lives here.
 //
 // Structured output via a FORCED TOOL CALL (tool_choice: the one tool), not output_config —
 // the forced-tool pattern works on every Anthropic-compatible provider (Moonshot/Kimi, z.ai/GLM)
@@ -112,6 +114,13 @@ function systemPrompt(ctx: IntakeContext): string {
     `(product analytics: queries, reports, metrics). Pick only integrations the task actually needs. If the task needs one we ` +
     `don't have (e.g. Salesforce), say so honestly in the reply and leave it out.\n\n` +
     `Voice: competent and warm, brief, no exclamation-point pileups, no filler.\n\n` +
+    `You may be mid-conversation: a "Conversation so far" transcript can precede the latest ` +
+    `message. Use it to resolve references ("actually make it 9am", "add calendar to that"). ` +
+    `Transcript lines marked "Liana:" are messages you already sent, in rendered chat form — ` +
+    `never imitate or re-send that form; you only ever answer the latest message. A request to ` +
+    `change something you proposed IS intent create_workflow: emit the full updated workflow ` +
+    `object with the change applied. The facts in THIS prompt (today's date, the workflow list) ` +
+    `are current and authoritative — trust them over anything older in the transcript.\n\n` +
     `Context: today is ${ctx.today}. The user is ${ctx.userName}` +
     `${ctx.userTz ? ` (timezone ${ctx.userTz})` : ""}.` +
     `${
@@ -127,6 +136,25 @@ export interface IntakeContext {
   userTz: string | null;
   today: string; // e.g. "Monday 2026-07-20"
   existingWorkflows: string[]; // "Morning briefing (daily 8:00 AM)"
+  // Bounded rolling transcript of this conversation (oldest first), from liana_messages. The
+  // intake stays a single stateless parse — history is just wider input.
+  history?: IntakeTurn[];
+}
+
+export interface IntakeTurn {
+  role: "user" | "assistant";
+  body: string;
+}
+
+// History rides INSIDE the single user message as a labeled transcript, not as native
+// user/assistant turns. Tested the native form: Moonshot (kimi) ignores a forced tool_choice
+// whenever an assistant turn precedes it and just continues the chat as prose — which silently
+// disables structured output on the default model. Flattening keeps the call shape identical to
+// the history-less case (one user message, forced tool call) on every provider.
+function buildUserContent(history: IntakeTurn[], current: string): string {
+  if (!history.length) return current;
+  const lines = history.map((t) => `${t.role === "user" ? "User" : "Liana"}: ${t.body}`);
+  return `Conversation so far:\n${lines.join("\n")}\n\nLatest message from the user:\n${current}`;
 }
 
 // One client per provider endpoint (first-party = the plain env-keyed client). Routed providers
@@ -160,7 +188,7 @@ export async function runIntake(message: string, ctx: IntakeContext, model: stri
     // reject forced tool_choice while thinking is enabled. Accepted by every catalog model.
     thinking: { type: "disabled" },
     system: systemPrompt(ctx),
-    messages: [{ role: "user", content: message }],
+    messages: [{ role: "user", content: buildUserContent(ctx.history ?? [], message) }],
     tools: [
       {
         name: "intake_result",

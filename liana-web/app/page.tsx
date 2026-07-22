@@ -2,44 +2,35 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import {
-  api,
-  API_URL,
-  captureTokenFromUrl,
-  getToken,
-  INTEGRATION_LABELS,
-  type WireWorkflow,
-} from "@/lib/api";
+import { api, INTEGRATION_LABELS, type WireWorkflow } from "@/lib/api";
+import { useAuth } from "@/components/AuthProvider";
+import { ChannelCards } from "@/components/ChannelCards";
 import { capitalize, timeAgo, truncate } from "@/lib/format";
 
 // Home: the workflows list. Cards, not a table — a person has a handful of workflows, and each
-// card reads as a sentence: name, cadence, integrations, last-run snippet.
+// card reads as a sentence: name, cadence, integrations, last-run snippet. First run (no
+// workflows yet) doubles as setup: the example ask plus the channel cards.
 
 export default function HomePage() {
+  const { status } = useAuth();
   const [workflows, setWorkflows] = useState<WireWorkflow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [noToken, setNoToken] = useState(false);
 
   useEffect(() => {
-    captureTokenFromUrl();
-    if (!getToken()) {
-      setNoToken(true);
-      return;
-    }
+    if (status !== "ready") return;
     api<{ workflows: WireWorkflow[] }>("/api/liana/workflows")
       .then((r) => setWorkflows(r.workflows))
       .catch((e: Error) => setError(e.message));
-  }, []);
+  }, [status]);
 
-  if (noToken) return <SignedOut />;
   if (error) return <p className="error-note">{error}</p>;
   if (!workflows) return <p className="muted">Loading…</p>;
-  if (!workflows.length) return <NoWorkflows />;
+  if (!workflows.length) return <FirstRun />;
 
   return (
     <>
       <h1 className="page-title">Your workflows</h1>
-      <p className="page-sub">Standing instructions that run themselves and land in your Slack DMs.</p>
+      <p className="page-sub">Standing instructions that run themselves and land where you talk.</p>
       {workflows.map((wf) => (
         <Link key={wf.id} href={`/w/${wf.id}`} className="card-link">
           <div className="card">
@@ -53,7 +44,7 @@ export default function HomePage() {
                 <> · using {wf.integrations.map((k) => INTEGRATION_LABELS[k] ?? k).join(", ")}</>
               )}
               {wf.status === "paused" && <> · paused</>}
-              {wf.status === "draft" && <> · draft — confirm it in Slack</>}
+              {wf.status === "draft" && <> · draft — confirm it where you asked</>}
             </p>
             {wf.lastRun && (
               <p className="lastrun">
@@ -69,30 +60,17 @@ export default function HomePage() {
   );
 }
 
-function SignedOut() {
+function FirstRun() {
   return (
-    <div className="empty">
-      <div className="big-leaf">🌿</div>
-      <h2>Liana lives in Slack</h2>
-      <p>
-        Open Liana from a link the bot sends you (message <b>@Liana</b> and ask for your workflows), or install
-        it to your Slack workspace.
-      </p>
-      <a className="btn primary" href={`${API_URL}/auth/liana/slack/install`}>
-        Add to Slack
-      </a>
-    </div>
+    <>
+      <div className="empty" style={{ paddingBottom: 28 }}>
+        <div className="big-leaf">🌱</div>
+        <h2>Let&apos;s set up your first workflow</h2>
+        <p>Connect a place to talk below, then just ask — try:</p>
+        <span className="example">&ldquo;Give me a morning briefing every day at 8am&rdquo;</span>
+      </div>
+      <h2 className="section-title">Where you talk to Liana</h2>
+      <ChannelCards />
+    </>
   );
 }
-
-function NoWorkflows() {
-  return (
-    <div className="empty">
-      <div className="big-leaf">🌱</div>
-      <h2>No workflows yet</h2>
-      <p>Ask in Slack and it happens — try messaging @Liana:</p>
-      <span className="example">“Give me a morning briefing every day at 8am”</span>
-    </div>
-  );
-}
-

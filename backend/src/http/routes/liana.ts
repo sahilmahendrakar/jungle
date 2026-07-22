@@ -1,5 +1,6 @@
 import { Router, type Request } from "express";
 import { MODEL_CATALOG } from "@jungle/shared";
+import * as auth from "../../auth";
 import * as db from "../../db";
 import * as slack from "../../slack/api";
 import { verifySlackSignature } from "../../slack/verify";
@@ -14,9 +15,10 @@ import { ApiError } from "../errors";
 //  - lianaEventsRouter: the Liana Slack app's webhooks (events + interactivity). Signed over the
 //    RAW body with Liana's own signing secret, so this mounts BEFORE express.json() — exactly
 //    like slackEventsRouter.
-//  - lianaRouter: JSON routes — the public install flow (/auth/liana/slack/*) and the token-authed
-//    REST API the Liana web app consumes (/api/liana/*). Auth is a signed bearer token minted by
-//    the Slack bot ("Open in Liana" links), NOT the jungle Firebase session.
+//  - lianaRouter: JSON routes — the public install flow (/auth/liana/slack/*) and the REST API
+//    the Liana web app consumes (/api/liana/*). Auth is a Firebase ID token (Google sign-in,
+//    same project as jungle); the participant is resolved per request, auto-provisioning a
+//    personal workspace for brand-new web signups.
 
 const CLIENT_ID = process.env.LIANA_SLACK_CLIENT_ID ?? "";
 const CLIENT_SECRET = process.env.LIANA_SLACK_CLIENT_SECRET ?? "";
@@ -234,32 +236,45 @@ function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 }
 
-// --- Web-app REST API (bearer token minted by the bot) ---
+// --- Web-app REST API (Firebase ID token) ---
 
 interface LianaAuth {
-  teamId: string;
-  slackUserId: string;
   me: db.Participant;
-  install: db.LianaInstall;
+  install: db.LianaInstall | null; // null: account with no Slack install yet
 }
 
+// Verify the Firebase bearer and resolve the participant behind it (auto-provisioning a
+// personal workspace on first sign-in). DEV_BYPASS keeps ?as=<participantId> for the test
+// suites, exactly like the main app's guards.
 async function requireLianaAuth(req: Request): Promise<LianaAuth> {
+  if (auth.DEV_BYPASS) {
+    const as = String(req.query.as ?? "");
+    if (as) {
+      const me = await db.getParticipant(as);
+      if (!me) throw new ApiError(401, "unknown participant");
+      return { me, install: await db.getLianaInstallByWorkspace(me.workspace_id) };
+    }
+  }
   const header = req.header("authorization") ?? "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : "";
-  const payload = token ? liana.verifyLianaToken(token) : null;
-  if (!payload) throw new ApiError(401, "invalid or expired token — reopen Liana from Slack");
-  const [me, install] = await Promise.all([db.getParticipant(payload.p), db.getLianaInstall(payload.t)]);
-  if (!me || !install || install.status !== "active") throw new ApiError(401, "account not found");
-  return { teamId: payload.t, slackUserId: payload.u, me, install };
+  if (!token) throw new ApiError(401, "sign in to use Liana");
+  let user: auth.AuthUser;
+  try {
+    user = await auth.verifyIdToken(token);
+  } catch {
+    throw new ApiError(401, "your session expired — sign in again");
+  }
+  const me = await liana.resolveWebAccount(user);
+  return { me, install: await db.getLianaInstallByWorkspace(me.workspace_id) };
 }
 
 // A workflow owned by the caller, or 404 (ownership check doubles as the authz check).
 async function requireOwnedWorkflow(
-  auth: LianaAuth,
+  a: LianaAuth,
   workflowId: string,
 ): Promise<{ wf: db.WorkflowRow; row: db.LianaWorkflowRow }> {
   const row = await db.getLianaWorkflow(workflowId);
-  if (!row || row.team_id !== auth.teamId || row.owner_participant_id !== auth.me.id) {
+  if (!row || row.owner_participant_id !== a.me.id) {
     throw new ApiError(404, "workflow not found");
   }
   const wf = await db.getWorkflow(workflowId);
@@ -293,13 +308,33 @@ lianaRouter.get("/api/liana/me", async (req, res) => {
   const auth = await requireLianaAuth(req);
   res.json({
     displayName: auth.me.display_name,
-    teamName: auth.install.team_name,
+    email: auth.me.email,
+    avatarUrl: auth.me.avatar_url,
+    teamName: auth.install?.team_name ?? null,
+    slackConnected: !!auth.install,
   });
+});
+
+// Redeem a Slack sign-up link code ("Create your account" button in Slack) for the signed-in
+// Google account. Firebase-only — the whole point is binding the real identity.
+lianaRouter.post("/api/liana/link/slack", async (req, res) => {
+  const header = req.header("authorization") ?? "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+  if (!token) throw new ApiError(401, "sign in first");
+  let user: auth.AuthUser;
+  try {
+    user = await auth.verifyIdToken(token);
+  } catch {
+    throw new ApiError(401, "your session expired — sign in again");
+  }
+  const code = String((req.body as Record<string, unknown>)?.code ?? "");
+  if (!code) throw new ApiError(400, "missing code");
+  res.json(await liana.completeSlackLink(user, code));
 });
 
 lianaRouter.get("/api/liana/workflows", async (req, res) => {
   const auth = await requireLianaAuth(req);
-  const rows = await db.listLianaWorkflowsForOwner(auth.teamId, auth.slackUserId);
+  const rows = await db.listLianaWorkflowsForOwner(auth.me.id);
   const out: Record<string, unknown>[] = [];
   for (const row of rows) {
     const wf = await db.getWorkflow(row.workflow_id);

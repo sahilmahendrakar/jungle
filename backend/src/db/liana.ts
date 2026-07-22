@@ -48,8 +48,10 @@ export async function setLianaInstallStatus(teamId: string, status: "active" | "
 
 export interface LianaWorkflowRow {
   workflow_id: string;
-  team_id: string;
-  slack_user_id: string;
+  // Slack ownership context — null for workflows created by accounts with no Slack install
+  // (iMessage/Telegram-only). The owner is always owner_participant_id.
+  team_id: string | null;
+  slack_user_id: string | null;
   owner_participant_id: string;
   dm_channel_id: string | null;
   origin_channel_id: string | null;
@@ -66,8 +68,8 @@ export async function setLianaDeliverTo(workflowId: string, deliverTo: string[])
 
 export async function insertLianaWorkflow(l: {
   workflowId: string;
-  teamId: string;
-  slackUserId: string;
+  teamId: string | null;
+  slackUserId: string | null;
   ownerParticipantId: string;
   originChannelId?: string | null;
   originThreadTs?: string | null;
@@ -98,13 +100,29 @@ export async function getLianaWorkflow(workflowId: string): Promise<LianaWorkflo
   return rows[0] ?? null;
 }
 
-export async function listLianaWorkflowsForOwner(
-  teamId: string,
-  slackUserId: string,
+export async function listLianaWorkflowsForOwner(participantId: string): Promise<LianaWorkflowRow[]> {
+  const { rows } = await pool.query<LianaWorkflowRow>(
+    `select * from liana_workflows where owner_participant_id = $1 order by created_at desc`,
+    [participantId],
+  );
+  return rows;
+}
+
+// Unconfirmed drafts born in the same conversation (origin channel + thread). A new draft in a
+// conversation supersedes these — with memory, "make it 9am" re-drafts rather than stacking.
+export async function listLianaDraftsByOrigin(
+  ownerParticipantId: string,
+  originChannelId: string,
+  originThreadTs: string | null,
 ): Promise<LianaWorkflowRow[]> {
   const { rows } = await pool.query<LianaWorkflowRow>(
-    `select * from liana_workflows where team_id = $1 and slack_user_id = $2 order by created_at desc`,
-    [teamId, slackUserId],
+    `select lw.* from liana_workflows lw
+     join workflows w on w.id = lw.workflow_id
+     where lw.owner_participant_id = $1
+       and lw.origin_channel_id = $2
+       and lw.origin_thread_ts is not distinct from $3
+       and w.status = 'draft'`,
+    [ownerParticipantId, originChannelId, originThreadTs],
   );
   return rows;
 }
@@ -345,6 +363,89 @@ export async function getSlackUserIdForParticipant(
     [teamId, participantId],
   );
   return rows[0]?.slack_user_id ?? null;
+}
+
+// --- Account link codes (migration 032) ---
+
+// Single-use codes binding a Slack identity to whoever completes Google sign-in on the web.
+export interface LianaLinkCode {
+  code: string;
+  team_id: string;
+  slack_user_id: string;
+}
+
+export async function insertLianaLinkCode(args: {
+  code: string;
+  teamId: string;
+  slackUserId: string;
+  expiresAt: string;
+}): Promise<void> {
+  // Opportunistic prune keeps the table tiny without a sweeper.
+  await pool.query(`delete from liana_link_codes where expires_at < now() - interval '1 day'`);
+  await pool.query(
+    `insert into liana_link_codes (code, team_id, slack_user_id, expires_at) values ($1, $2, $3, $4)`,
+    [args.code, args.teamId, args.slackUserId, args.expiresAt],
+  );
+}
+
+// Redeem a code exactly once; null when unknown, expired, or already used.
+export async function consumeLianaLinkCode(code: string): Promise<LianaLinkCode | null> {
+  const { rows } = await pool.query<LianaLinkCode>(
+    `update liana_link_codes set used_at = now()
+     where code = $1 and used_at is null and expires_at > now()
+     returning code, team_id, slack_user_id`,
+    [code],
+  );
+  return rows[0] ?? null;
+}
+
+// --- Conversational memory (migration 033) ---
+
+export interface LianaMessage {
+  role: "user" | "assistant";
+  body: string;
+}
+
+const MEMORY_BODY_MAX = 1500; // per-message cap keeps the intake context bounded
+const MEMORY_KEEP_DAYS = 7; // TTL doubles as privacy hygiene
+
+export async function appendLianaMessage(
+  participantId: string,
+  convoKey: string,
+  role: "user" | "assistant",
+  body: string,
+): Promise<void> {
+  const trimmed = body.trim();
+  if (!trimmed) return;
+  await pool.query(
+    `insert into liana_messages (participant_id, convo_key, role, body) values ($1, $2, $3, $4)`,
+    [participantId, convoKey, role, trimmed.slice(0, MEMORY_BODY_MAX)],
+  );
+  // Prune on write (index-assisted, so this stays cheap) — no sweeper process needed.
+  await pool.query(
+    `delete from liana_messages
+     where participant_id = $1 and convo_key = $2 and created_at < now() - make_interval(days => $3)`,
+    [participantId, convoKey, MEMORY_KEEP_DAYS],
+  );
+}
+
+// The read window: last `limit` messages within `maxAgeHours`, oldest first. A conversation that
+// went quiet for a day starts fresh — stale context is worse than none.
+export async function recentLianaMessages(
+  participantId: string,
+  convoKey: string,
+  limit = 12,
+  maxAgeHours = 24,
+): Promise<LianaMessage[]> {
+  const { rows } = await pool.query<LianaMessage>(
+    `select role, body from (
+       select role, body, created_at from liana_messages
+       where participant_id = $1 and convo_key = $2 and created_at > now() - make_interval(hours => $4)
+       order by created_at desc limit $3
+     ) recent order by created_at asc`,
+    [participantId, convoKey, limit, maxAgeHours],
+  );
+  return rows;
 }
 
 // Cadence edit for a workflow's backing schedule row (web PATCH). The ticker reads cron/timezone

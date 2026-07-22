@@ -1,25 +1,9 @@
-// Tiny client for the Liana backend API. Auth = a signed bearer token minted by the Slack bot
-// ("Open in Liana" links carry ?t=<token>); we stash it in localStorage and send it on every call.
+// Tiny client for the Liana backend API. Auth = the signed-in user's Firebase ID token,
+// fetched fresh per call (the SDK caches and refreshes it under the hood).
+
+import { idToken } from "./firebase";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "https://api.jungleagents.com";
-
-const TOKEN_KEY = "liana_token";
-
-export function captureTokenFromUrl(): void {
-  if (typeof window === "undefined") return;
-  const url = new URL(window.location.href);
-  const t = url.searchParams.get("t");
-  if (t) {
-    localStorage.setItem(TOKEN_KEY, t);
-    url.searchParams.delete("t");
-    window.history.replaceState({}, "", url.pathname + url.search);
-  }
-}
-
-export function getToken(): string | null {
-  if (typeof window === "undefined") return null;
-  return localStorage.getItem(TOKEN_KEY);
-}
 
 export class ApiError extends Error {
   status: number;
@@ -30,7 +14,7 @@ export class ApiError extends Error {
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const token = getToken();
+  const token = await idToken();
   const resp = await fetch(`${API_URL}${path}`, {
     ...init,
     headers: {
@@ -53,6 +37,14 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 // --- Wire types (mirrors backend/src/http/routes/liana.ts) ---
+
+export interface WireMe {
+  displayName: string;
+  email: string | null;
+  avatarUrl: string | null;
+  teamName: string | null;
+  slackConnected: boolean;
+}
 
 export interface WireRun {
   id: string;

@@ -483,3 +483,228 @@ a.card-link:hover .card {
   color: var(--danger);
   font-size: 14px;
 }
+
+/* --- Boot / auth chrome --- */
+.boot {
+  min-height: 70vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 34px;
+  animation: boot-pulse 1.2s ease-in-out infinite;
+}
+@keyframes boot-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+.nav .who {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.nav .who-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: block;
+  transform: translateY(5px);
+}
+.nav .who-out {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--ink-soft);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+.nav .who-out:hover {
+  color: var(--ink);
+}
+.banner {
+  border-radius: 10px;
+  padding: 10px 16px;
+  font-size: 14px;
+  margin: 0 0 20px;
+  cursor: pointer;
+}
+.banner.ok {
+  background: var(--leaf-soft);
+  color: var(--leaf);
+  border: 1px solid var(--leaf);
+}
+.banner.bad {
+  background: var(--accent-soft);
+  color: var(--danger);
+  border: 1px solid var(--danger);
+}
+
+/* --- Landing (signed out) --- */
+.landing {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 0 24px 64px;
+}
+.landing-top {
+  display: flex;
+  align-items: baseline;
+  padding: 28px 0 0;
+}
+.landing-top .brand {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 22px;
+  color: var(--ink-strong);
+}
+.landing-top .brand .leaf {
+  color: var(--leaf);
+  margin-right: 6px;
+}
+.hero {
+  text-align: center;
+  padding: 72px 0 24px;
+}
+.hero h1 {
+  font-family: var(--font-display);
+  font-weight: 560;
+  font-size: clamp(36px, 6vw, 52px);
+  letter-spacing: -0.02em;
+  line-height: 1.12;
+  color: var(--ink-strong);
+  margin: 0 0 18px;
+}
+.hero-sub {
+  color: var(--ink-soft);
+  font-size: 16.5px;
+  max-width: 34rem;
+  margin: 0 auto 30px;
+}
+.link-note {
+  display: inline-block;
+  background: var(--leaf-soft);
+  color: var(--leaf);
+  border-radius: 999px;
+  padding: 6px 16px;
+  font-size: 14px;
+  margin: 0 0 18px;
+}
+.google-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-ui);
+  font-size: 15.5px;
+  font-weight: 500;
+  color: var(--ink-strong);
+  background: var(--card);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  padding: 12px 26px;
+  cursor: pointer;
+  box-shadow: 0 2px 10px rgba(34, 48, 31, 0.06);
+  transition: all 120ms ease;
+}
+.google-btn:hover {
+  border-color: var(--leaf);
+  box-shadow: 0 4px 16px rgba(34, 48, 31, 0.1);
+}
+
+/* The sample exchange: the product in one glance. */
+.vignette {
+  max-width: 30rem;
+  margin: 52px auto 0;
+  background: var(--card);
+  border: 1px solid var(--hairline);
+  border-radius: 16px;
+  padding: 22px 22px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  text-align: left;
+}
+.bubble {
+  font-size: 14.5px;
+  line-height: 1.5;
+  padding: 10px 14px;
+  border-radius: 14px;
+  max-width: 85%;
+}
+.bubble.you {
+  align-self: flex-end;
+  background: var(--leaf);
+  color: #fff;
+  border-bottom-right-radius: 4px;
+}
+.bubble.liana {
+  align-self: flex-start;
+  background: var(--paper);
+  border: 1px solid var(--hairline);
+  border-bottom-left-radius: 4px;
+}
+.bubble-who {
+  display: block;
+  font-size: 12px;
+  color: var(--ink-soft);
+  margin-bottom: 3px;
+}
+
+/* Where she lives */
+.surfaces {
+  text-align: center;
+  padding: 56px 0 0;
+}
+.surfaces h2 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 24px;
+  color: var(--ink-strong);
+  margin: 0 0 22px;
+}
+.surface-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+  text-align: left;
+}
+.surface {
+  background: var(--card);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  padding: 20px 22px;
+}
+.surface-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: var(--leaf-soft);
+  color: var(--leaf);
+  margin-bottom: 12px;
+}
+.surface-name {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 17px;
+  color: var(--ink-strong);
+  margin: 0 0 4px;
+}
+.surface-sub {
+  font-size: 13.5px;
+  color: var(--ink-soft);
+  margin: 0;
+}
+.surface-hint {
+  color: var(--ink-soft);
+  font-size: 13.5px;
+  margin: 18px 0 0;
+}
+.landing-foot {
+  text-align: center;
+  color: var(--ink-soft);
+  font-size: 13px;
+  border-top: 1px solid var(--hairline);
+  margin-top: 72px;
+  padding-top: 24px;
+}

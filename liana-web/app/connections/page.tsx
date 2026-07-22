@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { api, getToken, INTEGRATION_LABELS, type WireConnection } from "@/lib/api";
+import { api, INTEGRATION_LABELS, type WireConnection } from "@/lib/api";
 
 // Connections: the OAuth grid. Human-language scopes, popup connect for Google/GitHub (the popup
 // lands on the shared backend callback, which posts a message and closes itself).
@@ -39,10 +39,6 @@ export default function ConnectionsPage() {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(() => {
-    if (!getToken()) {
-      setError("Open Liana from Slack first (message @Liana for a link).");
-      return;
-    }
     api<{ connections: WireConnection[] }>("/api/liana/connections")
       .then((r) => setConnections(r.connections))
       .catch((e: Error) => setError(e.message));
