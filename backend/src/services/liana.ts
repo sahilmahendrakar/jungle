@@ -314,6 +314,7 @@ export async function processLianaEvent(payload: LianaEventEnvelope): Promise<vo
   // Memory is scoped to the conversation, not the user: a thread and a DM don't share context.
   const convoKey = isMention ? `slack:${ev.channel}:${reply.threadTs}` : `slack:${ev.channel}`;
 
+  let thinkingTs: string | null = null; // "working on it…" placeholder; cleared before any reply
   try {
     const { account: owner, profile } = await resolveOwner(install, ev.user);
     const text = stripBotMention(ev.text ?? "", install.bot_user_id).trim();
@@ -340,6 +341,10 @@ export async function processLianaEvent(payload: LianaEventEnvelope): Promise<vo
     const history = await db.recentLianaMessages(owner.id, convoKey);
     await remember(owner.id, convoKey, "user", text);
 
+    // Slack has no native bot "typing" indicator: post a placeholder while intake runs, then
+    // delete it right before the real reply lands (its own arrival is the "done typing" cue).
+    thinkingTs = await postThinking(install, reply);
+
     const existing = await describeOwnerWorkflows(owner.id);
     const intake = await runIntake(
       text,
@@ -352,6 +357,7 @@ export async function processLianaEvent(payload: LianaEventEnvelope): Promise<vo
       },
       await intakeModelFor(owner.id),
     );
+    await clearThinking(install, reply.channel, thinkingTs);
 
     if (intake.intent === "list_workflows") {
       const posted = await postWorkflowList(install, reply, existing);
@@ -367,12 +373,36 @@ export async function processLianaEvent(payload: LianaEventEnvelope): Promise<vo
     await remember(owner.id, convoKey, "assistant", intake.reply);
   } catch (e) {
     console.error("liana event:", e);
+    await clearThinking(install, reply.channel, thinkingTs);
     try {
       await postReply(install, reply, "Something went wrong on my end — mind trying that again?");
     } catch {
       /* ignore */
     }
   }
+}
+
+// Post/clear the Slack "typing" placeholder. Both best-effort: a placeholder that fails to post
+// (or delete) must never take down the turn — worst case is a stray "working on it…" line.
+async function postThinking(
+  install: db.LianaInstall,
+  reply: { channel: string; threadTs: string | null },
+): Promise<string | null> {
+  try {
+    const { ts } = await slack.chatPostMessage(install.bot_token, {
+      channel: reply.channel,
+      threadTs: reply.threadTs,
+      text: "🌿 _working on it…_",
+    });
+    return ts;
+  } catch {
+    return null;
+  }
+}
+
+async function clearThinking(install: db.LianaInstall, channel: string, ts: string | null): Promise<void> {
+  if (!ts) return;
+  await slack.chatDelete(install.bot_token, channel, ts).catch(() => {});
 }
 
 function stripBotMention(text: string, botUserId: string): string {
@@ -490,10 +520,13 @@ function buildPlaybook(prompt: string): string {
   return (
     `${prompt.trim()}\n\n— How to run —\n` +
     `You are the only member of this workflow: do the work yourself, don't wait on anyone. ` +
-    `Post the finished deliverable as ONE thread message in clean markdown — it is delivered to ` +
-    `the user word-for-word, so write it ready to read (no preamble about what you did). Then post ` +
-    `a separate short message "Run complete: <one-line summary>". If there is genuinely nothing ` +
-    `to report this run, skip the deliverable and just post "Run complete: nothing to report."`
+    `Post the finished deliverable as ONE thread message in PLAIN TEXT — it is delivered ` +
+    `word-for-word over chat apps (iMessage, Slack, Telegram) that do NOT render Markdown, so do ` +
+    `not use any Markdown formatting: no #headings, **bold**, *italics*, backticks/code fences, ` +
+    `tables, or [label](url) links. Write plain sentences and short lines; put raw URLs inline; ` +
+    `use a simple "- " or "• " for lists. Write it ready to read (no preamble about what you did). ` +
+    `Then post a separate short message "Run complete: <one-line summary>". If there is genuinely ` +
+    `nothing to report this run, skip the deliverable and just post "Run complete: nothing to report."`
   );
 }
 
@@ -832,6 +865,9 @@ interface ConversationalCtx {
   // Buttoned confirm (Telegram): render the draft card with inline Create it / Cancel buttons
   // instead of a typed YES/NO prompt. Required in groups, where privacy mode drops bare replies.
   confirmCard?: (cardText: string, workflowId: string) => Promise<void>;
+  // Native "typing…" indicator for this surface (auto-clears when we send the reply); fired once
+  // before the slow intake turn. Best-effort — a typing failure must not break the turn.
+  startTyping?: () => Promise<void>;
 }
 
 // Reply + record in the conversation's memory in one motion.
@@ -850,6 +886,10 @@ async function handleConversationalTurn(text: string, ctx: ConversationalCtx): P
     );
     return;
   }
+
+  // Signal we're on it before the slow work (intake LLM, or a first run on YES). The indicator
+  // clears itself when our reply lands, so one fire up front covers the whole turn.
+  await ctx.startTyping?.();
 
   const slackUserId = install ? await db.getSlackUserIdForParticipant(install.team_id, owner.id) : null;
   const history = await db.recentLianaMessages(owner.id, ctx.convoKey);
@@ -962,6 +1002,7 @@ export async function processIMessageInbound(inbound: imsg.InboundText): Promise
     const owner = await db.getParticipant(link.participant_id);
     if (!owner) throw new Error("phone link points at a missing participant");
     const install = await db.getLianaInstallByWorkspace(owner.workspace_id);
+    const typingChatId = inbound.chatId ?? link.linq_chat_id;
     await handleConversationalTurn(inbound.text, {
       owner,
       install,
@@ -971,6 +1012,7 @@ export async function processIMessageInbound(inbound: imsg.InboundText): Promise
       reply,
       setPendingDraft: (id) => db.setPhonePendingDraft(owner.id, id),
       toPlain: imsg.toPlainText,
+      startTyping: () => imsg.startTyping(typingChatId),
     });
   } catch (e) {
     console.error("liana imessage inbound:", e);
@@ -1056,6 +1098,7 @@ export async function processTelegramInbound(inbound: tg.TelegramInbound): Promi
       confirmCard: async (cardText, wfId) => {
         await tg.sendTelegramButtons(inbound.chatId, cardText, telegramConfirmButtons(wfId));
       },
+      startTyping: () => tg.sendTyping(inbound.chatId),
     });
   } catch (e) {
     console.error("liana telegram inbound:", e);
@@ -1102,6 +1145,7 @@ async function processTelegramGroupInbound(inbound: tg.TelegramInbound): Promise
       confirmCard: async (cardText, wfId) => {
         await tg.sendTelegramButtons(inbound.chatId, cardText, telegramConfirmButtons(wfId));
       },
+      startTyping: () => tg.sendTyping(inbound.chatId),
     });
   } catch (e) {
     console.error("liana telegram group inbound:", e);

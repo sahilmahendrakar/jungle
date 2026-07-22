@@ -52,6 +52,22 @@ export async function sendIMessage(toPhone: string, text: string): Promise<void>
   }
 }
 
+// Show the iMessage typing indicator in a 1:1 chat while we work on a reply. Linq addresses this
+// by chat id (POST /chats/{chatId}/typing); it auto-clears when we send the reply and expires
+// after ~60s otherwise. iMessage-only (no-op on RCS/SMS) and best-effort — never break a turn on
+// a typing failure, and skip entirely when we don't yet know the chat id.
+export async function startTyping(chatId: string | null): Promise<void> {
+  if (!imessageConfigured() || !chatId) return;
+  try {
+    await fetch(`${BASE_URL}/chats/${encodeURIComponent(chatId)}/typing`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${apiKey()}` },
+    });
+  } catch {
+    /* best-effort */
+  }
+}
+
 // Standard Webhooks verification (Linq uses the spec: HMAC-SHA256 of "{id}.{timestamp}.{body}"
 // with the subscription secret; webhook-signature is space-delimited "v1,{base64}" entries).
 // Returns false on any mismatch, stale timestamp (>5 min), or missing config/headers.

@@ -111,6 +111,14 @@ export async function editMessageText(
   }
 }
 
+// Show the "typing…" indicator in the chat. It clears on its own after ~5s (or the moment we
+// send a message), so a single call before a short intake turn is enough. Best-effort: a typing
+// failure must never break the turn.
+export async function sendTyping(chatId: number | string): Promise<void> {
+  if (!telegramConfigured()) return;
+  await api("sendChatAction", { chat_id: chatId, action: "typing" }).catch(() => {});
+}
+
 function chunkText(text: string, max: number): string[] {
   if (text.length <= max) return [text];
   const chunks: string[] = [];

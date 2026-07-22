@@ -139,6 +139,12 @@ export async function chatPostMessage(token: string, args: PostMessageArgs): Pro
   return { ts: String(r.ts) };
 }
 
+// Delete one of our own messages (used to clear the "working on it…" typing placeholder once the
+// real reply is ready). Best-effort at the call site — a failed delete just leaves a stray line.
+export async function chatDelete(token: string, channel: string, ts: string): Promise<void> {
+  await slackCall("chat.delete", token, { channel, ts });
+}
+
 // --- Conversations ---
 
 export interface SlackConversation {
