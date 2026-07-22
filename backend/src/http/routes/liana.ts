@@ -290,11 +290,12 @@ async function requireOwnedWorkflow(
   return { wf, row };
 }
 
-async function wireWorkflow(wf: db.WorkflowRow): Promise<Record<string, unknown>> {
+async function wireWorkflow(wf: db.WorkflowRow, owner: db.Participant): Promise<Record<string, unknown>> {
   const schedule = await db.getWorkflowBackingSchedule(wf.id);
   const runs = await db.listWorkflowRuns(wf.id, 1);
   const integrations = wf.roster[0]?.integrations ?? [];
   const lianaRow = await db.getLianaWorkflow(wf.id);
+  const lastDelivery = runs[0] ? await db.getLianaDelivery(runs[0].id) : null;
   return {
     id: wf.id,
     name: wf.name,
@@ -303,12 +304,21 @@ async function wireWorkflow(wf: db.WorkflowRow): Promise<Record<string, unknown>
     trigger: wf.trigger,
     cadence: liana.cadenceSentence(wf),
     integrations,
+    integrationSettings: await liana.workflowIntegrationSettings(wf, owner),
     model: await liana.workflowModel(wf),
     deliverTo: lianaRow?.deliver_to?.length ? lianaRow.deliver_to : ["slack"],
     delivery: lianaRow ? await liana.describeDelivery(lianaRow) : { dmOnly: false, hasChannel: false, label: "your Slack DM" },
     nextRunAt: schedule?.next_run_at ?? null,
     lastRun: runs[0]
-      ? { id: runs[0].id, status: runs[0].status, startedAt: runs[0].started_at, endedAt: runs[0].ended_at, summary: runs[0].summary }
+      ? {
+          id: runs[0].id,
+          status: runs[0].status,
+          startedAt: runs[0].started_at,
+          endedAt: runs[0].ended_at,
+          summary: runs[0].summary,
+          // Per-channel delivery outcomes ({slack:"ok", imessage:"failed: …"}); {} until a run delivers.
+          delivery: lastDelivery?.channels ?? {},
+        }
       : null,
   };
 }
@@ -347,7 +357,7 @@ lianaRouter.get("/api/liana/workflows", async (req, res) => {
   const out: Record<string, unknown>[] = [];
   for (const row of rows) {
     const wf = await db.getWorkflow(row.workflow_id);
-    if (wf) out.push(await wireWorkflow(wf));
+    if (wf) out.push(await wireWorkflow(wf, auth.me));
   }
   res.json({ workflows: out });
 });
@@ -357,7 +367,7 @@ lianaRouter.get("/api/liana/workflows/:id", async (req, res) => {
   const { wf } = await requireOwnedWorkflow(auth, req.params.id);
   const runs = await db.listWorkflowRuns(wf.id, 30);
   res.json({
-    workflow: await wireWorkflow(wf),
+    workflow: await wireWorkflow(wf, auth.me),
     runs: runs.map((r) => ({ id: r.id, status: r.status, trigger: r.trigger, startedAt: r.started_at, endedAt: r.ended_at, summary: r.summary })),
   });
 });
@@ -367,8 +377,17 @@ lianaRouter.get("/api/liana/workflows/:id/runs/:runId", async (req, res) => {
   const { wf } = await requireOwnedWorkflow(auth, req.params.id);
   const run = await db.getWorkflowRun(req.params.runId);
   if (!run || run.workflow_id !== wf.id) throw new ApiError(404, "run not found");
+  const delivery = await db.getLianaDelivery(run.id);
   res.json({
-    run: { id: run.id, status: run.status, trigger: run.trigger, startedAt: run.started_at, endedAt: run.ended_at, summary: run.summary },
+    run: {
+      id: run.id,
+      status: run.status,
+      trigger: run.trigger,
+      startedAt: run.started_at,
+      endedAt: run.ended_at,
+      summary: run.summary,
+      delivery: delivery?.channels ?? {},
+    },
     output: await liana.runDeliverableText(run, wf),
   });
 });
@@ -380,7 +399,7 @@ lianaRouter.patch("/api/liana/workflows/:id", async (req, res) => {
   if (typeof body.model === "string") await liana.setLianaWorkflowModel(wf, body.model);
   // "Send to my DM instead" toggle — non-destructive, keeps the origin recorded so it's reversible.
   if (typeof body.dmOnly === "boolean") await db.setLianaDmOverride(wf.id, body.dmOnly);
-  const updated = await liana.editLianaWorkflow(wf, auth.me, {
+  const { workflow: updated, warning } = await liana.editLianaWorkflow(wf, auth.me, {
     name: typeof body.name === "string" ? body.name : undefined,
     prompt: typeof body.prompt === "string" ? body.prompt : undefined,
     cron: body.cron === null ? null : typeof body.cron === "string" ? body.cron : undefined,
@@ -389,8 +408,12 @@ lianaRouter.patch("/api/liana/workflows/:id", async (req, res) => {
     paused: typeof body.paused === "boolean" ? body.paused : undefined,
     deliverTo: Array.isArray(body.deliverTo) ? body.deliverTo.map(String) : undefined,
     integrations: Array.isArray(body.integrations) ? body.integrations.map(String) : undefined,
+    settings:
+      body.settings && typeof body.settings === "object" && !Array.isArray(body.settings)
+        ? (body.settings as Record<string, Record<string, unknown>>)
+        : undefined,
   });
-  res.json({ workflow: await wireWorkflow(updated) });
+  res.json({ workflow: await wireWorkflow(updated, auth.me), warning });
 });
 
 lianaRouter.post("/api/liana/workflows/:id/run", async (req, res) => {
@@ -491,6 +514,18 @@ lianaRouter.get("/api/liana/connections", async (req, res) => {
   const auth = await requireLianaAuth(req);
   const keys = ["gmail", "google-calendar", "google-drive", "github", "x", "linear", "notion", "granola", "posthog", "mixpanel"];
   res.json({ connections: await liana.connectionStatus(auth.me, keys) });
+});
+
+// The GitHub repo picker for the workflow settings popover. 409 (not 500) when GitHub isn't
+// connected, so the UI falls back to manual owner/name entry — mirrors GET /api/github/repos.
+lianaRouter.get("/api/liana/connections/github/repos", async (req, res) => {
+  const auth = await requireLianaAuth(req);
+  if (!(await db.getGithubIdentity(auth.me.id))) {
+    res.status(409).json({ connected: false, error: "github not connected" });
+    return;
+  }
+  const { listUserRepos } = await import("../../github");
+  res.json({ connected: true, repos: await listUserRepos(auth.me.id) });
 });
 
 

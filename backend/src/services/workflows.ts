@@ -5,6 +5,7 @@ import {
   WORKFLOW_NAME_MAX_LENGTH,
   WORKFLOW_PLAYBOOK_MAX_LENGTH,
   getWorkflowTemplate,
+  rosterIntegrationSettings,
   type WorkflowRole,
   type WorkflowTrigger,
 } from "@jungle/shared";
@@ -146,7 +147,7 @@ export async function tryAttachIntegrations(
   actor: db.Participant,
   agentId: string,
   keys: string[],
-  repo?: string,
+  settings?: Record<string, Record<string, unknown>>,
 ): Promise<number> {
   const { adapterFor } = await import("../integrations");
   const { getIntegrationType } = await import("@jungle/shared");
@@ -157,7 +158,9 @@ export async function tryAttachIntegrations(
     try {
       const existing = await db.getAgentIntegration(agentId, key);
       if (existing) continue;
-      const raw: Record<string, unknown> = key === "github" && repo ? { repo } : {};
+      // The seat's settings spec for this integration (repo, requireApproval, …); callers fold the
+      // legacy top-level repo in via rosterIntegrationSettings before passing this map.
+      const raw: Record<string, unknown> = settings?.[key] ?? {};
       const adapter = adapterFor(key);
       const config = adapter?.resolveConfig
         ? await adapter.resolveConfig({ me: actor, agentId, existing: null }, raw)
@@ -171,12 +174,70 @@ export async function tryAttachIntegrations(
   return attached;
 }
 
+// Attach-or-UPDATE per-integration config for a seat agent. Unlike tryAttachIntegrations (which
+// skips keys already attached), this re-resolves and writes config for the given keys, so a
+// changed repo / flipped approval on a LIVE integration actually takes effect. Each desired config
+// is merged over the integration's existing settable config first, so a partial edit (just the
+// repo) never drops a sibling field (the commit author). Best-effort per key: an unconnected
+// integration throws in resolveConfig and is left pending (the roster spec still records the wish).
+// Returns how many integrations' stored config actually changed, so callers reconfigure only then.
+export async function applyIntegrationSettings(
+  actor: db.Participant,
+  agentId: string,
+  keys: string[],
+  settings: Record<string, Record<string, unknown>>,
+): Promise<number> {
+  const { adapterFor } = await import("../integrations");
+  const { getIntegrationType, filterToSettableKeys } = await import("@jungle/shared");
+  let changed = 0;
+  for (const key of keys) {
+    const type = getIntegrationType(key);
+    if (!type || type.comingSoon) continue;
+    try {
+      const existing = await db.getAgentIntegration(agentId, key);
+      const raw: Record<string, unknown> = {
+        ...(existing ? filterToSettableKeys(key, existing.config) : {}),
+        ...(settings[key] ?? {}),
+      };
+      const adapter = adapterFor(key);
+      const config = adapter?.resolveConfig
+        ? await adapter.resolveConfig({ me: actor, agentId, existing: existing?.config ?? null }, raw)
+        : raw;
+      if (existing && JSON.stringify(existing.config) === JSON.stringify(config)) continue;
+      await db.setAgentIntegration(agentId, key, config);
+      changed++;
+    } catch (e) {
+      console.log(`workflow seat ${agentId}: settings for ${key} not applied yet: ${(e as Error).message}`);
+    }
+  }
+  return changed;
+}
+
+// Build the settings map (integration key → config spec) for one roster seat, folding the legacy
+// top-level `repo` field into settings.github.repo. The shape tryAttachIntegrations expects.
+export function seatSettingsMap(role: {
+  integrations: string[];
+  repo?: string;
+  settings?: Record<string, Record<string, unknown>>;
+}): Record<string, Record<string, unknown>> {
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const key of role.integrations) out[key] = rosterIntegrationSettings(role as WorkflowRole, key);
+  return out;
+}
+
 // Create one seat's agent: an ordinary participant row with an animal-preset identity and the
 // seat's instructions as persona. NOT provisioned — that happens at finalize.
 async function createSeatAgent(
   workspaceId: string,
   actor: db.Participant,
-  seat: { name: string; handle: string; persona: string; integrations: string[]; repo?: string },
+  seat: {
+    name: string;
+    handle: string;
+    persona: string;
+    integrations: string[];
+    repo?: string;
+    settings?: Record<string, Record<string, unknown>>;
+  },
 ): Promise<db.Participant> {
   let handle = seat.handle;
   for (let i = 2; !(await db.handleAvailable(workspaceId, handle)); i++) {
@@ -203,7 +264,7 @@ async function createSeatAgent(
       client,
     );
   });
-  await tryAttachIntegrations(actor, participant.id, seat.integrations, seat.repo);
+  await tryAttachIntegrations(actor, participant.id, seat.integrations, seatSettingsMap(seat));
   return participant;
 }
 
@@ -243,6 +304,7 @@ export async function materializeSeats(wf: db.WorkflowRow, actor: db.Participant
       persona: role.duties,
       integrations: role.integrations,
       repo: role.repo,
+      settings: role.settings,
     });
     roster.push({
       ...role,
@@ -335,23 +397,32 @@ export async function syncRosterIntegration(
   op: "attach" | "detach",
   config?: Record<string, unknown>,
 ): Promise<void> {
-  // The repo shorthand only means something alongside the github integration.
-  const repo = key === "github" && typeof config?.repo === "string" && config.repo ? config.repo : undefined;
+  const { filterToSettableKeys } = await import("@jungle/shared");
+  // The settable settings for this integration (repo, requireApproval, …) so the roster spec
+  // mirrors what the profile panel just saved. The repo shorthand also stays in sync for github.
+  const settable = op === "attach" && config ? filterToSettableKeys(key, config) : {};
+  const repo = key === "github" && typeof settable.repo === "string" && settable.repo ? settable.repo : undefined;
   for (const wf of await db.workflowsForParticipant(agentId)) {
     let changed = false;
     const roster = wf.roster.map((r) => {
       if (r.participant_id !== agentId) return r;
       if (op === "attach") {
         const has = r.integrations.includes(key);
-        if (has && (!repo || r.repo === repo)) return r;
+        const settingsChanged = JSON.stringify(r.settings?.[key] ?? {}) !== JSON.stringify(settable);
+        if (has && !settingsChanged) return r;
         changed = true;
-        const n = { ...r, integrations: has ? r.integrations : [...r.integrations, key] };
+        const n: WorkflowRole = { ...r, integrations: has ? r.integrations : [...r.integrations, key] };
+        n.settings = { ...(r.settings ?? {}), [key]: settable };
         if (repo) n.repo = repo;
         return n;
       }
       if (!r.integrations.includes(key)) return r;
       changed = true;
-      const n = { ...r, integrations: r.integrations.filter((k) => k !== key) };
+      const n: WorkflowRole = { ...r, integrations: r.integrations.filter((k) => k !== key) };
+      if (r.settings?.[key]) {
+        n.settings = { ...r.settings };
+        delete n.settings[key];
+      }
       if (key === "github") delete n.repo;
       return n;
     });
@@ -380,7 +451,7 @@ export async function finalizeWorkflow(
     const agent = await db.getAgentRow(role.participant_id!);
     if (!agent) continue;
     // One more integration-attach pass: connections linked since the draft was made now stick.
-    await tryAttachIntegrations(actor, agent.id, role.integrations, role.repo);
+    await tryAttachIntegrations(actor, agent.id, role.integrations, seatSettingsMap(role));
     if (!agent.runner_meta && agent.runner_token) {
       const runnerToken = agent.runner_token;
       void (async () => {
@@ -514,7 +585,7 @@ export async function startRun(
     if (creator) {
       for (const r of wf.roster) {
         if (!r.participant_id) continue;
-        const attached = await tryAttachIntegrations(creator, r.participant_id, r.integrations, r.repo);
+        const attached = await tryAttachIntegrations(creator, r.participant_id, r.integrations, seatSettingsMap(r));
         if (attached > 0) void runners.reconfigure(r.participant_id).catch(() => {});
       }
     }

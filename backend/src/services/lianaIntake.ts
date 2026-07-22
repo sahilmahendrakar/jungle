@@ -40,21 +40,44 @@ export interface IntakeWorkflowSpec {
   repo: string | null;
 }
 
+// A partial edit to an EXISTING workflow — only the fields the user asked to change are set.
+// Mirrors editLianaWorkflow's args. `approvals` maps an integration key to whether the agent must
+// ask before it acts (false = act without asking). `repo` sets the GitHub repo.
+export interface IntakeEditPatch {
+  name?: string;
+  prompt?: string;
+  cron?: string | null;
+  runAt?: string | null;
+  timezone?: string | null;
+  paused?: boolean;
+  integrations?: string[];
+  repo?: string | null;
+  approvals?: Record<string, boolean>;
+  deliverTo?: string[];
+}
+
+export interface IntakeEdit {
+  workflowRef: number; // the #N of the target workflow in ctx.existingWorkflows
+  patch: IntakeEditPatch;
+}
+
 export interface IntakeResult {
-  intent: "create_workflow" | "list_workflows" | "chat";
+  intent: "create_workflow" | "list_workflows" | "edit_workflow" | "chat";
   reply: string;
   workflow: IntakeWorkflowSpec | null;
+  edit: IntakeEdit | null;
 }
 
 const OUTPUT_SCHEMA = {
   type: "object",
   properties: {
-    intent: { type: "string", enum: ["create_workflow", "list_workflows", "chat"] },
+    intent: { type: "string", enum: ["create_workflow", "list_workflows", "edit_workflow", "chat"] },
     reply: {
       type: "string",
       description:
         "The message to send back in Slack. For create_workflow: one warm sentence restating what " +
-        "will be set up (the confirm card shows the details separately). For chat: the full reply.",
+        "will be set up (the confirm card shows the details separately). For edit_workflow: one warm " +
+        "sentence confirming the change (it applies immediately, no card). For chat: the full reply.",
     },
     workflow: {
       anyOf: [
@@ -98,8 +121,54 @@ const OUTPUT_SCHEMA = {
         { type: "null" },
       ],
     },
+    edit: {
+      description:
+        "Set ONLY for intent edit_workflow: which existing workflow to change and the fields to " +
+        "change. Include only the fields the user actually asked to change; omit the rest.",
+      anyOf: [
+        {
+          type: "object",
+          properties: {
+            workflowRef: { type: "number", description: "The #N of the target workflow in the existing-workflows list." },
+            patch: {
+              type: "object",
+              properties: {
+                name: { type: "string" },
+                prompt: { type: "string", description: "Replacement standing instruction (second person, self-contained)." },
+                cron: { anyOf: [{ type: "string" }, { type: "null" }], description: "New 5-field cron; null switches to on-demand." },
+                runAt: { anyOf: [{ type: "string" }, { type: "null" }], description: "New one-time local 'YYYY-MM-DDTHH:MM'; null switches off." },
+                timezone: { anyOf: [{ type: "string" }, { type: "null" }] },
+                paused: { type: "boolean", description: "true to pause, false to resume." },
+                integrations: {
+                  type: "array",
+                  items: { type: "string", enum: [...INTAKE_INTEGRATION_KEYS] },
+                  description: "The FULL new integration list (not a delta): existing + added, minus removed.",
+                },
+                repo: { anyOf: [{ type: "string" }, { type: "null" }], description: "owner/name GitHub repo to switch to." },
+                approvals: {
+                  type: "object",
+                  additionalProperties: { type: "boolean" },
+                  description:
+                    "Per-integration 'ask me first' toggle, keyed by integration. false = act without " +
+                    "asking ('let it send email without asking me' -> {\"gmail\": false}); true = ask first.",
+                },
+                deliverTo: {
+                  type: "array",
+                  items: { type: "string", enum: ["slack", "imessage", "telegram"] },
+                  description: "The FULL new set of channels to deliver runs to ('also text me' -> add imessage).",
+                },
+              },
+              additionalProperties: false,
+            },
+          },
+          required: ["workflowRef", "patch"],
+          additionalProperties: false,
+        },
+        { type: "null" },
+      ],
+    },
   },
-  required: ["intent", "reply", "workflow"],
+  required: ["intent", "reply", "workflow", "edit"],
   additionalProperties: false,
 } as const;
 
@@ -119,6 +188,13 @@ function systemPrompt(ctx: IntakeContext): string {
     `timezone (cron null). Compute the calendar date carefully from today's date and weekday below.\n` +
     `  • Open-ended / on-demand ("whenever I say", "on demand", no time given) -> both cron and ` +
     `runAt null.\n` +
+    `- edit_workflow: the user wants to CHANGE one of their EXISTING workflows (listed below with ` +
+    `#N handles) — reschedule it, rename it, change the prompt, add/remove an integration, switch ` +
+    `the GitHub repo, change delivery channels, pause/resume, or change whether it asks before ` +
+    `acting. Set edit.workflowRef to the #N of the target and edit.patch to ONLY the fields that ` +
+    `change. integrations and deliverTo, if changed, are the FULL new list (not a delta). For ` +
+    `"stop asking before it sends email" set patch.approvals {"gmail": false}; for "ask me before ` +
+    `it changes Notion" set {"notion": true}. Edits apply immediately — reply is one warm sentence.\n` +
     `- list_workflows: the user asks what workflows they have.\n` +
     `- chat: anything else (greetings, questions about what you can do). Answer briefly and steer ` +
     `toward what you're for. You cannot do ad-hoc tasks yourself — you only set up workflows.\n\n` +
@@ -133,9 +209,11 @@ function systemPrompt(ctx: IntakeContext): string {
     `message. Use it to resolve references ("actually make it 9am", "add calendar to that"). ` +
     `Transcript lines marked "Liana:" are messages you already sent, in rendered chat form — ` +
     `never imitate or re-send that form; you only ever answer the latest message. A request to ` +
-    `change something you proposed IS intent create_workflow: emit the full updated workflow ` +
-    `object with the change applied. The facts in THIS prompt (today's date, the workflow list) ` +
-    `are current and authoritative — trust them over anything older in the transcript.\n\n` +
+    `change something you just PROPOSED but haven't created yet IS intent create_workflow: emit ` +
+    `the full updated workflow object with the change applied. A request to change one of the ` +
+    `EXISTING workflows listed below is intent edit_workflow. The facts in THIS prompt (today's ` +
+    `date, the workflow list) are current and authoritative — trust them over anything older in ` +
+    `the transcript.\n\n` +
     `Context: today is ${ctx.today}. The user is ${ctx.userName}` +
     `${ctx.userTz ? ` (timezone ${ctx.userTz})` : ""}.` +
     `${
@@ -226,7 +304,7 @@ export async function runIntake(message: string, ctx: IntakeContext, model: stri
     try {
       parsed = JSON.parse(extractJson(text.text)) as IntakeResult;
     } catch {
-      parsed = { intent: "chat", reply: text.text.trim(), workflow: null };
+      parsed = { intent: "chat", reply: text.text.trim(), workflow: null, edit: null };
     }
   } else {
     throw new Error("intake: no tool_use or text block in response");
@@ -234,8 +312,15 @@ export async function runIntake(message: string, ctx: IntakeContext, model: stri
 
   // Belt-and-suspenders: the schema shapes the output, but clamp the enum-adjacent fields anyway
   // (open models are looser about schema adherence than first-party structured outputs).
-  if (!["create_workflow", "list_workflows", "chat"].includes(parsed.intent)) parsed.intent = "chat";
+  if (!["create_workflow", "list_workflows", "edit_workflow", "chat"].includes(parsed.intent)) parsed.intent = "chat";
   if (parsed.intent === "create_workflow" && !parsed.workflow) parsed.intent = "chat";
+  // An edit with no target ref (or no such workflow) is unusable — fall back to chat so the
+  // caller can ask the user to clarify rather than mutating the wrong workflow.
+  if (parsed.intent === "edit_workflow" && (!parsed.edit || typeof parsed.edit.workflowRef !== "number")) {
+    parsed.intent = "chat";
+    parsed.edit = null;
+  }
+  if (parsed.intent !== "edit_workflow") parsed.edit = null;
   if (typeof parsed.reply !== "string" || !parsed.reply.trim()) {
     parsed.reply = parsed.workflow ? "Here's what I'll set up:" : "Tell me what you'd like automated.";
   }
@@ -246,6 +331,12 @@ export async function runIntake(message: string, ctx: IntakeContext, model: stri
     // Cron and runAt are mutually exclusive; if a looser model returns both, one-time wins.
     if (parsed.workflow.runAt) parsed.workflow.cron = null;
     else if (parsed.workflow.runAt === undefined) parsed.workflow.runAt = null;
+  }
+  if (parsed.edit?.patch) {
+    const p = parsed.edit.patch;
+    if (p.integrations)
+      p.integrations = p.integrations.filter((k) => (INTAKE_INTEGRATION_KEYS as readonly string[]).includes(k));
+    if (p.runAt) p.cron = null; // mutual exclusion, one-time wins
   }
   return parsed;
 }

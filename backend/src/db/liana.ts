@@ -168,6 +168,27 @@ export async function markLianaDeliveryFailed(runId: string, error: string): Pro
   );
 }
 
+// Record the per-channel outcome map for a run's delivery ({"slack":"ok","imessage":"skipped: …"}).
+export async function recordLianaDeliveryChannels(runId: string, channels: Record<string, string>): Promise<void> {
+  await pool.query(`update liana_deliveries set channels = $2 where run_id = $1`, [runId, JSON.stringify(channels)]);
+}
+
+export interface LianaDeliveryRow {
+  run_id: string;
+  status: string;
+  error: string | null;
+  channels: Record<string, string>;
+  delivered_at: string;
+}
+
+export async function getLianaDelivery(runId: string): Promise<LianaDeliveryRow | null> {
+  const { rows } = await pool.query<LianaDeliveryRow>(
+    `select run_id, status, error, channels, delivered_at from liana_deliveries where run_id = $1`,
+    [runId],
+  );
+  return rows[0] ?? null;
+}
+
 // --- Phone links (iMessage channel, migration 030) ---
 
 export interface LianaPhoneLink {

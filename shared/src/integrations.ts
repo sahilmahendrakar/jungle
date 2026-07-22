@@ -10,6 +10,23 @@ export interface IntegrationConfigField {
   placeholder?: string;
 }
 
+// The declarative per-integration settings descriptor: the SINGLE source of truth for which
+// per-workflow (= per-agent) config knobs an integration has. Consumed by the backend validators,
+// the Liana web settings UI, the intake prompt, the draft card, and the main app's approvalKey().
+// Distinct from `configFields` (the legacy free-text-only shape the main-app route renders): a
+// SettingField carries enough structure (kind + required + default) for every surface to render
+// and validate it without special-casing per integration.
+//   - "repo": the GitHub repo picker (owner/name); required means a workflow can't run without it.
+//   - "approval": a write-gate boolean, DEFAULT ON (require my approval before writes/sends). The
+//     `key` is the actual config key stored in agent_integrations.config — gmail uses
+//     `requireSendApproval`, every other write integration uses `requireApproval`.
+//   - "text": a free-text field (github's commit-identity authorName/authorEmail); `advanced`
+//     hides it behind a disclosure and keeps it out of the simplified Liana web UI.
+export type IntegrationSettingField =
+  | { kind: "repo"; key: "repo"; label: string; required: true }
+  | { kind: "approval"; key: "requireSendApproval" | "requireApproval"; label: string }
+  | { kind: "text"; key: string; label: string; placeholder?: string; advanced?: true };
+
 // A per-USER account link that integrations are built on. Every integration relies on exactly
 // one connection (an integration = a connection + per-agent settings): GitHub backs the github
 // integration, the Google account backs gmail, and each remote-MCP integration (Linear/Notion/
@@ -29,6 +46,10 @@ export interface IntegrationType {
   // The per-user connection this integration is built on (see ConnectionType / CONNECTION_TYPES).
   connectionKey: string;
   configFields: IntegrationConfigField[];
+  // The per-workflow settings this integration exposes (repo, write-approval, commit identity).
+  // Empty/undefined for read-only integrations that grant the same tools to everyone. This is the
+  // structured superset of configFields — see IntegrationSettingField and the helpers below.
+  settings?: IntegrationSettingField[];
   // Shown in the picker, disabled — the integration type exists in the catalog but isn't
   // wired up to grant anything yet.
   comingSoon?: boolean;
@@ -51,6 +72,11 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     description: "Pick a repo. Agent can clone, read code, open PRs & commit via git + gh CLI.",
     connectionKey: "github",
     configFields: [{ key: "repo", label: "Repository", placeholder: "owner/name" }],
+    settings: [
+      { kind: "repo", key: "repo", label: "Repository", required: true },
+      { kind: "text", key: "authorName", label: "Commit author name", placeholder: "e.g. Sahil Mahendrakar", advanced: true },
+      { kind: "text", key: "authorEmail", label: "Commit author email", placeholder: "12345+you@users.noreply.github.com", advanced: true },
+    ],
     // Optional config keys beyond configFields (rendered by IntegrationsEditor under an "Advanced"
     // disclosure on the GitHub row; validated/normalized by the backend adapter's resolveConfig):
     //   authorName / authorEmail — the agent's git commit identity. Point these at a real GitHub
@@ -66,6 +92,7 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     // frontend renders this card specially (connection status + a send-approval toggle).
     connectionKey: "google",
     configFields: [],
+    settings: [{ kind: "approval", key: "requireSendApproval", label: "Ask me before it sends email" }],
   },
   {
     key: "linear",
@@ -76,6 +103,7 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     connectionKey: "linear",
     configFields: [],
     connection: "oauth",
+    settings: [{ kind: "approval", key: "requireApproval", label: "Ask me before it makes changes in Linear" }],
   },
   {
     key: "google-drive",
@@ -84,6 +112,7 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     connectionKey: "google-drive",
     configFields: [],
     connection: "oauth",
+    settings: [{ kind: "approval", key: "requireApproval", label: "Ask me before it changes files in Drive" }],
   },
   {
     key: "google-calendar",
@@ -92,6 +121,7 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     connectionKey: "google-calendar",
     configFields: [],
     connection: "oauth",
+    settings: [{ kind: "approval", key: "requireApproval", label: "Ask me before it changes my calendar" }],
   },
   {
     key: "notion",
@@ -100,6 +130,7 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     connectionKey: "notion",
     configFields: [],
     connection: "oauth",
+    settings: [{ kind: "approval", key: "requireApproval", label: "Ask me before it makes changes in Notion" }],
   },
   {
     key: "granola",
@@ -176,6 +207,46 @@ export function getIntegrationType(key: string): IntegrationType | undefined {
 
 export function isKnownIntegration(key: string): boolean {
   return INTEGRATION_TYPES.some((t) => t.key === key);
+}
+
+// --- Settings-descriptor helpers (the single source of truth for per-workflow integration config) ---
+
+// The settings an integration exposes (empty for read-only integrations).
+export function settingsFor(key: string): IntegrationSettingField[] {
+  return getIntegrationType(key)?.settings ?? [];
+}
+
+// Config keys that MUST be present for the integration to actually grant its tools (v1: github's
+// repo). A github integration with no repo attaches silently but mints no git tools — the intake
+// slot-fill and the web UI use this to prompt for the missing value instead of failing quietly.
+export function requiredSettingKeys(key: string): string[] {
+  return settingsFor(key)
+    .filter((s): s is Extract<IntegrationSettingField, { required: true }> => "required" in s && s.required === true)
+    .map((s) => s.key);
+}
+
+// The write-approval field for an integration, if any (gmail → requireSendApproval, other write
+// integrations → requireApproval; read-only integrations → undefined). One place so the backend,
+// the Liana web UI, and the main app's IntegrationsEditor can't drift on which key gates writes.
+export function approvalFieldFor(key: string): Extract<IntegrationSettingField, { kind: "approval" }> | undefined {
+  return settingsFor(key).find((s): s is Extract<IntegrationSettingField, { kind: "approval" }> => s.kind === "approval");
+}
+
+// Approval defaults ON: anything that isn't an explicit false means "ask me first".
+export function approvalIsOn(value: unknown): boolean {
+  return value !== false && value !== "false";
+}
+
+// The subset of a stored agent_integrations.config that is user-settable — strips internal keys
+// (backingParticipantId, email, account) that back the connection but are never edited by hand.
+// Used to build the wire shape the Liana web app and intake see.
+export function filterToSettableKeys(key: string, config: Record<string, unknown>): Record<string, unknown> {
+  const settable = new Set(settingsFor(key).map((s) => s.key));
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(config)) {
+    if (settable.has(k)) out[k] = v;
+  }
+  return out;
 }
 
 // One integration attached to a specific agent, as returned by GET /api/agents/:id/integrations.

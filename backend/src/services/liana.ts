@@ -364,7 +364,20 @@ export async function processLianaEvent(payload: LianaEventEnvelope): Promise<vo
       await remember(owner.id, convoKey, "assistant", posted);
       return;
     }
+    if (intake.intent === "edit_workflow" && intake.edit) {
+      const sentence = await applyIntakeEdit(owner, existing, intake.edit, intake.reply);
+      await postReply(install, reply, sentence);
+      await remember(owner.id, convoKey, "assistant", sentence);
+      return;
+    }
     if (intake.intent === "create_workflow" && intake.workflow) {
+      // Slot-fill: github with no repo → ask which one instead of drafting a git-less workflow.
+      const ask = await githubRepoGuard(owner, intake.workflow);
+      if (ask) {
+        await postReply(install, reply, ask);
+        await remember(owner.id, convoKey, "assistant", ask);
+        return;
+      }
       const posted = await createDraftAndPostCard(install, owner, ev.user, intake.workflow, profile, reply, intake.reply);
       await remember(owner.id, convoKey, "assistant", posted);
       return;
@@ -460,14 +473,97 @@ interface OwnedWorkflow {
 }
 
 async function describeOwnerWorkflows(ownerParticipantId: string): Promise<OwnedWorkflow[]> {
+  const { rosterIntegrationSettings } = await import("@jungle/shared");
   const rows = await db.listLianaWorkflowsForOwner(ownerParticipantId);
   const out: OwnedWorkflow[] = [];
   for (const liana of rows) {
     const wf = await db.getWorkflow(liana.workflow_id);
     if (!wf) continue;
-    out.push({ wf, liana, line: `${wf.name} (${cadenceSentence(wf)}${wf.status === "paused" ? ", paused" : wf.status === "draft" ? ", draft" : ""})` });
+    // #N ref (position in this list) + an integration/repo summary so the intake model can target
+    // an edit precisely ("change #2 to 9am", "switch the repo on the digest").
+    const ref = out.length + 1;
+    const seat = wf.roster[0];
+    const ints = (seat?.integrations ?? []).map((k) => {
+      if (k === "github") {
+        const repo = rosterIntegrationSettings(seat!, "github").repo;
+        return typeof repo === "string" && repo ? `github (${repo})` : "github";
+      }
+      return k;
+    });
+    const statusTag = wf.status === "paused" ? ", paused" : wf.status === "draft" ? ", draft" : "";
+    const line =
+      `#${ref} ${wf.name} (${cadenceSentence(wf)}${statusTag})` +
+      (ints.length ? ` · ${ints.join(", ")}` : "") +
+      (liana.deliver_to?.length ? ` · to ${liana.deliver_to.join(" + ")}` : "");
+    out.push({ wf, liana, line });
   }
   return out;
+}
+
+// Slot-fill guard for CREATE: github needs a repo to grant any git tools, but the model only sets
+// repo when the user names one. If github is requested without a repo, try to fill it in — exactly
+// one repo → use it silently; otherwise return a question to ask INSTEAD of drafting (the user's
+// answer lands next turn and intake re-emits the full spec). Returns null to proceed (spec.repo may
+// have been filled in), or a reply string to send instead of creating the draft.
+async function githubRepoGuard(owner: db.Participant, spec: IntakeWorkflowSpec): Promise<string | null> {
+  if (!spec.integrations.includes("github") || (spec.repo && spec.repo.trim())) return null;
+  if (!(await db.getGithubIdentity(owner.id))) {
+    return `That one works on a GitHub repo, but your GitHub isn't connected yet — connect it at ${LIANA_WEB_URL}, then tell me which repo (owner/name) to use.`;
+  }
+  let repos: { full_name: string }[] = [];
+  try {
+    repos = await (await import("../github")).listUserRepos(owner.id);
+  } catch (e) {
+    console.error("liana repo guard:", e);
+  }
+  if (repos.length === 1) {
+    spec.repo = repos[0].full_name;
+    return null;
+  }
+  const sample = repos.slice(0, 6).map((r) => r.full_name);
+  return sample.length
+    ? `Which repo should "${spec.name}" work on? A few of yours: ${sample.join(", ")}. Just tell me the owner/name.`
+    : `Which GitHub repo should "${spec.name}" work on? Tell me the owner/name.`;
+}
+
+// Apply an intake edit_workflow patch to one of the owner's existing workflows, through the same
+// editLianaWorkflow path the web PATCH uses. Translates the model's `approvals` + `repo` shorthands
+// into the per-integration settings map. Returns the sentence to reply with (honest on failure).
+async function applyIntakeEdit(
+  owner: db.Participant,
+  existing: OwnedWorkflow[],
+  edit: import("./lianaIntake").IntakeEdit,
+  confirmSentence: string,
+): Promise<string> {
+  const target = existing[edit.workflowRef - 1];
+  if (!target) return "I couldn't tell which workflow you meant — which one should I change?";
+  const { approvalFieldFor } = await import("@jungle/shared");
+  const p = edit.patch ?? {};
+  const settings: Record<string, Record<string, unknown>> = {};
+  for (const [k, ask] of Object.entries(p.approvals ?? {})) {
+    const field = approvalFieldFor(k);
+    if (field) settings[k] = { ...(settings[k] ?? {}), [field.key]: ask };
+  }
+  if (typeof p.repo === "string" && p.repo.trim()) settings.github = { ...(settings.github ?? {}), repo: p.repo.trim() };
+  try {
+    const { workflow: updated, warning } = await editLianaWorkflow(target.wf, owner, {
+      name: p.name,
+      prompt: p.prompt,
+      cron: p.cron,
+      runAt: p.runAt,
+      timezone: p.timezone ?? undefined,
+      paused: p.paused,
+      deliverTo: p.deliverTo,
+      integrations: p.integrations,
+      settings: Object.keys(settings).length ? settings : undefined,
+    });
+    const base = confirmSentence.trim() ? confirmSentence.trim() : `Done — updated "${updated.name}".`;
+    return warning ? `${base} (Heads up: ${warning}.)` : base;
+  } catch (e) {
+    if (e instanceof ApiError) return `I couldn't make that change: ${e.message}`;
+    console.error("liana edit:", e);
+    return "Something went wrong applying that change — mind trying again?";
+  }
 }
 
 // "Mon, Jul 28 at 9:00 AM" — an absolute instant rendered in its display timezone.
@@ -612,13 +708,16 @@ export async function createLianaDraft(args: {
     }
   }
 
+  const useRepo = spec.repo && spec.integrations.includes("github");
   const roster: WorkflowRole[] = [
     {
       role: "operator",
       handle_seed: slugify(spec.name),
       duties: "",
       integrations: spec.integrations,
-      ...(spec.repo && spec.integrations.includes("github") ? { repo: spec.repo } : {}),
+      // Keep the legacy top-level repo and the settings map in lockstep (rosterIntegrationSettings
+      // reads either) so both the card and the attach pass see the repo the user named.
+      ...(useRepo ? { repo: spec.repo!, settings: { github: { repo: spec.repo! } } } : {}),
     },
   ];
 
@@ -673,6 +772,35 @@ export async function connectionStatus(
   return out;
 }
 
+// The per-integration settings a workflow's seat agent carries, for the web editor. For each of
+// the seat's integrations: `config` = the user-settable values (repo, requireApproval, …) — the
+// live agent_integrations config when attached, else the roster's pending spec, else empty
+// (defaults come from the shared descriptor client-side); `connected` = whether the backing
+// connection is linked. Internal keys (backingParticipantId, email, account) are stripped.
+export async function workflowIntegrationSettings(
+  wf: db.WorkflowRow,
+  owner: db.Participant,
+): Promise<Record<string, { config: Record<string, unknown>; connected: boolean }>> {
+  const { filterToSettableKeys, rosterIntegrationSettings } = await import("@jungle/shared");
+  const seat = wf.roster[0];
+  if (!seat) return {};
+  const keys = seat.integrations ?? [];
+  const seatId = seat.participant_id;
+  const attached = seatId ? await db.listAgentIntegrations(seatId) : [];
+  const attachedByKey = new Map(attached.map((r) => [r.integration_key, r]));
+  const conn = await connectionStatus(owner, keys);
+  const connectedByKey = new Map(conn.map((c) => [c.key, c.connected]));
+  const out: Record<string, { config: Record<string, unknown>; connected: boolean }> = {};
+  for (const key of keys) {
+    const live = attachedByKey.get(key);
+    const config = live
+      ? filterToSettableKeys(key, live.config)
+      : rosterIntegrationSettings(seat, key); // pending: show the wished-for spec
+    out[key] = { config, connected: connectedByKey.get(key) ?? false };
+  }
+  return out;
+}
+
 const KEY_LABELS: Record<string, string> = {
   gmail: "Gmail",
   "google-calendar": "Google Calendar",
@@ -711,10 +839,12 @@ async function createDraftAndPostCard(
   });
 
   const statuses = await connectionStatus(owner, spec.integrations);
+  const label = (key: string): string =>
+    key === "github" && spec.repo ? `${KEY_LABELS[key] ?? key} — ${spec.repo}` : (KEY_LABELS[key] ?? key);
   const integrationLines = statuses.map((s) =>
     s.connected
-      ? `:white_check_mark: ${KEY_LABELS[s.key] ?? s.key}${s.account ? ` — ${s.account}` : ""}`
-      : `:link: ${KEY_LABELS[s.key] ?? s.key} — connect in the web app after creating`,
+      ? `:white_check_mark: ${label(s.key)}${s.key !== "github" && s.account ? ` — ${s.account}` : ""}`
+      : `:link: ${label(s.key)} — connect in the web app after creating`,
   );
   const url = LIANA_WEB_URL;
 
@@ -998,7 +1128,19 @@ async function handleConversationalTurn(text: string, ctx: ConversationalCtx): P
     return;
   }
 
+  if (intake.intent === "edit_workflow" && intake.edit) {
+    const sentence = await applyIntakeEdit(owner, existing, intake.edit, intake.reply);
+    await replyAndRemember(ctx, ctx.toPlain(sentence));
+    return;
+  }
+
   if (intake.intent === "create_workflow" && intake.workflow) {
+    // Slot-fill: github with no repo → ask which one instead of drafting a git-less workflow.
+    const ask = await githubRepoGuard(owner, intake.workflow);
+    if (ask) {
+      await replyAndRemember(ctx, ctx.toPlain(ask));
+      return;
+    }
     // A new draft replaces any dangling pending one.
     if (ctx.pendingDraftId) {
       await cancelLianaDraft(ctx.pendingDraftId).catch(() => {});
@@ -1014,8 +1156,10 @@ async function handleConversationalTurn(text: string, ctx: ConversationalCtx): P
       originTelegramChatId: ctx.originTelegramChatId ?? null,
     });
     const statuses = await connectionStatus(owner, intake.workflow.integrations);
+    const wfLabel = (key: string): string =>
+      key === "github" && intake.workflow!.repo ? `${KEY_LABELS[key] ?? key} — ${intake.workflow!.repo}` : (KEY_LABELS[key] ?? key);
     const integrationLines = statuses.map((s) =>
-      s.connected ? `✓ ${KEY_LABELS[s.key] ?? s.key}` : `→ ${KEY_LABELS[s.key] ?? s.key} (connect on the web)`,
+      s.connected ? `✓ ${wfLabel(s.key)}` : `→ ${wfLabel(s.key)} (connect on the web)`,
     );
     const card =
       `${intake.reply}\n\n${wf.name} — ${cadenceSentence(wf)}` +
@@ -1308,9 +1452,12 @@ export async function onRunClosed(runId: string): Promise<void> {
   if (body.length > MAX) body = body.slice(0, MAX) + `\n\n_…truncated — <${url}|read the full run in Liana>_`;
 
   // Fan out to each enabled channel independently: one channel failing must not block the other,
-  // and the per-run claim above keeps the whole delivery idempotent.
+  // and the per-run claim above keeps the whole delivery idempotent. `outcomes` records what
+  // happened per channel (ok / skipped / failed) so the user can see it — a silently-skipped
+  // channel (provider not configured, no verified link) used to leave no trace at all.
   const channels = liana.deliver_to?.length ? liana.deliver_to : ["slack"];
-  const failures: string[] = [];
+  const outcomes: Record<string, string> = {};
+  const failures: string[] = []; // genuine non-deliveries → status rollup + error column
 
   // After a successful send, drop a one-line stub into that conversation's memory — enough for
   // "add calendar to that" to resolve, without dragging a whole briefing into every intake call.
@@ -1336,58 +1483,87 @@ export async function onRunClosed(runId: string): Promise<void> {
       try {
         await slack.chatPostMessage(install.bot_token, { channel: target, text: jungleToSlackText(body) });
         if (owner) await remember(owner.id, `slack:${target}`, "assistant", stub);
+        outcomes.slack = "ok";
       } catch (e) {
         // Bot removed from the channel / channel gone: fall back to the DM so the run isn't lost.
+        // This still counts as delivered (not a failure) — just note where it landed.
         if (useChannel && e instanceof slack.SlackApiError && slack.FATAL_SLACK_ERRORS.has(e.code)) {
           const dm = await openDm();
           await slack.chatPostMessage(install.bot_token, { channel: dm, text: jungleToSlackText(body) });
           if (owner) await remember(owner.id, `slack:${dm}`, "assistant", stub);
-          failures.push(`slack: couldn't post to channel (${e.code}) — delivered to DM instead`);
+          outcomes.slack = `ok (channel unavailable [${e.code}] — sent to your DM)`;
         } else {
           throw e;
         }
       }
     } catch (e) {
-      failures.push(`slack: ${e instanceof Error ? e.message : String(e)}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      outcomes.slack = `failed: ${msg}`;
+      failures.push(`slack: ${msg}`);
     }
   }
 
-  if (channels.includes("imessage") && imsg.imessageConfigured()) {
-    try {
-      const link = owner ? await db.getPhoneLink(owner.id) : null;
-      if (link?.verified_at) {
-        await imsg.sendIMessage(link.phone, imsg.toPlainText(body));
-        if (owner) await remember(owner.id, `imessage:${link.phone}`, "assistant", stub);
-      } else {
-        failures.push("imessage: no verified phone linked");
+  if (channels.includes("imessage")) {
+    if (!imsg.imessageConfigured()) {
+      outcomes.imessage = "skipped: iMessage not configured on this deployment";
+    } else {
+      try {
+        const link = owner ? await db.getPhoneLink(owner.id) : null;
+        if (link?.verified_at) {
+          await imsg.sendIMessage(link.phone, imsg.toPlainText(capForChannel(body, IMSG_MAX, url)));
+          if (owner) await remember(owner.id, `imessage:${link.phone}`, "assistant", stub);
+          outcomes.imessage = "ok";
+        } else {
+          outcomes.imessage = "skipped: no verified phone linked";
+          failures.push("imessage: no verified phone linked");
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        outcomes.imessage = `failed: ${msg}`;
+        failures.push(`imessage: ${msg}`);
       }
-    } catch (e) {
-      failures.push(`imessage: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
-  if (channels.includes("telegram") && tg.telegramConfigured()) {
-    try {
-      const link = owner ? await db.getTelegramLink(owner.id) : null;
-      // Deliver to the chat the workflow was set up in (a group, or the DM), unless switched to
-      // DM-only on the web — then fall back to the owner's private link chat.
-      const groupChat = !liana.deliver_dm_override ? liana.origin_telegram_chat_id : null;
-      const chatId = groupChat ?? (link?.verified_at ? link.chat_id : null);
-      if (chatId) {
-        await tg.sendTelegram(chatId, body);
-        if (owner) await remember(owner.id, `telegram:${chatId}`, "assistant", stub);
-      } else {
-        failures.push("telegram: no linked Telegram account");
+  if (channels.includes("telegram")) {
+    if (!tg.telegramConfigured()) {
+      outcomes.telegram = "skipped: Telegram not configured on this deployment";
+    } else {
+      try {
+        const link = owner ? await db.getTelegramLink(owner.id) : null;
+        // Deliver to the chat the workflow was set up in (a group, or the DM), unless switched to
+        // DM-only on the web — then fall back to the owner's private link chat.
+        const groupChat = !liana.deliver_dm_override ? liana.origin_telegram_chat_id : null;
+        const chatId = groupChat ?? (link?.verified_at ? link.chat_id : null);
+        if (chatId) {
+          await tg.sendTelegram(chatId, body);
+          if (owner) await remember(owner.id, `telegram:${chatId}`, "assistant", stub);
+          outcomes.telegram = "ok";
+        } else {
+          outcomes.telegram = "skipped: no linked Telegram account";
+          failures.push("telegram: no linked Telegram account");
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        outcomes.telegram = `failed: ${msg}`;
+        failures.push(`telegram: ${msg}`);
       }
-    } catch (e) {
-      failures.push(`telegram: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
+  await db.recordLianaDeliveryChannels(runId, outcomes).catch(() => {});
   if (failures.length) {
-    console.error(`liana: delivery for run ${runId} failed:`, failures.join(" | "));
+    console.error(`liana: delivery for run ${runId} had issues:`, failures.join(" | "));
     await db.markLianaDeliveryFailed(runId, failures.join(" | ")).catch(() => {});
   }
+}
+
+// iMessage keeps bubbles short: hard-cap the plain-text body and point at the full run in Liana.
+// (Linq's behavior on very long messages is unverified; a link is safer than a wall of text.)
+const IMSG_MAX = 1500;
+function capForChannel(body: string, max: number, url: string): string {
+  if (body.length <= max) return body;
+  return body.slice(0, max) + `\n\nFull run: ${url}`;
 }
 
 // The deliverable = the workflow agent's thread messages, minus the run header and the
@@ -1490,11 +1666,17 @@ export async function editLianaWorkflow(
     paused?: boolean;
     deliverTo?: string[];
     integrations?: string[];
+    // Per-integration settings, keyed by integration key (e.g. { github: { repo: "acme/web" },
+    // gmail: { requireSendApproval: false } }). Merge-per-integration: only the fields present are
+    // touched. Keys may reference integrations being added in the same `integrations` edit.
+    settings?: Record<string, Record<string, unknown>>;
   },
-): Promise<db.WorkflowRow> {
+): Promise<{ workflow: db.WorkflowRow; warning?: string }> {
   if (args.cron != null && args.runAt != null) {
     throw new ApiError(400, "a workflow is either recurring (cron) or one-time (runAt), not both");
   }
+  // Delivery channels newly added in this edit — pinged after the save to prove they work.
+  let addedChannels: string[] = [];
   if (args.deliverTo !== undefined) {
     const channels = [...new Set(args.deliverTo)];
     if (!channels.length) throw new ApiError(400, "pick at least one delivery channel");
@@ -1511,21 +1693,52 @@ export async function editLianaWorkflow(
       const link = await db.getTelegramLink(owner.id);
       if (!link?.verified_at) throw new ApiError(400, "link your Telegram account in Settings first");
     }
+    const prior = await db.getLianaWorkflow(wf.id);
+    const priorSet = new Set(prior?.deliver_to?.length ? prior.deliver_to : ["slack"]);
+    addedChannels = channels.filter((c) => !priorSet.has(c));
     await db.setLianaDeliverTo(wf.id, channels);
   }
   const patch: Parameters<typeof db.updateWorkflow>[1] = {};
   let integrationsRemoved: string[] = [];
-  if (args.integrations !== undefined) {
+  // Keys whose config we must (re)write after the roster update: newly-added integrations + any
+  // integration named in an explicit settings edit. Untouched integrations are left alone (so a
+  // bare `integrations` edit never resets another integration's approval default).
+  const keysToApply = new Set<string>();
+  if (args.integrations !== undefined || args.settings !== undefined) {
     const seat = wf.roster[0];
     if (!seat) throw new ApiError(400, "workflow has no seat agent");
-    const keys = [...new Set(args.integrations.map(String))];
-    const { getIntegrationType } = await import("@jungle/shared");
-    for (const k of keys) {
+    const { getIntegrationType, settingsFor } = await import("@jungle/shared");
+
+    const finalKeys =
+      args.integrations !== undefined ? [...new Set(args.integrations.map(String))] : (seat.integrations ?? []);
+    for (const k of finalKeys) {
       const type = getIntegrationType(k);
       if (!type || type.comingSoon) throw new ApiError(400, `unknown integration: ${k}`);
     }
-    integrationsRemoved = (seat.integrations ?? []).filter((k) => !keys.includes(k));
-    patch.roster = [{ ...seat, integrations: keys }, ...wf.roster.slice(1)];
+    integrationsRemoved = (seat.integrations ?? []).filter((k) => !finalKeys.includes(k));
+    for (const k of finalKeys) if (!(seat.integrations ?? []).includes(k)) keysToApply.add(k);
+
+    // Merge explicit settings edits into the seat's settings spec (validate each field key against
+    // the integration's descriptor so junk keys can't be smuggled into the config).
+    const mergedSettings: Record<string, Record<string, unknown>> = { ...(seat.settings ?? {}) };
+    for (const [k, fields] of Object.entries(args.settings ?? {})) {
+      if (!finalKeys.includes(k)) throw new ApiError(400, `set up the ${k} integration before configuring it`);
+      const allowed = new Set(settingsFor(k).map((s) => s.key));
+      const clean: Record<string, unknown> = {};
+      for (const [fk, fv] of Object.entries(fields ?? {})) {
+        if (!allowed.has(fk)) throw new ApiError(400, `unknown ${k} setting: ${fk}`);
+        clean[fk] = fv;
+      }
+      mergedSettings[k] = { ...(mergedSettings[k] ?? {}), ...clean };
+      keysToApply.add(k);
+    }
+    // Drop settings for removed integrations; fold github.repo into the legacy top-level field.
+    for (const k of integrationsRemoved) delete mergedSettings[k];
+    const newSeat = { ...seat, integrations: finalKeys, settings: mergedSettings };
+    const ghRepo = mergedSettings.github?.repo;
+    if (finalKeys.includes("github") && typeof ghRepo === "string" && ghRepo) newSeat.repo = ghRepo;
+    else if (!finalKeys.includes("github")) delete newSeat.repo;
+    patch.roster = [newSeat, ...wf.roster.slice(1)];
   }
   if (args.name !== undefined) patch.name = workflows.validateName(args.name);
   if (args.prompt !== undefined) {
@@ -1617,16 +1830,46 @@ export async function editLianaWorkflow(
     updated = await workflows.setWorkflowPaused(updated, args.paused);
   }
 
-  // Sync the seat agent with an integrations edit: detach removed keys, best-effort attach added
-  // ones (unconnected keys stay pending — startRun's self-heal picks them up once connected),
-  // and reconfigure a live runner when anything actually changed.
+  // Sync the seat agent with the integrations/settings edit: detach removed keys, then attach-or-
+  // update the config for added keys + any explicitly-changed settings (unconnected keys stay
+  // pending — startRun's self-heal picks them up once connected). Reconfigure a live runner only
+  // when something actually changed. The roster spec (updated above) keeps the wish for pending keys.
   const seatId = updated.roster[0]?.participant_id;
-  if (args.integrations !== undefined && seatId) {
+  if ((args.integrations !== undefined || args.settings !== undefined) && seatId) {
     for (const k of integrationsRemoved) await db.removeAgentIntegration(seatId, k);
-    const attached = await workflows.tryAttachIntegrations(owner, seatId, updated.roster[0].integrations, updated.roster[0].repo);
-    if (attached > 0 || integrationsRemoved.length > 0) void runners.reconfigure(seatId).catch(() => {});
+    const changed = keysToApply.size
+      ? await workflows.applyIntegrationSettings(owner, seatId, [...keysToApply], updated.roster[0].settings ?? {})
+      : 0;
+    if (changed > 0 || integrationsRemoved.length > 0) void runners.reconfigure(seatId).catch(() => {});
   }
-  return updated;
+
+  // Channel-add confirmation ping: send a friendly one-liner to each newly-added delivery channel
+  // so the user sees it works immediately (the iMessage incident: an added channel that silently
+  // never delivered). Never blocks the save — a send failure comes back as a warning the caller
+  // surfaces ("Saved — but the test message didn't send: …").
+  const warning = addedChannels.length ? await pingAddedChannels(owner, updated, addedChannels) : undefined;
+  return { workflow: updated, warning };
+}
+
+// Send the confirmation ping to each newly-added channel; returns a warning string if any failed.
+async function pingAddedChannels(owner: db.Participant, wf: db.WorkflowRow, added: string[]): Promise<string | undefined> {
+  const msg = `You'll get "${wf.name}" runs here from now on. 🌿`;
+  const problems: string[] = [];
+  for (const channel of added) {
+    try {
+      if (channel === "imessage") {
+        const link = await db.getPhoneLink(owner.id);
+        if (link?.verified_at) await imsg.sendIMessage(link.phone, msg);
+      } else if (channel === "telegram") {
+        const link = await db.getTelegramLink(owner.id);
+        if (link?.verified_at && link.chat_id) await tg.sendTelegram(link.chat_id, msg);
+      }
+      // Slack is the default channel and always reachable via the app; no ping needed.
+    } catch (e) {
+      problems.push(`${channel} (${e instanceof Error ? e.message : String(e)})`);
+    }
+  }
+  return problems.length ? `couldn't send a test message to ${problems.join(", ")}` : undefined;
 }
 
 // ============================ OAuth install state ============================

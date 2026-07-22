@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { ChevronDown, Loader2, Plus, Search, X } from "lucide-react";
 import {
   INTEGRATION_TYPES,
+  approvalFieldFor,
   connectionForIntegration,
   type IntegrationType,
 } from "../../api";
@@ -24,12 +25,11 @@ function approvalOn(v: unknown): boolean {
   return String(v ?? "true") !== "false";
 }
 
-// The approval-toggle config key per integration (gmail predates the generic one).
+// The approval-toggle config key per integration, from the shared settings descriptor (the single
+// source of truth). null when there's nothing to approve: read-only integrations, and github
+// (gated by the agent's tool-permission mode, so it declares no approval field).
 function approvalKey(type: IntegrationType): string | null {
-  if (type.readOnly) return null; // read-only tools — nothing to approve
-  if (type.key === "gmail") return "requireSendApproval";
-  if (type.key === "github") return null; // gated by the agent's tool-permission mode instead
-  return "requireApproval";
+  return approvalFieldFor(type.key)?.key ?? null;
 }
 
 // Whether attaching this integration HARD-requires the user's connection: gmail and the

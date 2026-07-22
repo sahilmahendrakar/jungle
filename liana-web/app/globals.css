@@ -254,6 +254,97 @@ a.card-link:hover .card-done {
   color: var(--ink-soft);
 }
 
+/* --- Per-integration settings on the chips (repo, approval) --- */
+.chip-config {
+  cursor: pointer;
+}
+.chip-config:hover {
+  border-color: var(--leaf);
+}
+.chip-static {
+  cursor: default;
+}
+.chip-detail {
+  font-weight: 500;
+  opacity: 0.85;
+}
+.chip-detail.muted {
+  opacity: 0.7;
+  font-style: italic;
+}
+.chip-settings {
+  gap: 4px;
+  padding: 10px;
+}
+.chip-approval {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--ink);
+  padding: 4px 2px;
+  cursor: pointer;
+}
+.chip-approval input {
+  margin-top: 2px;
+}
+.repo-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.repo-field select,
+.repo-field input {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  padding: 6px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--ink);
+  width: 100%;
+}
+.repo-field.muted {
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  padding: 4px 2px;
+}
+.chip-remove {
+  color: var(--accent);
+  border-top: 1px solid var(--hairline);
+  border-radius: 0;
+  margin-top: 2px;
+}
+.chip-remove:hover {
+  background: var(--accent-soft);
+}
+
+/* A "saved but heads-up" line (e.g. a channel test message that didn't send). */
+.notice-note {
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  padding: 8px 12px;
+  border-radius: 9px;
+}
+
+/* Per-channel delivery outcomes under a run (shown only when something didn't deliver cleanly). */
+.run-delivery {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 4px 12px 8px;
+  font-size: 12px;
+}
+.run-delivery .ok {
+  color: var(--leaf);
+}
+.run-delivery .bad {
+  color: var(--accent);
+}
+
 /* --- Buttons --- */
 .btn {
   font-family: var(--font-ui);
