@@ -477,6 +477,190 @@ a.card-link:hover .card-done {
   color: var(--ink-strong);
 }
 
+/* --- Channel cards (Slack / iMessage / Telegram) — shared by Home and Settings --- */
+.channel-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 14px;
+  margin-bottom: 8px;
+}
+.channel-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  min-height: 196px;
+  background: var(--card);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  padding: 24px 20px;
+}
+/* Brand mark: white glyph on the channel's own color, so it's recognizable at a glance. */
+.brand-tile {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  color: #fff;
+  flex: none;
+}
+.brand-tile.slack {
+  background: #4a154b;
+}
+.brand-tile.imessage {
+  background: #34c759;
+}
+.brand-tile.telegram {
+  background: #229ed9;
+}
+.channel-card .brand-tile {
+  margin-bottom: 14px;
+}
+.channel-name {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 18px;
+  color: var(--ink-strong);
+  margin: 0;
+}
+.channel-status {
+  color: var(--leaf);
+  font-size: 13.5px;
+  font-weight: 500;
+  margin: 6px 0 0;
+}
+.channel-line {
+  color: var(--ink-soft);
+  font-size: 13.5px;
+  margin: 6px 0 auto; /* auto-bottom pins the buttons to the base so cards align */
+  max-width: 22rem;
+}
+.channel-btn {
+  width: 100%;
+  margin-top: 12px;
+  text-align: center;
+}
+.channel-input {
+  width: 100%;
+  margin-top: 12px;
+  font-family: var(--font-ui);
+  font-size: 14px;
+  padding: 8px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--ink);
+  text-align: center;
+}
+.channel-input:focus {
+  outline: none;
+  border-color: var(--leaf);
+}
+/* Unlinking is the quiet path — a muted text link, not a loud red button. */
+.channel-unlink {
+  margin-top: 12px;
+  background: none;
+  border: none;
+  color: var(--ink-soft);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  cursor: pointer;
+}
+.channel-unlink:hover {
+  color: var(--ink);
+  text-decoration: underline;
+}
+.channel-unlink:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.channel-err {
+  margin-top: 10px;
+}
+
+/* Landing surface tiles reuse the same brand mark. */
+.surface .brand-tile {
+  margin-bottom: 12px;
+}
+
+/* --- Home (signed-in front door) --- */
+.home-hero {
+  text-align: center;
+  padding: 40px 24px 28px;
+}
+.home-hero .big-leaf {
+  font-size: 40px;
+}
+.home-hero h1 {
+  font-family: var(--font-display);
+  font-weight: 560;
+  font-size: 30px;
+  letter-spacing: -0.015em;
+  color: var(--ink-strong);
+  margin: 12px 0 8px;
+}
+.home-hero p {
+  color: var(--ink-soft);
+  max-width: 28rem;
+  margin: 0 auto;
+}
+.home-asks {
+  text-align: center;
+  margin-top: 32px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+.home-asks-label {
+  color: var(--ink-soft);
+  font-size: 13.5px;
+  margin: 0;
+}
+
+/* --- Home "Lately" run glance --- */
+.lately {
+  background: var(--card);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+a.lately-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 18px;
+  color: inherit;
+  border-top: 1px solid var(--hairline);
+}
+a.lately-row:first-child {
+  border-top: none;
+}
+a.lately-row:hover {
+  background: var(--paper);
+  text-decoration: none;
+}
+.lately-name {
+  font-weight: 500;
+  color: var(--ink-strong);
+  flex: none;
+}
+.lately-meta {
+  color: var(--ink-soft);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+a.lately-all {
+  display: inline-block;
+  margin-top: 12px;
+  color: var(--ink-soft);
+  font-size: 13.5px;
+}
+
 /* --- Connections grid --- */
 .conn-grid {
   display: grid;

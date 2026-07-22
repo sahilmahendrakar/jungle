@@ -74,7 +74,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
         <Link href="/" className="brand">
           <span className="leaf">🌿</span>Liana
         </Link>
-        <Link href="/" className="navlink">
+        <Link href="/workflows" className="navlink">
           Workflows
         </Link>
         <Link href="/connections" className="navlink">

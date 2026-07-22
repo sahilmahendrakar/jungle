@@ -2,15 +2,15 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { api, INTEGRATION_LABELS, type WireWorkflow } from "@/lib/api";
+import { api, type WireWorkflow } from "@/lib/api";
 import { useAuth } from "@/components/AuthProvider";
 import { ChannelCards } from "@/components/ChannelCards";
-import { capitalize, countdown, friendlyDate, timeAgo, truncate } from "@/lib/format";
+import { timeAgo, truncate } from "@/lib/format";
 
-// Home: the workflows list. Cards, not a table — a person has a handful of workflows, and each
-// card reads as a sentence: name, cadence, integrations, last-run snippet. Grouped so one-time
-// workflows read right: what's live, what's coming up once, and what's already done. First run (no
-// workflows yet) doubles as setup: the example ask plus the channel cards.
+// Home: the front door once you're signed in. First job is getting you talking to Liana, so the
+// channel cards lead. If nothing's connected or created yet, that's the whole page (plus an
+// example ask). Once workflows are running, a brief "Lately" glance shows what she's been up to;
+// the full, detailed list lives on the Workflows page.
 
 export default function HomePage() {
   const { status } = useAuth();
@@ -25,84 +25,64 @@ export default function HomePage() {
   }, [status]);
 
   if (error) return <p className="error-note">{error}</p>;
-  if (!workflows) return <p className="muted">Loading…</p>;
-  if (!workflows.length) return <FirstRun />;
 
-  // A one-time workflow that hasn't fired is "upcoming"; a fired one is "done". Recurring and
-  // on-demand (plus in-progress drafts) are the standing set.
-  const upcoming = workflows.filter((w) => w.trigger.type === "once" && w.status === "active");
-  const done = workflows.filter((w) => w.status === "completed");
-  const standing = workflows.filter((w) => !upcoming.includes(w) && !done.includes(w));
-  const multi = [standing, upcoming, done].filter((g) => g.length).length > 1;
+  // No workflows yet → channel-first welcome. (Still loading also shows this scaffold, so the
+  // channel cards — which fetch their own status — appear immediately rather than after a spinner.)
+  if (!workflows || !workflows.length) {
+    return (
+      <>
+        <div className="home-hero">
+          <div className="big-leaf">🌱</div>
+          <h1>Pick where you&apos;ll talk to Liana</h1>
+          <p>She works wherever you already chat — connect one and just ask.</p>
+        </div>
+        <ChannelCards />
+        <div className="home-asks">
+          <p className="home-asks-label">Then just ask:</p>
+          <span className="example">&ldquo;Give me a morning briefing every day at 8am&rdquo;</span>
+          <span className="example">&ldquo;Remind me to send the report next Monday at 9am&rdquo;</span>
+        </div>
+      </>
+    );
+  }
+
+  // One row per workflow's most-recent run, newest first — a daily workflow shouldn't crowd out
+  // everything else, so we glance at the latest run of each rather than a raw run feed.
+  const lately = workflows
+    .filter((w) => w.lastRun)
+    .sort((a, b) => (b.lastRun!.startedAt < a.lastRun!.startedAt ? -1 : 1))
+    .slice(0, 6);
 
   return (
     <>
-      <h1 className="page-title">Your workflows</h1>
-      <p className="page-sub">Standing instructions that run themselves and land where you talk.</p>
-      <Group title={multi ? "Active" : null} items={standing} />
-      <Group title="Coming up once" items={upcoming} />
-      <Group title="Done" items={done} muted />
-    </>
-  );
-}
+      <h1 className="page-title">Welcome back</h1>
+      <p className="page-sub">Where you talk to Liana, and what she&apos;s been up to.</p>
 
-function Group({ title, items, muted }: { title: string | null; items: WireWorkflow[]; muted?: boolean }) {
-  if (!items.length) return null;
-  return (
-    <>
-      {title && <h2 className="section-title">{title}</h2>}
-      {items.map((wf) => (
-        <WorkflowCard key={wf.id} wf={wf} muted={muted} />
-      ))}
-    </>
-  );
-}
-
-function WorkflowCard({ wf, muted }: { wf: WireWorkflow; muted?: boolean }) {
-  const isOnce = wf.trigger.type === "once";
-  const soon = isOnce && wf.status === "active" && wf.nextRunAt ? countdown(wf.nextRunAt) : "";
-  return (
-    <Link href={`/w/${wf.id}`} className="card-link">
-      <div className={`card${muted ? " card-done" : ""}`}>
-        <p className="wf-name">
-          <span className={`dot ${wf.status}`} />
-          {wf.name}
-          {soon && <span className="pill-when">{soon}</span>}
-        </p>
-        <p className="sentence">
-          {wf.status === "completed" && wf.lastRun
-            ? `Ran once · ${friendlyDate(wf.lastRun.endedAt ?? wf.lastRun.startedAt)}`
-            : capitalize(wf.cadence)}
-          {wf.integrations.length > 0 && (
-            <> · using {wf.integrations.map((k) => INTEGRATION_LABELS[k] ?? k).join(", ")}</>
-          )}
-          {wf.status === "paused" && <> · paused</>}
-          {wf.status === "draft" && <> · draft — confirm it where you asked</>}
-        </p>
-        {wf.status !== "completed" && wf.lastRun && (
-          <p className="lastrun">
-            Last run {timeAgo(wf.lastRun.startedAt)}
-            {wf.lastRun.status !== "done" ? ` — ${wf.lastRun.status}` : ""}
-            {wf.lastRun.summary ? ` · ${truncate(wf.lastRun.summary, 110)}` : ""}
-          </p>
-        )}
-      </div>
-    </Link>
-  );
-}
-
-function FirstRun() {
-  return (
-    <>
-      <div className="empty" style={{ paddingBottom: 28 }}>
-        <div className="big-leaf">🌱</div>
-        <h2>Let&apos;s set up your first workflow</h2>
-        <p>Connect a place to talk below, then just ask — try:</p>
-        <span className="example">&ldquo;Give me a morning briefing every day at 8am&rdquo;</span>
-        <span className="example">&ldquo;Remind me to send the report next Monday at 9am&rdquo;</span>
-      </div>
-      <h2 className="section-title">Where you talk to Liana</h2>
+      <h2 className="section-title" style={{ marginTop: 8 }}>
+        Channels
+      </h2>
       <ChannelCards />
+
+      {lately.length > 0 && (
+        <>
+          <h2 className="section-title">Lately</h2>
+          <div className="lately">
+            {lately.map((wf) => (
+              <Link key={wf.id} href={`/w/${wf.id}`} className="lately-row">
+                <span className={`dot ${wf.lastRun!.status === "running" ? "active" : wf.status}`} />
+                <span className="lately-name">{wf.name}</span>
+                <span className="lately-meta">
+                  {timeAgo(wf.lastRun!.startedAt)}
+                  {wf.lastRun!.summary ? ` · ${truncate(wf.lastRun!.summary, 80)}` : ""}
+                </span>
+              </Link>
+            ))}
+          </div>
+          <Link className="lately-all" href="/workflows">
+            All workflows →
+          </Link>
+        </>
+      )}
     </>
   );
 }
