@@ -29,7 +29,12 @@ export interface WorkflowRole {
   handle_seed: string; // the agent handle to create, e.g. "finn-the-fox"
   duties: string; // the seat's instructions — becomes the agent's persona
   integrations: string[]; // integration keys attached to the created agent (gmail, github, …)
-  repo?: string; // owner/name — the GitHub repo, when integrations includes "github"
+  repo?: string; // owner/name — the GitHub repo, when integrations includes "github" (legacy; superseded by settings.github.repo, read via rosterIntegrationSettings)
+  // Per-integration settings for the seat agent, keyed by integration key (e.g.
+  // { github: { repo: "acme/web" }, gmail: { requireSendApproval: false } }). These are the SPEC
+  // (what the user asked for); the runtime truth lives in agent_integrations.config and is synced
+  // from here on attach. Generalizes the legacy `repo` field. See shared IntegrationSettingField.
+  settings?: Record<string, Record<string, unknown>>;
   participant_id?: string; // the created agent; unset while status='draft'
   // Presentation-only layout hints for the canvas — they do NOT affect execution (the playbook
   // does). Roles sharing a stage render stacked in parallel; edge_label captions the connectors
@@ -85,6 +90,16 @@ export interface WorkflowRun {
 // stop ends it), so the stall sweep and quiescence fallback keep watching stalled runs too.
 export function isLiveRunStatus(s: WorkflowRunStatus): boolean {
   return s === "running" || s === "stalled";
+}
+
+// The seat's per-integration settings spec for one integration key, folding the legacy top-level
+// `repo` field into settings.github.repo so callers only read one place. Returns {} when unset.
+export function rosterIntegrationSettings(role: WorkflowRole, integrationKey: string): Record<string, unknown> {
+  const explicit = role.settings?.[integrationKey] ?? {};
+  if (integrationKey === "github" && role.repo && explicit.repo === undefined) {
+    return { ...explicit, repo: role.repo };
+  }
+  return explicit;
 }
 
 // --- Limits (validated backend-side; mirrored here for client-side form hints) ---

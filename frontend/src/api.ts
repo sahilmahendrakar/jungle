@@ -35,6 +35,7 @@ import type {
 export {
   INTEGRATION_TYPES,
   getIntegrationType,
+  approvalFieldFor,
   CONNECTION_TYPES,
   getConnectionType,
   connectionForIntegration,

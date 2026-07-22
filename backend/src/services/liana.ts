@@ -612,13 +612,16 @@ export async function createLianaDraft(args: {
     }
   }
 
+  const useRepo = spec.repo && spec.integrations.includes("github");
   const roster: WorkflowRole[] = [
     {
       role: "operator",
       handle_seed: slugify(spec.name),
       duties: "",
       integrations: spec.integrations,
-      ...(spec.repo && spec.integrations.includes("github") ? { repo: spec.repo } : {}),
+      // Keep the legacy top-level repo and the settings map in lockstep (rosterIntegrationSettings
+      // reads either) so both the card and the attach pass see the repo the user named.
+      ...(useRepo ? { repo: spec.repo!, settings: { github: { repo: spec.repo! } } } : {}),
     },
   ];
 
@@ -669,6 +672,35 @@ export async function connectionStatus(
       const c = await db.getIntegrationConnection(owner.id, key);
       out.push({ key, connected: !!c && !c.needs_reconnect, account: c?.external_account ?? null });
     }
+  }
+  return out;
+}
+
+// The per-integration settings a workflow's seat agent carries, for the web editor. For each of
+// the seat's integrations: `config` = the user-settable values (repo, requireApproval, …) — the
+// live agent_integrations config when attached, else the roster's pending spec, else empty
+// (defaults come from the shared descriptor client-side); `connected` = whether the backing
+// connection is linked. Internal keys (backingParticipantId, email, account) are stripped.
+export async function workflowIntegrationSettings(
+  wf: db.WorkflowRow,
+  owner: db.Participant,
+): Promise<Record<string, { config: Record<string, unknown>; connected: boolean }>> {
+  const { filterToSettableKeys, rosterIntegrationSettings } = await import("@jungle/shared");
+  const seat = wf.roster[0];
+  if (!seat) return {};
+  const keys = seat.integrations ?? [];
+  const seatId = seat.participant_id;
+  const attached = seatId ? await db.listAgentIntegrations(seatId) : [];
+  const attachedByKey = new Map(attached.map((r) => [r.integration_key, r]));
+  const conn = await connectionStatus(owner, keys);
+  const connectedByKey = new Map(conn.map((c) => [c.key, c.connected]));
+  const out: Record<string, { config: Record<string, unknown>; connected: boolean }> = {};
+  for (const key of keys) {
+    const live = attachedByKey.get(key);
+    const config = live
+      ? filterToSettableKeys(key, live.config)
+      : rosterIntegrationSettings(seat, key); // pending: show the wished-for spec
+    out[key] = { config, connected: connectedByKey.get(key) ?? false };
   }
   return out;
 }
@@ -1490,6 +1522,10 @@ export async function editLianaWorkflow(
     paused?: boolean;
     deliverTo?: string[];
     integrations?: string[];
+    // Per-integration settings, keyed by integration key (e.g. { github: { repo: "acme/web" },
+    // gmail: { requireSendApproval: false } }). Merge-per-integration: only the fields present are
+    // touched. Keys may reference integrations being added in the same `integrations` edit.
+    settings?: Record<string, Record<string, unknown>>;
   },
 ): Promise<db.WorkflowRow> {
   if (args.cron != null && args.runAt != null) {
@@ -1515,17 +1551,45 @@ export async function editLianaWorkflow(
   }
   const patch: Parameters<typeof db.updateWorkflow>[1] = {};
   let integrationsRemoved: string[] = [];
-  if (args.integrations !== undefined) {
+  // Keys whose config we must (re)write after the roster update: newly-added integrations + any
+  // integration named in an explicit settings edit. Untouched integrations are left alone (so a
+  // bare `integrations` edit never resets another integration's approval default).
+  const keysToApply = new Set<string>();
+  if (args.integrations !== undefined || args.settings !== undefined) {
     const seat = wf.roster[0];
     if (!seat) throw new ApiError(400, "workflow has no seat agent");
-    const keys = [...new Set(args.integrations.map(String))];
-    const { getIntegrationType } = await import("@jungle/shared");
-    for (const k of keys) {
+    const { getIntegrationType, settingsFor } = await import("@jungle/shared");
+
+    const finalKeys =
+      args.integrations !== undefined ? [...new Set(args.integrations.map(String))] : (seat.integrations ?? []);
+    for (const k of finalKeys) {
       const type = getIntegrationType(k);
       if (!type || type.comingSoon) throw new ApiError(400, `unknown integration: ${k}`);
     }
-    integrationsRemoved = (seat.integrations ?? []).filter((k) => !keys.includes(k));
-    patch.roster = [{ ...seat, integrations: keys }, ...wf.roster.slice(1)];
+    integrationsRemoved = (seat.integrations ?? []).filter((k) => !finalKeys.includes(k));
+    for (const k of finalKeys) if (!(seat.integrations ?? []).includes(k)) keysToApply.add(k);
+
+    // Merge explicit settings edits into the seat's settings spec (validate each field key against
+    // the integration's descriptor so junk keys can't be smuggled into the config).
+    const mergedSettings: Record<string, Record<string, unknown>> = { ...(seat.settings ?? {}) };
+    for (const [k, fields] of Object.entries(args.settings ?? {})) {
+      if (!finalKeys.includes(k)) throw new ApiError(400, `set up the ${k} integration before configuring it`);
+      const allowed = new Set(settingsFor(k).map((s) => s.key));
+      const clean: Record<string, unknown> = {};
+      for (const [fk, fv] of Object.entries(fields ?? {})) {
+        if (!allowed.has(fk)) throw new ApiError(400, `unknown ${k} setting: ${fk}`);
+        clean[fk] = fv;
+      }
+      mergedSettings[k] = { ...(mergedSettings[k] ?? {}), ...clean };
+      keysToApply.add(k);
+    }
+    // Drop settings for removed integrations; fold github.repo into the legacy top-level field.
+    for (const k of integrationsRemoved) delete mergedSettings[k];
+    const newSeat = { ...seat, integrations: finalKeys, settings: mergedSettings };
+    const ghRepo = mergedSettings.github?.repo;
+    if (finalKeys.includes("github") && typeof ghRepo === "string" && ghRepo) newSeat.repo = ghRepo;
+    else if (!finalKeys.includes("github")) delete newSeat.repo;
+    patch.roster = [newSeat, ...wf.roster.slice(1)];
   }
   if (args.name !== undefined) patch.name = workflows.validateName(args.name);
   if (args.prompt !== undefined) {
@@ -1617,14 +1681,17 @@ export async function editLianaWorkflow(
     updated = await workflows.setWorkflowPaused(updated, args.paused);
   }
 
-  // Sync the seat agent with an integrations edit: detach removed keys, best-effort attach added
-  // ones (unconnected keys stay pending — startRun's self-heal picks them up once connected),
-  // and reconfigure a live runner when anything actually changed.
+  // Sync the seat agent with the integrations/settings edit: detach removed keys, then attach-or-
+  // update the config for added keys + any explicitly-changed settings (unconnected keys stay
+  // pending — startRun's self-heal picks them up once connected). Reconfigure a live runner only
+  // when something actually changed. The roster spec (updated above) keeps the wish for pending keys.
   const seatId = updated.roster[0]?.participant_id;
-  if (args.integrations !== undefined && seatId) {
+  if ((args.integrations !== undefined || args.settings !== undefined) && seatId) {
     for (const k of integrationsRemoved) await db.removeAgentIntegration(seatId, k);
-    const attached = await workflows.tryAttachIntegrations(owner, seatId, updated.roster[0].integrations, updated.roster[0].repo);
-    if (attached > 0 || integrationsRemoved.length > 0) void runners.reconfigure(seatId).catch(() => {});
+    const changed = keysToApply.size
+      ? await workflows.applyIntegrationSettings(owner, seatId, [...keysToApply], updated.roster[0].settings ?? {})
+      : 0;
+    if (changed > 0 || integrationsRemoved.length > 0) void runners.reconfigure(seatId).catch(() => {});
   }
   return updated;
 }
