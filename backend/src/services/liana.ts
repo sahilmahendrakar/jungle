@@ -409,7 +409,10 @@ export async function connectionStatus(
 ): Promise<{ key: string; connected: boolean; account: string | null }[]> {
   const out: { key: string; connected: boolean; account: string | null }[] = [];
   for (const key of keys) {
-    if (key === "gmail" || key === "google-calendar" || key === "google-drive") {
+    if (key === "gmail") {
+      // Only Gmail rides the shared Google identity grant. Calendar/drive have their own scoped
+      // integration_connections rows (matching their adapters' resolveConfig) — reporting them
+      // off the identity claimed "connected" for grants that had no calendar/drive scopes.
       const g = await db.getGoogleIdentity(owner.id);
       out.push({ key, connected: !!g && !g.needs_reconnect, account: g?.email ?? null });
     } else if (key === "github") {
@@ -981,8 +984,8 @@ export async function setLianaWorkflowModel(wf: db.WorkflowRow, model: string): 
   runners.setModel(seatId, model);
 }
 
-// Web PATCH: name / prompt / cadence / paused. Cadence edits keep the backing schedule row in
-// sync (the ticker reads cron+next_run_at straight off it).
+// Web PATCH: name / prompt / cadence / paused / integrations. Cadence edits keep the backing
+// schedule row in sync (the ticker reads cron+next_run_at straight off it).
 export async function editLianaWorkflow(
   wf: db.WorkflowRow,
   owner: db.Participant,
@@ -993,6 +996,7 @@ export async function editLianaWorkflow(
     timezone?: string;
     paused?: boolean;
     deliverTo?: string[];
+    integrations?: string[];
   },
 ): Promise<db.WorkflowRow> {
   if (args.deliverTo !== undefined) {
@@ -1014,6 +1018,19 @@ export async function editLianaWorkflow(
     await db.setLianaDeliverTo(wf.id, channels);
   }
   const patch: Parameters<typeof db.updateWorkflow>[1] = {};
+  let integrationsRemoved: string[] = [];
+  if (args.integrations !== undefined) {
+    const seat = wf.roster[0];
+    if (!seat) throw new ApiError(400, "workflow has no seat agent");
+    const keys = [...new Set(args.integrations.map(String))];
+    const { getIntegrationType } = await import("@jungle/shared");
+    for (const k of keys) {
+      const type = getIntegrationType(k);
+      if (!type || type.comingSoon) throw new ApiError(400, `unknown integration: ${k}`);
+    }
+    integrationsRemoved = (seat.integrations ?? []).filter((k) => !keys.includes(k));
+    patch.roster = [{ ...seat, integrations: keys }, ...wf.roster.slice(1)];
+  }
   if (args.name !== undefined) patch.name = workflows.validateName(args.name);
   if (args.prompt !== undefined) {
     const p = String(args.prompt).trim();
@@ -1063,6 +1080,16 @@ export async function editLianaWorkflow(
   let updated = Object.keys(patch).length ? ((await db.updateWorkflow(wf.id, patch)) ?? wf) : wf;
   if (args.paused !== undefined && updated.status !== "draft") {
     updated = await workflows.setWorkflowPaused(updated, args.paused);
+  }
+
+  // Sync the seat agent with an integrations edit: detach removed keys, best-effort attach added
+  // ones (unconnected keys stay pending — startRun's self-heal picks them up once connected),
+  // and reconfigure a live runner when anything actually changed.
+  const seatId = updated.roster[0]?.participant_id;
+  if (args.integrations !== undefined && seatId) {
+    for (const k of integrationsRemoved) await db.removeAgentIntegration(seatId, k);
+    const attached = await workflows.tryAttachIntegrations(owner, seatId, updated.roster[0].integrations, updated.roster[0].repo);
+    if (attached > 0 || integrationsRemoved.length > 0) void runners.reconfigure(seatId).catch(() => {});
   }
   return updated;
 }
