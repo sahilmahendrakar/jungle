@@ -369,14 +369,49 @@ export interface LianaSettings {
   participant_id: string;
   liana_model: string | null;
   workflow_model: string | null;
+  // The owner's persistent Liana agent (participants row), and whether the agent path is live for
+  // them (migration 037). Null/false = the legacy stateless intake still answers.
+  liana_agent_id: string | null;
+  agent_enabled: boolean;
 }
 
 export async function getLianaSettings(participantId: string): Promise<LianaSettings | null> {
   const { rows } = await pool.query<LianaSettings>(
-    `select participant_id, liana_model, workflow_model from liana_settings where participant_id = $1`,
+    `select participant_id, liana_model, workflow_model, liana_agent_id, agent_enabled
+       from liana_settings where participant_id = $1`,
     [participantId],
   );
   return rows[0] ?? null;
+}
+
+// Record the owner's persistent Liana agent id (upsert — the settings row may not exist yet).
+export async function setLianaAgentId(participantId: string, agentId: string): Promise<void> {
+  await pool.query(
+    `insert into liana_settings (participant_id, liana_agent_id)
+     values ($1, $2)
+     on conflict (participant_id) do update set liana_agent_id = excluded.liana_agent_id, updated_at = now()`,
+    [participantId, agentId],
+  );
+}
+
+// Reverse of liana_agent_id: the owner (participant id) whose Liana agent this is, or null. Used
+// when a Liana agent finalizes a workflow, to register its ownership + delivery under the owner.
+export async function getLianaOwnerByAgentId(agentId: string): Promise<string | null> {
+  const { rows } = await pool.query<{ participant_id: string }>(
+    `select participant_id from liana_settings where liana_agent_id = $1`,
+    [agentId],
+  );
+  return rows[0]?.participant_id ?? null;
+}
+
+// Flip the per-owner rollout flag for the Liana-agent path (upsert).
+export async function setLianaAgentEnabled(participantId: string, enabled: boolean): Promise<void> {
+  await pool.query(
+    `insert into liana_settings (participant_id, agent_enabled)
+     values ($1, $2)
+     on conflict (participant_id) do update set agent_enabled = excluded.agent_enabled, updated_at = now()`,
+    [participantId, enabled],
+  );
 }
 
 export async function upsertLianaSettings(
@@ -390,7 +425,7 @@ export async function upsertLianaSettings(
        liana_model    = case when $4 then excluded.liana_model    else liana_settings.liana_model end,
        workflow_model = case when $5 then excluded.workflow_model else liana_settings.workflow_model end,
        updated_at = now()
-     returning participant_id, liana_model, workflow_model`,
+     returning participant_id, liana_model, workflow_model, liana_agent_id, agent_enabled`,
     [
       participantId,
       patch.lianaModel ?? null,

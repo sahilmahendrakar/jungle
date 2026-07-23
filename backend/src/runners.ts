@@ -730,6 +730,15 @@ const pendingCompact = new Set<string>();
 // Same as pendingCompact, but for a clear-context request made while asleep/waking.
 const pendingClear = new Set<string>();
 
+// Auto-compaction: when a turn reports context occupancy at/above this percent, ask the agent to
+// compact at its next idle boundary (the runner coalesces and skips it if real work is queued).
+// Disabled unless AUTO_COMPACT_PERCENT is set (e.g. 70) — keeps blast radius opt-in. Fixes the
+// unbounded-transcript token burn; see the token-burn memory note.
+const AUTO_COMPACT_PERCENT = Number(process.env.AUTO_COMPACT_PERCENT) || 0;
+// Agents currently above the threshold, so we fire compact once per high-water episode (not on
+// every frame). Re-arms with hysteresis once occupancy drops well below the threshold.
+const autoCompactFired = new Set<string>();
+
 // Compact-button entry point: sends immediately if a runner is connected; otherwise wakes the
 // agent's machine (same wake-on-message path as a triggering chat message) and remembers the
 // request so it's delivered on the runner's next `hello` instead of failing with "offline".
@@ -981,6 +990,20 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         // tokens=0 for an intentional clear — reportContextUsage returns early on <=0.
         if (Number.isFinite(tokens) && Number.isFinite(maxTokens) && tokens >= 0 && maxTokens > 0) {
           hooks?.onContextUsage(agentId, { tokens: Math.round(tokens), maxTokens: Math.round(maxTokens) });
+          // Auto-compaction at the configured high-water mark. The runner is connected (this is its
+          // frame), so compact() delivers now and runs at the next idle boundary; repeat requests
+          // coalesce. Fire once per episode, re-arm with 10-point hysteresis to avoid flapping.
+          if (AUTO_COMPACT_PERCENT > 0) {
+            const pct = (tokens / maxTokens) * 100;
+            if (pct >= AUTO_COMPACT_PERCENT) {
+              if (!autoCompactFired.has(agentId)) {
+                autoCompactFired.add(agentId);
+                compact(agentId);
+              }
+            } else if (pct < AUTO_COMPACT_PERCENT - 10) {
+              autoCompactFired.delete(agentId);
+            }
+          }
         }
         break;
       }

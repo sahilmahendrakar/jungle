@@ -8,6 +8,7 @@ import { surfaceConfirmCard } from "./confirmations";
 import { recordDeliverables } from "./deliverables";
 import * as scheduler from "./scheduler";
 import * as workflows from "./workflows";
+import * as liana from "./liana";
 import { ApiError } from "../http/errors";
 
 // Agent -> workspace id, memoized. An agent's workspace never changes, so this is a permanent
@@ -371,13 +372,31 @@ async function readAgentHistory(
 }
 
 // The chat-side effects the runner subsystem calls back into (wired via runners.init). Kept here
+// Turn ids for which a Liana agent already delivered a reply to its owner's surface. Lets the
+// turn-completion hook post a fallback when a Liana turn ends silent or crashes — so a person is
+// never left staring at a "thinking…" placeholder that never resolves.
+const lianaDeliveredTurns = new Set<string>();
+
 // so all cascade/dispatch logic lives in one module.
 export function buildRunnerHooks(): runners.RunnerHooks {
   return {
     // A runner's send_message -> post it into Jungle, with the cascade budget of the dispatch
     // that triggered this agent (the most recently consumed inbox item's persisted context).
+    // Liana agents are the exception: their dispatch context carries an external surface, so the
+    // reply is delivered there (Slack/Telegram/iMessage) instead of into a Jungle channel.
     deliverAgentMessage: async (agent, input, turnId) => {
       const ctx = await resolveDispatchContext(agent.id);
+      if (ctx?.lianaSurface) {
+        const body = String(input.body ?? "").trim();
+        if (!body) return { ok: false, error: "body is required" };
+        try {
+          await liana.deliverToLianaSurface(ctx.lianaSurface, body);
+          if (turnId) lianaDeliveredTurns.add(turnId);
+          return { ok: true };
+        } catch (e) {
+          return { ok: false, error: String((e as Error).message ?? e) };
+        }
+      }
       return deliverAgentMessage(agent, input, ctx?.budget ?? 0, {
         channelId: ctx?.channelId,
         threadRootId: ctx?.threadRootId ?? null,
@@ -462,8 +481,21 @@ export function buildRunnerHooks(): runners.RunnerHooks {
           return workflows.toolDraftGet(agent, input);
         case "workflow_draft_set":
           return workflows.toolDraftSet(agent, input);
-        case "workflow_finalize":
-          return workflows.toolFinalize(agent, input);
+        case "workflow_finalize": {
+          const result = await workflows.toolFinalize(agent, input);
+          // If a Liana agent finalized this, register its owner + delivery surface so runs deliver
+          // back externally (see services/liana.ts). No-op for non-Liana agents (Architect etc.).
+          if (result.ok && result.workflowId) {
+            const owner = await liana.getOwnerForLianaAgent(agent.id);
+            const surface = (await resolveDispatchContext(agent.id))?.lianaSurface;
+            if (owner && surface) {
+              await liana
+                .registerAgentWorkflow(owner, result.workflowId, surface)
+                .catch((e) => console.error("liana register workflow:", e));
+            }
+          }
+          return result;
+        }
         default:
           return { ok: false, error: `unknown workflow tool ${frame.type}` };
       }
@@ -476,6 +508,17 @@ export function buildRunnerHooks(): runners.RunnerHooks {
         console.error("noteTurnResult:", e),
       );
       void db.finishTurn(agentId, turnId, ok).catch((e) => console.error("finishTurn:", e));
+      // Liana reliability net: if this was a Liana turn that never delivered a reply (ended silent
+      // or crashed), send a short fallback so the person always gets an answer and the "thinking…"
+      // placeholder clears. No-op for normal agents and for turns that already replied.
+      const delivered = lianaDeliveredTurns.delete(turnId);
+      void (async () => {
+        const surface = (await resolveDispatchContext(agentId))?.lianaSurface;
+        if (!surface || delivered) return;
+        await liana
+          .deliverToLianaSurface(surface, "Sorry — I hit a snag on that one. Mind trying again?")
+          .catch((e) => console.error("liana fallback deliver:", e));
+      })();
     },
     // A runner's confirm_request -> surface a confirmation card in the channel that triggered this
     // agent. Resolving the card resolves this promise; runners.ts relays it as confirm_result.

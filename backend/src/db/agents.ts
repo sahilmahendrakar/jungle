@@ -109,10 +109,24 @@ export async function clearRunnerMeta(agentId: string): Promise<void> {
 // thread routing, crash notices), and — for scheduled turns — the schedule that fired. Persisted
 // so it survives backend restarts; the ACTIVE context for an agent is the context of its most
 // recently consumed item (latestConsumedContext), not an in-memory map.
+// Where a Liana agent's reply should land: the external messaging surface the owner wrote from.
+// Carried on the dispatch context so send_message can deliver back to it asynchronously (even
+// across a backend restart), without a Jungle channel. A discriminated union — one variant per
+// delivery surface, each holding exactly what its send primitive needs (see services/liana.ts).
+export type LianaSurface =
+  // thinkingTs: a "typing" placeholder posted at dispatch time; delivery deletes it right before
+  // the real reply lands (Slack has no native bot typing indicator).
+  | { kind: "slack"; teamId: string; channel: string; threadTs: string | null; thinkingTs?: string | null }
+  | { kind: "telegram"; chatId: string }
+  | { kind: "imessage"; phone: string };
+
 export interface DispatchContext {
   budget: number;
   channelId: string;
   threadRootId: string | null;
+  // Set only for Liana-agent turns: routes send_message to the owner's external surface instead
+  // of a Jungle channel (channelId is unused/empty for these). See services/liana.ts delivery.
+  lianaSurface?: LianaSurface;
   // The message whose dispatch triggered this turn (chat mentions/DMs; absent for schedule
   // fires). Lets the UI anchor live work under the message that asked for it.
   messageId?: string;

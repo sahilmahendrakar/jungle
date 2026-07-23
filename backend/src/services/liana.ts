@@ -3,6 +3,8 @@ import { isAllowedModel, type WorkflowRole } from "@jungle/shared";
 import * as db from "../db";
 import * as slack from "../slack/api";
 import * as runners from "../runners";
+import { provisionerFor } from "../provisioner";
+import { DEFAULT_CASCADE_BUDGET } from "../ws/appSocket";
 import { providerConfigured } from "../providers";
 import { jungleToSlackText } from "../slack/format";
 import { ApiError } from "../http/errors";
@@ -56,6 +58,211 @@ export async function intakeModelFor(participantId: string): Promise<string> {
 export async function workflowModelFor(participantId: string): Promise<string> {
   const s = await db.getLianaSettings(participantId);
   return effectiveModel(s?.workflow_model, DEFAULT_WORKFLOW_MODEL);
+}
+
+// ============================ Persistent Liana agent ============================
+
+// Liana's persona (injected into her agent's system prompt). She is the SAME product as the
+// stateless intake — same voice, same "one workflow = one sentence" model — but now a durable
+// per-user agent with memory and tools instead of a one-shot parser. Keep her DEAD SIMPLE: talk
+// in short sentences, never mention settings/config/JSON, and never grow her surface area.
+const LIANA_PERSONA =
+  `You are Liana — a warm, concise assistant who sets up recurring "workflows" for one person: ` +
+  `briefings, digests, reports, reminders that run themselves on a schedule and deliver back to ` +
+  `them.\n\n` +
+  `— How you work —\n` +
+  `• One workflow is one plain-English job on a schedule ("a morning briefing every day at 8am"). ` +
+  `Never expose schemas, JSON, cron syntax, or settings — talk in sentences.\n` +
+  `• To CREATE a workflow: use workflow_draft_create, shape it with workflow_draft_set (one ` +
+  `"operator" seat, the person's request as the playbook, and a schedule trigger for the cadence ` +
+  `they asked for), then workflow_finalize when they say go. Never just promise to set it up.\n` +
+  `• To review or change existing workflows, point them to the Liana web app (${LIANA_WEB_URL}) — ` +
+  `that's where they pause, edit, or delete. Don't claim to have changed something you didn't.\n` +
+  `• For anything recurring you should do yourself ("remind me", "check every morning"), use your ` +
+  `schedule_* tools. Schedules are for future ACTIONS; your memory is for durable FACTS.\n` +
+  `• Schedule in the person's timezone (the turn header gives you their current local time and ` +
+  `timezone) — "8am" means 8am for them.\n` +
+  `• Answer where you're asked: a workflow delivers back to the same chat/DM it was set up in.\n\n` +
+  `— Slot-filling —\n` +
+  `• If a workflow needs a GitHub repo and none is known, ask which repo in one short question ` +
+  `rather than drafting a repo-less workflow. Same for any other missing essential.\n` +
+  `• Ask at most one or two questions that actually matter, then draft. Don't interrogate.\n\n` +
+  `— Voice —\n` +
+  `Short, friendly, human. One idea per message. No walls of text, no bullet dumps, no config-speak.\n` +
+  `• When you finish setting up a workflow, confirm it in ONE line, starting with 🌿 — the name, ` +
+  `the cadence in plain words, and where it lands. e.g. "🌿 Morning briefing is live — every ` +
+  `weekday at 8am, delivered right here." If they still need to connect something (a repo, an ` +
+  `inbox), add one short follow-up sentence with the link.\n` +
+  `• ALWAYS end your turn by sending a message — even "on it…" or a quick question. A turn with no ` +
+  `send_message is silence, and the person is waiting on you in real time.`;
+
+// Per-owner rollout flag: is the persistent Liana-agent path live for this owner? False = the
+// legacy stateless intake still answers (see the two call sites in this file).
+export async function lianaAgentEnabled(participantId: string): Promise<boolean> {
+  const s = await db.getLianaSettings(participantId);
+  return !!s?.agent_enabled;
+}
+
+// Find-or-create an owner's persistent Liana agent (a normal runtime='sdk' participant, per user).
+// Mirrors workflows.ts ensureArchitect, but keyed by the owner->agent mapping in liana_settings
+// (Liana is per-user, not per-workspace). Provisions the machine lazily/async like the Architect.
+export async function ensureLianaAgent(owner: db.Participant): Promise<db.Participant> {
+  const settings = await db.getLianaSettings(owner.id);
+  if (settings?.liana_agent_id) {
+    const existing = await db.getParticipant(settings.liana_agent_id);
+    if (existing) return existing;
+  }
+
+  const runnerToken = randomBytes(32).toString("hex");
+  const handle = await uniqueHandle(owner.workspace_id, "Liana");
+  const model = await intakeModelFor(owner.id);
+  const participant = await db.createParticipant({
+    kind: "agent",
+    workspaceId: owner.workspace_id,
+    handle,
+    displayName: "Liana",
+    runtime: "sdk",
+    runnerToken,
+    model,
+    mode: "default",
+    runnerProvider: "fly",
+    persona: LIANA_PERSONA,
+  });
+  await db.setLianaAgentId(owner.id, participant.id);
+
+  void (async () => {
+    try {
+      await provisionerFor(participant).create({ id: participant.id, handle, runnerToken });
+      await provisionerFor(participant).start(participant.id);
+      runners.noteProvisionerStart(participant.id);
+    } catch (e) {
+      console.error("provision liana agent:", e);
+    }
+  })();
+  return participant;
+}
+
+// The owner whose persistent Liana agent this is (reverse of the liana_agent_id mapping), or null.
+export async function getOwnerForLianaAgent(agentId: string): Promise<db.Participant | null> {
+  const ownerId = await db.getLianaOwnerByAgentId(agentId);
+  return ownerId ? db.getParticipant(ownerId) : null;
+}
+
+// When a Liana agent finalizes a workflow (via the generic workflow_finalize tool), register the
+// Liana ownership + delivery row so runs deliver back to the owner's surface (onRunClosed keys off
+// this row), then do the same model-stamp + instant first run as the intake path's confirm. The
+// finalized workflow is already a single-seat scheduled job — structurally a Liana workflow — it
+// just needs this ownership record. Idempotent-ish: skip if the row already exists.
+export async function registerAgentWorkflow(
+  owner: db.Participant,
+  workflowId: string,
+  surface: db.LianaSurface,
+): Promise<void> {
+  if (await db.getLianaWorkflow(workflowId)) return; // already registered
+
+  let teamId: string | null = null;
+  let slackUserId: string | null = null;
+  let originChannelId: string | null = null;
+  let originThreadTs: string | null = null;
+  let originTelegramChatId: number | string | null = null;
+  let deliverTo: DeliveryChannel[] = ["slack"];
+  switch (surface.kind) {
+    case "slack":
+      teamId = surface.teamId;
+      originChannelId = surface.channel;
+      originThreadTs = surface.threadTs;
+      slackUserId = await db.getSlackUserIdForParticipant(surface.teamId, owner.id);
+      deliverTo = ["slack"];
+      break;
+    case "telegram":
+      originTelegramChatId = surface.chatId;
+      deliverTo = ["telegram"];
+      break;
+    case "imessage":
+      deliverTo = ["imessage"];
+      break;
+  }
+  await db.insertLianaWorkflow({
+    workflowId,
+    teamId,
+    slackUserId,
+    ownerParticipantId: owner.id,
+    originChannelId,
+    originThreadTs,
+    originTelegramChatId,
+    deliverTo,
+  });
+
+  // Stamp the owner's workflow model on the seat, then instant first run (except one-time jobs,
+  // whose whole point is to fire at the chosen time). Mirrors confirmLianaWorkflow.
+  const wf = await db.getWorkflow(workflowId);
+  const seatId = wf?.roster[0]?.participant_id;
+  if (seatId) await db.updateAgentConfig(seatId, { model: await workflowModelFor(owner.id) });
+  if (wf && wf.trigger.type !== "once") {
+    try {
+      await workflows.startRun(wf, "manual");
+    } catch (e) {
+      console.error(`liana: first run of ${workflowId} failed to start:`, e);
+    }
+  }
+}
+
+// Deliver a Liana agent's send_message reply to the owner's external surface. Reconstructs the
+// delivery from the durable LianaSurface on the dispatch context (see db/agents.ts). This is the
+// agent-path equivalent of postReply / ConversationalCtx.reply on the legacy intake path.
+export async function deliverToLianaSurface(surface: db.LianaSurface, body: string): Promise<void> {
+  switch (surface.kind) {
+    case "slack": {
+      const install = await db.getLianaInstall(surface.teamId);
+      if (!install) throw new Error(`no active Liana install for team ${surface.teamId}`);
+      // Delete the "thinking" placeholder (if any) just before the real reply, like the intake path.
+      await clearThinking(install, surface.channel, surface.thinkingTs ?? null);
+      await postReply(install, { channel: surface.channel, threadTs: surface.threadTs }, jungleToSlackText(body));
+      return;
+    }
+    case "telegram":
+      await tg.sendTelegram(surface.chatId, body);
+      return;
+    case "imessage":
+      await imsg.sendIMessage(surface.phone, body);
+      return;
+  }
+}
+
+// Inbound: hand a user's message to their persistent Liana agent as one turn. Enqueues with the
+// owner's external surface on the dispatch context (so the agent's send_message routes back), then
+// drains — waking the machine if it's asleep. Mirrors workflows.ts kickoffArchitect's dispatch tail.
+export async function dispatchToLianaAgent(
+  owner: db.Participant,
+  text: string,
+  surface: db.LianaSurface,
+  opts?: { userName?: string; userTz?: string },
+): Promise<void> {
+  const agent = await ensureLianaAgent(owner);
+  // Give the agent the same clock the intake had: the person's name + local time + timezone, so
+  // "every day at 8am" schedules in THEIR timezone, not UTC. (The agent also learns this over time
+  // via memory, but every turn stating it keeps scheduling correct and greetings warm.)
+  const tz = opts?.userTz && isValidTimeZone(opts.userTz) ? opts.userTz : DEFAULT_TZ;
+  const name = opts?.userName ?? owner.display_name;
+  const input = `[Liana turn] Message from ${name} · now: ${formatNow(tz)} · their timezone: ${tz}\n\n${text}`;
+  await db.enqueueInboxItem(agent.id, input, undefined, {
+    budget: DEFAULT_CASCADE_BUDGET,
+    channelId: "", // unused for Liana agents — reply routes via lianaSurface below
+    threadRootId: null,
+    lianaSurface: surface,
+  });
+  await runners.drain(agent.id);
+  if (!runners.isConnected(agent.id)) {
+    const row = await db.getAgentRow(agent.id);
+    if (row) {
+      try {
+        await provisionerFor(row).start(row.id);
+        runners.noteProvisionerStart(row.id);
+      } catch (e) {
+        console.error("wake liana agent:", e);
+      }
+    }
+  }
 }
 
 // ============================ Install ============================
@@ -344,6 +551,19 @@ export async function processLianaEvent(payload: LianaEventEnvelope): Promise<vo
     // Slack has no native bot "typing" indicator: post a placeholder while intake runs, then
     // delete it right before the real reply lands (its own arrival is the "done typing" cue).
     thinkingTs = await postThinking(install, reply);
+
+    // Agent path (rollout flag): hand the message to the owner's persistent Liana agent, which
+    // replies asynchronously via send_message -> deliverToLianaSurface (clears the placeholder).
+    if (await lianaAgentEnabled(owner.id)) {
+      const userTz = profile?.tz && isValidTimeZone(profile.tz) ? profile.tz : DEFAULT_TZ;
+      await dispatchToLianaAgent(
+        owner,
+        text,
+        { kind: "slack", teamId: install.team_id, channel: reply.channel, threadTs: reply.threadTs, thinkingTs },
+        { userName: profile?.displayName ?? owner.display_name, userTz },
+      );
+      return;
+    }
 
     const existing = await describeOwnerWorkflows(owner.id);
     const userTz = profile?.tz && isValidTimeZone(profile.tz) ? profile.tz : DEFAULT_TZ;
@@ -1066,6 +1286,10 @@ interface ConversationalCtx {
   // Native "typing…" indicator for this surface (auto-clears when we send the reply); fired once
   // before the slow intake turn. Best-effort — a typing failure must not break the turn.
   startTyping?: () => Promise<void>;
+  // The external surface a reply from this turn should route back to, for the agent path. Set by
+  // each entrypoint (it knows its chat/phone). When the rollout flag is on, the turn is handed to
+  // the owner's persistent Liana agent instead of the stateless intake.
+  agentSurface?: db.LianaSurface;
 }
 
 // Reply + record in the conversation's memory in one motion.
@@ -1088,6 +1312,14 @@ async function handleConversationalTurn(text: string, ctx: ConversationalCtx): P
   // Signal we're on it before the slow work (intake LLM, or a first run on YES). The indicator
   // clears itself when our reply lands, so one fire up front covers the whole turn.
   await ctx.startTyping?.();
+
+  // Agent path (rollout flag): hand the turn to the owner's persistent Liana agent, which replies
+  // asynchronously via send_message -> deliverToLianaSurface. Bypasses the typed YES/NO draft
+  // confirm (the agent manages its own drafts via workflow_* tools).
+  if (ctx.agentSurface && (await lianaAgentEnabled(owner.id))) {
+    await dispatchToLianaAgent(owner, text, ctx.agentSurface);
+    return;
+  }
 
   const slackUserId = install ? await db.getSlackUserIdForParticipant(install.team_id, owner.id) : null;
   const history = await db.recentLianaMessages(owner.id, ctx.convoKey);
@@ -1227,6 +1459,7 @@ export async function processIMessageInbound(inbound: imsg.InboundText): Promise
       setPendingDraft: (id) => db.setPhonePendingDraft(owner.id, id),
       toPlain: imsg.toPlainText,
       startTyping: () => imsg.startTyping(typingChatId),
+      agentSurface: { kind: "imessage", phone: link.phone },
     });
   } catch (e) {
     console.error("liana imessage inbound:", e);
@@ -1309,6 +1542,7 @@ export async function processTelegramInbound(inbound: tg.TelegramInbound): Promi
       setPendingDraft: (id) => db.setTelegramPendingDraft(owner.id, id),
       toPlain: (md) => md, // sendTelegram renders light markdown itself
       deliveryPhrase: "Runs land here in this chat.",
+      agentSurface: { kind: "telegram", chatId: String(inbound.chatId) },
       confirmCard: async (cardText, wfId) => {
         await tg.sendTelegramButtons(inbound.chatId, cardText, telegramConfirmButtons(wfId));
       },
@@ -1356,6 +1590,7 @@ async function processTelegramGroupInbound(inbound: tg.TelegramInbound): Promise
       toPlain: (md) => md,
       deliveryPhrase: "Runs post here in this group.",
       originTelegramChatId: inbound.chatId,
+      agentSurface: { kind: "telegram", chatId: String(inbound.chatId) },
       confirmCard: async (cardText, wfId) => {
         await tg.sendTelegramButtons(inbound.chatId, cardText, telegramConfirmButtons(wfId));
       },
