@@ -394,6 +394,16 @@ export async function setLianaAgentId(participantId: string, agentId: string): P
   );
 }
 
+// Heal the liana_conductor marker on any conductor created before the column existed (migration
+// 038). Idempotent; runs at boot. New conductors are marked at creation in ensureLianaAgent.
+export async function markLianaConductorsFromSettings(): Promise<void> {
+  await pool.query(
+    `update participants set liana_conductor = true
+       where liana_conductor = false
+         and id in (select liana_agent_id from liana_settings where liana_agent_id is not null)`,
+  );
+}
+
 // Every owner that has a provisioned Liana conductor, with their model preference. Backs the
 // boot-time model backfill (services/liana.ts) that migrates live conductors onto the new default.
 export async function listLianaAgents(): Promise<

@@ -112,6 +112,7 @@ export async function lianaAgentEnabled(participantId: string): Promise<boolean>
 // changed DEFAULT_LIANA_MODEL reaches existing agents, not just new ones). Respects a per-user
 // override. Persists the model; live runners pick it up via reconfigure (or their next configure).
 export async function backfillLianaConductorModels(): Promise<void> {
+  await db.markLianaConductorsFromSettings(); // heal marker on pre-migration-038 conductors
   const rows = await db.listLianaAgents();
   for (const r of rows) {
     const desired = effectiveModel(r.liana_model, DEFAULT_LIANA_MODEL);
