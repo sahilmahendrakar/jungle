@@ -96,9 +96,13 @@ const LIANA_PERSONA =
   `• ALWAYS end your turn by sending a message — even "on it…" or a quick question. A turn with no ` +
   `send_message is silence, and the person is waiting on you in real time.`;
 
-// Per-owner rollout flag: is the persistent Liana-agent path live for this owner? False = the
-// legacy stateless intake still answers (see the two call sites in this file).
+// Is the persistent Liana-agent path live for this owner? Global switch first (rollout): with
+// LIANA_AGENT_ENABLED=1 every owner uses the agent (covers owners with no settings row + future
+// ones); =0 is a kill switch back to the legacy intake. Absent → the per-owner `agent_enabled`
+// override (used for pre-global canaries).
 export async function lianaAgentEnabled(participantId: string): Promise<boolean> {
+  if (process.env.LIANA_AGENT_ENABLED === "1") return true;
+  if (process.env.LIANA_AGENT_ENABLED === "0") return false;
   const s = await db.getLianaSettings(participantId);
   return !!s?.agent_enabled;
 }
