@@ -201,6 +201,9 @@ interface RunnerConn {
   // Timestamp this conn most recently entered "idle" (null while running or never yet idle
   // on this socket). The idle-stop sweeper reads this to decide when to stop the machine.
   idleSince: number | null;
+  // Latest context-window occupancy (%) reported via context_usage, or null if none yet. The
+  // sweeper reads this to fire idle-gated auto-compaction.
+  contextPercent: number | null;
 }
 
 // agentId -> the single live runner connection (a new connect replaces the old).
@@ -609,11 +612,34 @@ async function sweepOnce(): Promise<void> {
           // it's cheap when idle on the user's own machine, and killing/respawning it would add
           // session-resume latency to every message. The child stops when the device disconnects.
           if (selfHosted) continue;
-          if (IDLE_STOP_MS === 0) continue;
           if (conn.state !== "idle" || conn.idleSince == null) continue;
-          if (Date.now() - conn.idleSince < IDLE_STOP_MS) continue;
+          const idleFor = Date.now() - conn.idleSince;
+
+          // Idle-gated auto-compaction: once the conversation has clearly paused (>= COMPACT_IDLE_MS)
+          // and context is at/above the threshold, compact — so the compaction turn lands in a lull,
+          // never delaying a live reply. The compact turn resets idle, so it always finishes before
+          // the stop/suspend below. Fire once per high-water episode; re-arm when occupancy drops.
+          const compactAt = agent.liana_conductor ? LIANA_COMPACT_PERCENT : AUTO_COMPACT_PERCENT;
+          if (compactAt > 0 && conn.contextPercent != null) {
+            if (
+              conn.contextPercent >= compactAt &&
+              idleFor >= COMPACT_IDLE_MS &&
+              !autoCompactFired.has(agent.id) &&
+              (await db.pendingInbox(agent.id)).length === 0
+            ) {
+              autoCompactFired.add(agent.id);
+              compact(agent.id);
+              continue; // let the compact turn run before we consider sleeping
+            }
+            if (conn.contextPercent < compactAt - 10) autoCompactFired.delete(agent.id);
+          }
+
+          // Idle-stop / suspend. Liana conductors SUSPEND (RAM snapshot, ~1s resume) so they feel
+          // instant; everything else cold-stops.
+          if (IDLE_STOP_MS === 0) continue;
+          if (idleFor < IDLE_STOP_MS) continue;
           if ((await db.pendingInbox(agent.id)).length > 0) continue;
-          await provisionerFor(agent).stop(agent.id);
+          await provisionerFor(agent).stop(agent.id, { suspend: agent.liana_conductor });
           noteProvisionerStop(agent.id);
         } else {
           // Self-hosted with an offline device: we can't wake it — skip (the work stays queued and
@@ -730,13 +756,18 @@ const pendingCompact = new Set<string>();
 // Same as pendingCompact, but for a clear-context request made while asleep/waking.
 const pendingClear = new Set<string>();
 
-// Auto-compaction: when a turn reports context occupancy at/above this percent, ask the agent to
-// compact at its next idle boundary (the runner coalesces and skips it if real work is queued).
-// Disabled unless AUTO_COMPACT_PERCENT is set (e.g. 70) — keeps blast radius opt-in. Fixes the
-// unbounded-transcript token burn; see the token-burn memory note.
+// Auto-compaction (idle-gated, in the sweeper): when a connected agent has been quietly idle and
+// its context is at/above the threshold, ask it to compact — so a compaction turn happens in a lull
+// and never delays a live reply. Threshold: Liana conductors compact aggressively (40%) so they
+// stay snappy; other agents only if AUTO_COMPACT_PERCENT is set (e.g. 70). Fixes the unbounded-
+// transcript token burn; see the token-burn memory note.
 const AUTO_COMPACT_PERCENT = Number(process.env.AUTO_COMPACT_PERCENT) || 0;
-// Agents currently above the threshold, so we fire compact once per high-water episode (not on
-// every frame). Re-arms with hysteresis once occupancy drops well below the threshold.
+const LIANA_COMPACT_PERCENT = 40;
+// How long an agent must be idle before we compact it — long enough that the conversation has
+// clearly paused, so the user never waits on the compaction turn. Below the idle-stop window.
+const COMPACT_IDLE_MS = 20_000;
+// Agents we've already asked to compact this high-water episode, so we fire once (not every sweep).
+// Cleared once occupancy drops below the threshold (hysteresis), re-arming for the next episode.
 const autoCompactFired = new Set<string>();
 
 // Compact-button entry point: sends immediately if a runner is connected; otherwise wakes the
@@ -870,6 +901,7 @@ async function accept(ws: WebSocket, token: string): Promise<void> {
     currentTurnId: null,
     currentTurnContext: null,
     frameTail: Promise.resolve(),
+    contextPercent: null,
   };
   conns.set(agent.id, conn);
   console.log(`runner[${agent.id}] (@${agent.handle}) connected`);
@@ -990,20 +1022,9 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
         // tokens=0 for an intentional clear — reportContextUsage returns early on <=0.
         if (Number.isFinite(tokens) && Number.isFinite(maxTokens) && tokens >= 0 && maxTokens > 0) {
           hooks?.onContextUsage(agentId, { tokens: Math.round(tokens), maxTokens: Math.round(maxTokens) });
-          // Auto-compaction at the configured high-water mark. The runner is connected (this is its
-          // frame), so compact() delivers now and runs at the next idle boundary; repeat requests
-          // coalesce. Fire once per episode, re-arm with 10-point hysteresis to avoid flapping.
-          if (AUTO_COMPACT_PERCENT > 0) {
-            const pct = (tokens / maxTokens) * 100;
-            if (pct >= AUTO_COMPACT_PERCENT) {
-              if (!autoCompactFired.has(agentId)) {
-                autoCompactFired.add(agentId);
-                compact(agentId);
-              }
-            } else if (pct < AUTO_COMPACT_PERCENT - 10) {
-              autoCompactFired.delete(agentId);
-            }
-          }
+          // Record occupancy; the idle sweeper decides when to compact (idle-gated, so a compaction
+          // turn never delays a live reply). See sweepOnce.
+          conn.contextPercent = (tokens / maxTokens) * 100;
         }
         break;
       }

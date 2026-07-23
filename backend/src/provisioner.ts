@@ -16,7 +16,10 @@ export interface Provisioner {
   readonly managesLifecycle: boolean;
   create(agent: { id: string; handle: string; runnerToken: string }): Promise<void>; // image/volume/home
   start(agentId: string): Promise<void>;
-  stop(agentId: string): Promise<void>;
+  // Put the machine to sleep. `opts.suspend` requests a RAM-snapshot suspend (fast resume) instead
+  // of a cold stop — honored by Fly for Liana conductors; ignored by providers that can't suspend.
+  // Never pass suspend for a fatal restart (you don't want to resume a crashed process).
+  stop(agentId: string, opts?: { suspend?: boolean }): Promise<void>;
   destroy(agentId: string): Promise<void>; // includes the volume
   status(agentId: string): Promise<"running" | "stopped" | "absent">;
 }

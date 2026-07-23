@@ -13,6 +13,7 @@ import { startScheduler } from "./services/scheduler";
 import { startWorkflowSweeper } from "./services/workflows";
 import { startSlackOutbox } from "./services/slackBridge";
 import * as telegram from "./services/telegram";
+import * as liana from "./services/liana";
 import { BACKEND_ORIGIN } from "./http/routes/liana";
 import { registerBuiltinIntegrations } from "./integrations";
 
@@ -100,6 +101,9 @@ runners.startIdleSweeper();
 // crash mid-fire skips rather than double-fires.
 startScheduler();
 startWorkflowSweeper();
+// Migrate any already-provisioned Liana conductors onto the current default model (e.g. the switch
+// to Haiku). One-shot, best-effort; new conductors are created on the right model directly.
+void liana.backfillLianaConductorModels().catch((e) => console.error("liana model backfill:", e));
 // Drain the Slack mirror outbox (Jungle -> Slack). Enqueued transactionally in persistMessage.
 startSlackOutbox();
 // Register the Liana Telegram bot's webhook (idempotent; no-op when the bot isn't configured).

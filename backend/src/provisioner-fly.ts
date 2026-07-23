@@ -101,16 +101,27 @@ export class FlyProvisioner implements Provisioner {
     }
   }
 
-  async stop(agentId: string): Promise<void> {
+  async stop(agentId: string, opts?: { suspend?: boolean }): Promise<void> {
     const meta = await db.getRunnerMeta(agentId);
     if (!meta?.machineId) return;
+    // suspend = RAM snapshot, resumes in ~1s on the next start() (used for Liana conductors so they
+    // feel instant). stop = cold boot. Never suspend a fatal restart — callers pass no opts there.
+    const action = opts?.suspend ? "suspend" : "stop";
     try {
-      await fly(`/apps/${FLY_APP}/machines/${meta.machineId}/stop`, {
+      await fly(`/apps/${FLY_APP}/machines/${meta.machineId}/${action}`, {
         method: "POST",
-        body: JSON.stringify({ timeout: "30s" }),
+        // The stop action takes a graceful timeout; suspend takes no body.
+        ...(opts?.suspend ? {} : { body: JSON.stringify({ timeout: "30s" }) }),
       });
     } catch (e) {
-      if (e instanceof FlyNotFound || /not running|already stopped/i.test(String(e))) return;
+      if (e instanceof FlyNotFound || /not running|already (stopped|suspended)/i.test(String(e))) return;
+      // If suspend is unsupported or fails, fall back to a cold stop so the machine still sleeps
+      // (we don't want a failed suspend to leave it running and billing).
+      if (opts?.suspend) {
+        console.error(`fly suspend ${agentId} failed, falling back to stop:`, e);
+        await this.stop(agentId);
+        return;
+      }
       console.error(`fly stop ${agentId}:`, e);
     }
   }

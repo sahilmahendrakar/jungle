@@ -394,6 +394,18 @@ export async function setLianaAgentId(participantId: string, agentId: string): P
   );
 }
 
+// Every owner that has a provisioned Liana conductor, with their model preference. Backs the
+// boot-time model backfill (services/liana.ts) that migrates live conductors onto the new default.
+export async function listLianaAgents(): Promise<
+  { owner_participant_id: string; liana_agent_id: string; liana_model: string | null }[]
+> {
+  const { rows } = await pool.query<{ owner_participant_id: string; liana_agent_id: string; liana_model: string | null }>(
+    `select participant_id as owner_participant_id, liana_agent_id, liana_model
+       from liana_settings where liana_agent_id is not null`,
+  );
+  return rows;
+}
+
 // Reverse of liana_agent_id: the owner (participant id) whose Liana agent this is, or null. Used
 // when a Liana agent finalizes a workflow, to register its ownership + delivery under the owner.
 export async function getLianaOwnerByAgentId(agentId: string): Promise<string | null> {

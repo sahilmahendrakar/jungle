@@ -36,10 +36,11 @@ export function lianaConfigured(): boolean {
 
 // ============================ Model resolution ============================
 
-// Kimi K3 is Liana's built-in default for both knobs: the intake model (what Liana herself
-// thinks with) and the model new workflows start on. Users override either in Settings; each
-// workflow's agent carries its own concrete model after creation.
-export const DEFAULT_LIANA_MODEL = "kimi-k3";
+// Liana's conductor (the persistent per-user agent she talks through) runs on Haiku 4.5: first-
+// party (no third-party hop from EC2), thinking-off (supportsEffort:false in the catalog), and
+// cheap — chosen for SNAPPINESS. Workflow RUNS default to OSS (kimi) — they're async + token-heavy,
+// so cost matters more than latency there. Users can override either in Settings.
+export const DEFAULT_LIANA_MODEL = "claude-haiku-4-5-20251001";
 export const DEFAULT_WORKFLOW_MODEL = "kimi-k3";
 
 // A model that can actually run right now: the user's preference when valid+configured, else the
@@ -107,6 +108,20 @@ export async function lianaAgentEnabled(participantId: string): Promise<boolean>
   return !!s?.agent_enabled;
 }
 
+// Boot-time backfill: move already-provisioned conductors onto the current effective model (so a
+// changed DEFAULT_LIANA_MODEL reaches existing agents, not just new ones). Respects a per-user
+// override. Persists the model; live runners pick it up via reconfigure (or their next configure).
+export async function backfillLianaConductorModels(): Promise<void> {
+  const rows = await db.listLianaAgents();
+  for (const r of rows) {
+    const desired = effectiveModel(r.liana_model, DEFAULT_LIANA_MODEL);
+    const agent = await db.getAgentRow(r.liana_agent_id);
+    if (!agent || agent.model === desired) continue;
+    await db.updateAgentConfig(r.liana_agent_id, { model: desired });
+    void runners.reconfigure(r.liana_agent_id).catch(() => {});
+  }
+}
+
 // Find-or-create an owner's persistent Liana agent (a normal runtime='sdk' participant, per user).
 // Mirrors workflows.ts ensureArchitect, but keyed by the owner->agent mapping in liana_settings
 // (Liana is per-user, not per-workspace). Provisions the machine lazily/async like the Architect.
@@ -131,6 +146,7 @@ export async function ensureLianaAgent(owner: db.Participant): Promise<db.Partic
     mode: "default",
     runnerProvider: "fly",
     persona: LIANA_PERSONA,
+    lianaConductor: true,
   });
   await db.setLianaAgentId(owner.id, participant.id);
 
