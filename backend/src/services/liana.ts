@@ -1528,6 +1528,11 @@ export async function processTelegramInbound(inbound: tg.TelegramInbound): Promi
           await reply(`🌿 You're linked. Message me what you'd like automated — try "morning briefing every day at 8am".`);
           return;
         }
+        // Genuinely expired/reused — or this instance isn't the one that minted the code (see
+        // telegram.ownsWebhook()). Logged so the difference is visible without reproducing.
+        console.warn(
+          `liana telegram /start: code ${inbound.startPayload.slice(0, 8)}… not redeemable (expired, reused, or minted against another deployment's db)`,
+        );
       }
       const existing = await db.getTelegramLinkByChat(inbound.chatId);
       await reply(
