@@ -196,6 +196,12 @@ a.card-link:hover .card-done {
   background: var(--accent-soft);
   color: var(--accent);
 }
+/* A stored-but-dead grant: amber, not grey — it needs a fresh consent, not a first one. */
+.chip.warn {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+}
 .chip-add {
   font-family: var(--font-ui);
   background: transparent;
@@ -374,6 +380,11 @@ a.card-link:hover .card-done {
 .btn.danger:hover {
   border-color: var(--danger);
   color: var(--danger);
+}
+.btn.small {
+  font-size: 13px;
+  padding: 5px 12px;
+  border-radius: 8px;
 }
 .btn:disabled {
   opacity: 0.5;
@@ -773,6 +784,27 @@ a.lately-all {
   color: var(--ink-soft);
   margin: 4px 0 12px;
   min-height: 20px;
+}
+/* Reconnect / Disconnect under a linked card (and the inline "really?" confirm). */
+.conn-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.conn-confirm {
+  font-size: 13px;
+  color: var(--ink);
+  width: 100%;
+}
+.conn-hint {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ink-soft);
+  margin: 10px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--hairline);
 }
 
 .check-chip {
