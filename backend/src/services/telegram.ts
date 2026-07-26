@@ -5,7 +5,8 @@ import { timingSafeEqual } from "node:crypto";
 //
 // Env: LIANA_TELEGRAM_BOT_TOKEN (from @BotFather),
 //      LIANA_TELEGRAM_WEBHOOK_SECRET (secret_token passed to setWebhook; Telegram echoes it back
-//      on every update in the X-Telegram-Bot-Api-Secret-Token header — that IS the signature).
+//      on every update in the X-Telegram-Bot-Api-Secret-Token header — that IS the signature),
+//      LIANA_TELEGRAM_WEBHOOK_OWNER=1 on the ONE deployment allowed to call setWebhook.
 
 function botToken(): string {
   return process.env.LIANA_TELEGRAM_BOT_TOKEN ?? "";
@@ -13,6 +14,16 @@ function botToken(): string {
 
 export function telegramConfigured(): boolean {
   return Boolean(botToken() && process.env.LIANA_TELEGRAM_WEBHOOK_SECRET);
+}
+
+// May this deployment claim the bot? Telegram keeps exactly ONE webhook URL per bot, so every
+// instance that boots with the same token overwrites whoever registered before it — prod,
+// preprod, and a tunnelled laptop all share one .env, making it last-restart-wins. When the
+// loser holds the webhook, link codes are minted in one database and redeemed against another,
+// and /start answers "that link is expired or already used" for a code that is neither.
+// Off by default: a deployment must opt in explicitly, and only one ever should.
+export function ownsWebhook(): boolean {
+  return process.env.LIANA_TELEGRAM_WEBHOOK_OWNER === "1";
 }
 
 export function verifyTelegramWebhook(secretHeader: string | undefined): boolean {

@@ -107,8 +107,13 @@ void liana.backfillLianaConductorModels().catch((e) => console.error("liana mode
 // Drain the Slack mirror outbox (Jungle -> Slack). Enqueued transactionally in persistMessage.
 startSlackOutbox();
 // Register the Liana Telegram bot's webhook (idempotent; no-op when the bot isn't configured).
+// Only the deployment that owns the bot may do this — see telegram.ownsWebhook().
 if (telegram.telegramConfigured()) {
-  telegram.ensureWebhook(BACKEND_ORIGIN).catch((e) => console.error("telegram setWebhook failed:", e));
+  if (telegram.ownsWebhook()) {
+    telegram.ensureWebhook(BACKEND_ORIGIN).catch((e) => console.error("telegram setWebhook failed:", e));
+  } else {
+    console.log("telegram: bot configured but LIANA_TELEGRAM_WEBHOOK_OWNER != 1 — leaving the webhook alone");
+  }
 }
 
 const PORT = Number(process.env.PORT ?? 3001);
