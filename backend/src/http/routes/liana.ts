@@ -510,10 +510,15 @@ lianaRouter.put("/api/liana/settings", async (req, res) => {
   res.json({ lianaModel: s.liana_model, workflowModel: s.workflow_model });
 });
 
+// The connection keys the web Connections page shows, in display order.
+const LIANA_CONNECTION_KEYS = [
+  "gmail", "google-calendar", "google-drive", "github", "x", "linear", "notion", "granola",
+  "posthog", "mixpanel",
+];
+
 lianaRouter.get("/api/liana/connections", async (req, res) => {
   const auth = await requireLianaAuth(req);
-  const keys = ["gmail", "google-calendar", "google-drive", "github", "x", "linear", "notion", "granola", "posthog", "mixpanel"];
-  res.json({ connections: await liana.connectionStatus(auth.me, keys) });
+  res.json({ connections: await liana.connectionStatus(auth.me, LIANA_CONNECTION_KEYS) });
 });
 
 // The GitHub repo picker for the workflow settings popover. 409 (not 500) when GitHub isn't
@@ -554,4 +559,16 @@ lianaRouter.post("/api/liana/connections/:key/start", async (req, res) => {
   }
   if (!url) throw new ApiError(500, "provider not configured");
   res.json({ url });
+});
+
+// Disconnect: drop the caller's grant for one connection. Reconnect does NOT go through here —
+// it just re-runs the start flow above, whose callback overwrites the grant in place (and clears
+// needs_reconnect), so the connection is never briefly absent. Idempotent: disconnecting something
+// already gone is a no-op, so a double-click or a retry after a network blip is harmless.
+lianaRouter.delete("/api/liana/connections/:key", async (req, res) => {
+  const auth = await requireLianaAuth(req);
+  const key = String(req.params.key);
+  if (!LIANA_CONNECTION_KEYS.includes(key)) throw new ApiError(400, `unknown connection: ${key}`);
+  await liana.disconnectConnection(auth.me, key);
+  res.json({ ok: true });
 });

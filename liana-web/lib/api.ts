@@ -114,6 +114,9 @@ export interface WireConnection {
   key: string;
   connected: boolean;
   account: string | null;
+  // The grant is stored but dead (the provider rejected the refresh) — only a fresh consent
+  // revives it. Rendered as an amber "Reconnect needed" state, not as "off".
+  needsReconnect?: boolean;
 }
 
 export const INTEGRATION_LABELS: Record<string, string> = {

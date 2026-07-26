@@ -1001,29 +1001,58 @@ export async function createLianaDraft(args: {
   return { wf, liana };
 }
 
+export interface ConnectionStatus {
+  key: string;
+  connected: boolean;
+  account: string | null;
+  // The stored grant exists but is dead (invalid_grant) — only a fresh consent revives it. The
+  // web Connections page renders this as an amber "Reconnect needed" state rather than "off".
+  needsReconnect: boolean;
+}
+
 // Which of the spec's integrations the owner has already connected (drives the card's rows and
 // the web Connections page). Google-backed keys share the google_identities grant.
 export async function connectionStatus(
   owner: db.Participant,
   keys: string[],
-): Promise<{ key: string; connected: boolean; account: string | null }[]> {
-  const out: { key: string; connected: boolean; account: string | null }[] = [];
+): Promise<ConnectionStatus[]> {
+  const out: ConnectionStatus[] = [];
   for (const key of keys) {
     if (key === "gmail") {
       // Only Gmail rides the shared Google identity grant. Calendar/drive have their own scoped
       // integration_connections rows (matching their adapters' resolveConfig) — reporting them
       // off the identity claimed "connected" for grants that had no calendar/drive scopes.
       const g = await db.getGoogleIdentity(owner.id);
-      out.push({ key, connected: !!g && !g.needs_reconnect, account: g?.email ?? null });
+      out.push({
+        key,
+        connected: !!g && !g.needs_reconnect,
+        account: g?.email ?? null,
+        needsReconnect: !!g && g.needs_reconnect,
+      });
     } else if (key === "github") {
       const gh = await db.getGithubIdentity(owner.id);
-      out.push({ key, connected: !!gh, account: gh?.github_login ?? null });
+      out.push({ key, connected: !!gh, account: gh?.github_login ?? null, needsReconnect: false });
     } else {
       const c = await db.getIntegrationConnection(owner.id, key);
-      out.push({ key, connected: !!c && !c.needs_reconnect, account: c?.external_account ?? null });
+      out.push({
+        key,
+        connected: !!c && !c.needs_reconnect,
+        account: c?.external_account ?? null,
+        needsReconnect: !!c && c.needs_reconnect,
+      });
     }
   }
   return out;
+}
+
+// Drop the owner's grant for one connection key, mirroring connectionStatus's dispatch: gmail is
+// the shared Google identity, github the GitHub identity, everything else its own
+// integration_connections row. Idempotent — disconnecting something that isn't connected is a
+// no-op. Agents backed by the grant stop getting a token at their next configure.
+export async function disconnectConnection(owner: db.Participant, key: string): Promise<void> {
+  if (key === "gmail") await db.deleteGoogleIdentity(owner.id);
+  else if (key === "github") await db.deleteGithubIdentity(owner.id);
+  else await db.deleteIntegrationConnection(owner.id, key);
 }
 
 // The per-integration settings a workflow's seat agent carries, for the web editor. For each of
