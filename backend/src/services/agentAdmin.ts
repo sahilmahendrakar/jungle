@@ -114,7 +114,7 @@ export async function createAgentAs(
     if (count >= cap) throw new ApiError(409, `this workspace has reached its agent limit (${cap})`);
     return db.createParticipant({
       kind: "agent", workspaceId: actor.workspace_id, handle, displayName, runtime: "sdk", runnerToken,
-      model, mode, runnerProvider, persona,
+      model, mode, runnerProvider, persona, createdBy: actor.id,
     }, client);
   });
   // Bind the agent to its device before provisioning reads runner_meta.hostId.

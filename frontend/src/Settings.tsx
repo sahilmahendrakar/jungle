@@ -19,6 +19,7 @@ import {
   Mail,
   Search,
   Settings as SettingsIcon,
+  ShieldCheck,
   Unlink,
   X,
 } from "lucide-react";
@@ -459,6 +460,33 @@ function SettingsContent({ focusConnections = false }: { focusConnections?: bool
       )}
 
       <SlackWorkspaceSection isAdmin={participant.role === "admin"} />
+
+      {/* Platform operators only (me.isAdmin, decided by the backend allowlist): the cross-account
+          usage + spend view. Everyone else never sees this row. */}
+      {me?.isAdmin && (
+        <section className="mt-8 space-y-3">
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Platform
+          </h2>
+          <button
+            type="button"
+            data-testid="settings-admin-view"
+            onClick={() => navigate("/admin")}
+            className="flex w-full items-center gap-3 rounded-xl border bg-card p-4 text-left hover:bg-accent/50"
+          >
+            <ShieldCheck className="size-5 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 flex-1">
+              <span className="block text-sm font-medium">Admin view</span>
+              <span className="block text-xs text-muted-foreground">
+                Users, agents, activity, usage and spend across every workspace.
+              </span>
+            </span>
+            <span className="rounded-full border px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+              Switch
+            </span>
+          </button>
+        </section>
+      )}
 
       <section className="mt-10 border-t pt-6">
         <Button

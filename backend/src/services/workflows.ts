@@ -260,6 +260,10 @@ async function createSeatAgent(
         mode: "default",
         runnerProvider: "fly",
         persona: seat.persona || null,
+        // Usage attribution: the human who built the workflow owns its seat agents. When the
+        // actor is itself an agent (the Architect building on someone's behalf), fall back to
+        // the workspace-admin resolution in db/usage.ts.
+        createdBy: actor.kind === "human" ? actor.id : null,
       },
       client,
     );

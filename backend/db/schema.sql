@@ -561,3 +561,39 @@ create table if not exists api_tokens (
 );
 create unique index if not exists api_tokens_hash_idx on api_tokens (token_hash);
 create index if not exists api_tokens_participant_idx on api_tokens (participant_id);
+
+-- Usage + spend, extracted from the SDK `result` events runners forward (one row per event per
+-- model). Denormalized labels so history outlives a deleted agent/owner; written by
+-- backend/src/db/usage.ts and read by the operator-only admin view. See migrations/040.
+create table if not exists agent_usage (
+  id                  bigserial primary key,
+  event_uuid          text,                                            -- idempotency key
+  agent_id            uuid references participants(id) on delete set null,
+  agent_handle        text not null,
+  workspace_id        uuid references workspaces(id) on delete set null,
+  owner_id            uuid references participants(id) on delete set null,
+  owner_email         text,
+  owner_name          text,
+  turn_id             text,
+  model               text not null,
+  input_tokens        bigint not null default 0,
+  output_tokens       bigint not null default 0,
+  cache_read_tokens   bigint not null default 0,
+  cache_write_tokens  bigint not null default 0,
+  web_search_requests integer not null default 0,
+  cost_usd            numeric(14, 6) not null default 0,               -- the SDK's own estimate
+  duration_ms         integer,
+  ok                  boolean not null default true,
+  created_at          timestamptz not null default now()
+);
+create unique index if not exists agent_usage_event_model_idx
+  on agent_usage (event_uuid, model) where event_uuid is not null;
+create index if not exists agent_usage_created_idx on agent_usage (created_at desc);
+create index if not exists agent_usage_owner_idx on agent_usage (lower(owner_email), created_at desc);
+create index if not exists agent_usage_agent_idx on agent_usage (agent_id, created_at desc);
+create index if not exists agent_usage_workspace_idx on agent_usage (workspace_id, created_at desc);
+
+-- Who created an agent (usage attribution). Null for humans, and for agents created by an
+-- internal path (the Architect) — those resolve to the workspace admin at read time.
+alter table participants add column if not exists created_by uuid references participants(id) on delete set null;
+create index if not exists participants_created_by_idx on participants (created_by);

@@ -29,19 +29,20 @@ export async function createParticipant(p: {
   runnerProvider?: string | null;
   persona?: string | null; // creator-written role/personality, injected into the system prompt
   lianaConductor?: boolean; // true = a persistent per-user Liana conductor (compact@40% + suspend)
+  createdBy?: string | null; // the human participant creating this agent (usage attribution)
 }, client?: pg.PoolClient): Promise<Participant> {
   const { rows } = await (client ?? pool).query<Participant>(
     `insert into participants
        (kind, workspace_id, handle, display_name, role, repo, firebase_uid, email, avatar_url,
-        model, mode, runtime, runner_token, runner_provider, persona, liana_conductor)
+        model, mode, runtime, runner_token, runner_provider, persona, liana_conductor, created_by)
      values ($1, $2, $3, $4, coalesce($5, 'member'), $6, $7, $8, $9, $10, coalesce($11, 'default'),
-             coalesce($12, 'sdk'), $13, coalesce($14, 'docker'), $15, coalesce($16, false))
+             coalesce($12, 'sdk'), $13, coalesce($14, 'docker'), $15, coalesce($16, false), $17)
      returning *`,
     [
       p.kind, p.workspaceId, p.handle, p.displayName, p.role ?? null, p.repo ?? null,
       p.firebaseUid ?? null, p.email ?? null, p.avatarUrl ?? null,
       p.model ?? null, p.mode ?? null, p.runtime ?? null, p.runnerToken ?? null,
-      p.runnerProvider ?? null, p.persona ?? null, p.lianaConductor ?? null,
+      p.runnerProvider ?? null, p.persona ?? null, p.lianaConductor ?? null, p.createdBy ?? null,
     ],
   );
   return rows[0];
