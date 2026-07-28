@@ -63,6 +63,13 @@ export interface IntegrationType {
   // The integration exposes only read-only tools (e.g. Granola: query notes/transcripts). There's
   // nothing to approve, so the write-approval toggle is hidden and its tools always run.
   readOnly?: boolean;
+  // A user can link more than one account for this integration (e.g. two X accounts, two Notion
+  // workspaces), and the frontend offers "connect another account" plus an account picker when
+  // attaching to an agent. Every connection-based integration's backend supports this uniformly
+  // (agent_integrations.config.connectionId always names one specific connection), but only the
+  // integrations with this flag expose it in the UI — everyone else keeps today's single-account
+  // experience (auto-bound to the user's one connection).
+  allowMultiple?: boolean;
 }
 
 export const INTEGRATION_TYPES: IntegrationType[] = [
@@ -130,6 +137,7 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     connectionKey: "notion",
     configFields: [],
     connection: "oauth",
+    allowMultiple: true,
     settings: [{ kind: "approval", key: "requireApproval", label: "Ask me before it makes changes in Notion" }],
   },
   {
@@ -149,6 +157,7 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     configFields: [],
     connection: "oauth",
     readOnly: true,
+    allowMultiple: true,
   },
   {
     // Jungle itself, as an integration: mounts Jungle's own MCP server (backend /mcp) into the
@@ -251,8 +260,8 @@ export function approvalIsOn(value: unknown): boolean {
 }
 
 // The subset of a stored agent_integrations.config that is user-settable — strips internal keys
-// (backingParticipantId, email, account) that back the connection but are never edited by hand.
-// Used to build the wire shape the Liana web app and intake see.
+// (connectionId, email, account) that back the connection but are never edited by hand. Used to
+// build the wire shape the Liana web app and intake see.
 export function filterToSettableKeys(key: string, config: Record<string, unknown>): Record<string, unknown> {
   const settable = new Set(settingsFor(key).map((s) => s.key));
   const out: Record<string, unknown> = {};
@@ -281,10 +290,11 @@ export interface GmailIntegrationConfig {
 }
 
 // The `config` stored on an agent's `x` integration row. Holds NO secrets — the OAuth 2.0 User
-// Context tokens live in the per-user integration_connections table (key "x"). This only records
-// which connected account backs the agent (the attaching user) and its @handle for display; the
-// backend mints access tokens from that connection at runtime (see backend/src/integrations/x.ts).
+// Context tokens live in the per-user integration_connections table (key "x"), where a user may
+// hold several X connections. This only records which one backs the agent (connectionId) and its
+// @handle for display; the backend mints access tokens from that connection at runtime (see
+// backend/src/integrations/x.ts).
 export interface XIntegrationConfig {
-  backingParticipantId: string;
+  connectionId: string;
   account: string; // the @handle of the connected account
 }

@@ -7,9 +7,10 @@ import { mcpConnection, getValidMcpToken, type McpProviderSpec } from "./mcp-oau
 // Factory: build a full IntegrationAdapter for a remote MCP provider (Linear/Notion/Granola) from
 // a spec. All three share the same shape — OAuth via mcp-oauth.ts, mounted by the runner as a
 // remote MCP server — so adding one is just a spec + a register call. Like Gmail:
-//   • The OAuth grant is PER-USER (integration_connections), connected once in Settings.
-//   • Attaching to an agent stores config { backingParticipantId, requireApproval? } — the agent
-//     acts with that user's connection; a grant is emitted only when a token can be minted for it.
+//   • The OAuth grant is PER-USER (integration_connections), connected once in Settings — a user
+//     may hold several connections for the same provider (e.g. two Notion workspaces).
+//   • Attaching to an agent stores config { connectionId, requireApproval? } — the agent acts with
+//     that specific connection; a grant is emitted only when a token can be minted for it.
 
 export interface McpAdapterSpec extends McpProviderSpec {
   // Read-only tool names auto-approved without a confirmation card, as bare tool names (the runner
@@ -68,34 +69,44 @@ export function createMcpRemoteAdapter(spec: McpAdapterSpec): IntegrationAdapter
   return {
     key: spec.key,
 
-    // Attach/reconfigure: binds the agent to the attaching user's connection (backingParticipantId),
-    // like gmail — 400 if they haven't connected in Settings. A reconfigure keeps the original
-    // backing user. The only other config is the approval toggle (moot for read-only integrations).
+    // Attach/reconfigure: binds the agent to one of the attaching user's connections
+    // (config.connectionId) — the picker's choice (rawConfig.connectionId) when given, else the
+    // existing binding on reconfigure, else the user's sole connection if they have exactly one.
+    // 400 if there's no unambiguous choice. The only other config is the approval toggle (moot
+    // for read-only integrations).
     async resolveConfig(ctx, rawConfig): Promise<Record<string, unknown>> {
       const requireApproval =
         !spec.readOnly && rawConfig.requireApproval !== false && rawConfig.requireApproval !== "false";
-      const existingBacking =
-        typeof ctx.existing?.backingParticipantId === "string" ? ctx.existing.backingParticipantId : null;
-      const backingParticipantId = existingBacking ?? ctx.me.id;
-      if (!existingBacking) {
-        const conn = await db.getIntegrationConnection(ctx.me.id, spec.key);
-        if (!conn) throw new ApiError(400, `connect your ${spec.displayName} account in Settings first`);
+      const extra = spec.readOnly ? {} : { requireApproval };
+
+      const requestedId = typeof rawConfig.connectionId === "string" ? rawConfig.connectionId : null;
+      const existingId = typeof ctx.existing?.connectionId === "string" ? ctx.existing.connectionId : null;
+      const connectionId = requestedId ?? existingId;
+      if (connectionId) {
+        const conn = await db.getIntegrationConnectionById(connectionId);
+        if (!conn || conn.participant_id !== ctx.me.id || conn.integration_key !== spec.key) {
+          throw new ApiError(400, `that ${spec.displayName} connection doesn't belong to you`);
+        }
+        return { connectionId: conn.id, ...extra };
       }
-      return spec.readOnly ? { backingParticipantId } : { backingParticipantId, requireApproval };
+      const conns = await db.listIntegrationConnectionsForKey(ctx.me.id, spec.key);
+      if (conns.length === 0) throw new ApiError(400, `connect your ${spec.displayName} account in Settings first`);
+      if (conns.length > 1) throw new ApiError(400, `choose which ${spec.displayName} account this agent should use`);
+      return { connectionId: conns[0].id, ...extra };
     },
 
     async buildGrant(frame: ConfigureFrame, agent, config): Promise<string | null> {
-      const backing = typeof config.backingParticipantId === "string" ? config.backingParticipantId : null;
-      if (!backing) return null; // not yet bound to a connected user — advertise nothing
+      const connectionId = typeof config.connectionId === "string" ? config.connectionId : null;
+      if (!connectionId) return null; // not yet bound to a connection — advertise nothing
       let accessToken: string;
       try {
-        accessToken = await getValidMcpToken(spec, backing);
+        accessToken = await getValidMcpToken(spec, connectionId);
       } catch (e) {
         console.error(`runner[${agent.id}] configure: could not mint ${spec.key} token:`, e);
         // Permanently dead (flagged needs_reconnect by getValidMcpToken) or disconnected
         // entirely → tell the agent so it can tell the user (mirrors gmail.ts). Transient
         // failures stay silent.
-        const row = await db.getIntegrationConnection(backing, spec.key).catch(() => null);
+        const row = await db.getIntegrationConnectionById(connectionId).catch(() => null);
         if (!row || row.needs_reconnect) return disconnectedBlock(spec);
         return null;
       }
@@ -111,10 +122,10 @@ export function createMcpRemoteAdapter(spec: McpAdapterSpec): IntegrationAdapter
     },
 
     async refreshCredentials(agent, config, send): Promise<void> {
-      const backing = typeof config.backingParticipantId === "string" ? config.backingParticipantId : null;
-      if (!backing) return;
+      const connectionId = typeof config.connectionId === "string" ? config.connectionId : null;
+      if (!connectionId) return;
       try {
-        const accessToken = await getValidMcpToken(spec, backing);
+        const accessToken = await getValidMcpToken(spec, connectionId);
         send({ type: "integration_credentials", key: spec.key, accessToken });
       } catch (e) {
         console.error(`runner[${agent.id}] could not refresh ${spec.key} token:`, e);

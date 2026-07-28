@@ -275,13 +275,15 @@ create table if not exists google_identities (
 );
 
 -- Per-USER OAuth connections for the connection-based integrations (Linear/Notion/Granola via
--- their remote MCP servers, Google Drive). You connect your accounts once in Settings (like
--- github_identities / google_identities); an agent's integration references the connecting user by
--- id (config.backingParticipantId), like the gmail integration. `extra` holds per-provider refresh
--- material. mcp_oauth_clients stores the OAuth client registered (once, via DCR) per remote MCP
--- provider. See migrations/014 + 015_integration_connections_per_user.sql and
--- backend/src/db/connections.ts. MVP: plaintext; encrypt at rest before real multi-tenant.
+-- their remote MCP servers, Google Drive, X, …). You connect accounts once in Settings (like
+-- github_identities / google_identities); an agent's integration binds to one specific connection
+-- by id (config.connectionId). A user can hold several connections for the same integration_key
+-- (e.g. two X accounts) — see migrations/040_multi_integration_connections.sql. `extra` holds
+-- per-provider refresh material. mcp_oauth_clients stores the OAuth client registered (once, via
+-- DCR) per remote MCP provider. See backend/src/db/connections.ts. MVP: plaintext; encrypt at
+-- rest before real multi-tenant.
 create table if not exists integration_connections (
+  id                uuid primary key default gen_random_uuid(),
   participant_id    uuid not null references participants(id) on delete cascade,
   integration_key   text not null,
   external_account  text,
@@ -290,10 +292,13 @@ create table if not exists integration_connections (
   access_expires_at timestamptz,
   scopes            text,
   extra             jsonb not null default '{}'::jsonb,
+  -- True when the refresh grant is permanently dead (invalid_grant) — see migrations/027.
+  needs_reconnect   boolean not null default false,
   created_at        timestamptz not null default now(),
-  updated_at        timestamptz not null default now(),
-  primary key (participant_id, integration_key)
+  updated_at        timestamptz not null default now()
 );
+create index if not exists integration_connections_participant_key_idx
+  on integration_connections (participant_id, integration_key);
 
 create table if not exists mcp_oauth_clients (
   provider_key      text primary key,

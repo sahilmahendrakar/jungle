@@ -14,6 +14,7 @@ import { avatarClass, initials } from "@/lib/people";
 import { cn } from "@/lib/utils";
 import { BrandTile, useConnections, type ConnectionState } from "@/lib/connections";
 import { useSlack } from "@/lib/slack";
+import { getIntegrationType } from "./api";
 import {
   ArrowLeft,
   Bell,
@@ -37,6 +38,85 @@ import {
   setNotificationsEnabled,
 } from "./lib/notifications";
 
+// One row per connected account, for integrations where a user can hold several (X, Notion) —
+// independent Reconnect/Disconnect per account, since each backs a possibly-different set of
+// agents.
+function AccountRow({
+  account,
+  connKey,
+  connName,
+  connecting,
+  onReconnect,
+  onDisconnect,
+}: {
+  account: ConnectionState["accounts"][number];
+  connKey: string;
+  connName: string;
+  connecting: boolean;
+  onReconnect: () => void;
+  onDisconnect: () => void;
+}) {
+  const [confirmUnlink, setConfirmUnlink] = useState(false);
+  return (
+    <div
+      className="space-y-2 rounded-lg border bg-background p-2.5"
+      data-testid={`settings-account-${connKey}-${account.id}`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        {account.needsReconnect ? (
+          <span className="flex items-center gap-1 text-xs text-amber-600">
+            <span className="size-1.5 rounded-full bg-amber-500" />
+            <span className="truncate">Reconnect needed{account.externalAccount ? ` · ${account.externalAccount}` : ""}</span>
+          </span>
+        ) : (
+          <span className="flex items-center gap-1 text-xs text-emerald-600">
+            <span className="size-1.5 rounded-full bg-emerald-500" />
+            <span className="truncate">{account.externalAccount || "Connected"}</span>
+          </span>
+        )}
+      </div>
+      <div className="flex items-center justify-between gap-2">
+        {account.needsReconnect && (
+          <Button size="sm" onClick={onReconnect} disabled={connecting} className="h-7 gap-1.5 text-xs">
+            {connecting && <Loader2 className="size-3 animate-spin" />}
+            {connecting ? "Waiting…" : `Reconnect`}
+          </Button>
+        )}
+        {!confirmUnlink ? (
+          <Button
+            data-testid={`settings-disconnect-account-${account.id}`}
+            variant="ghost"
+            size="sm"
+            onClick={() => setConfirmUnlink(true)}
+            className="ml-auto h-7 gap-1.5 text-xs text-muted-foreground hover:text-destructive"
+          >
+            <Unlink className="size-3.5" />
+            Disconnect
+          </Button>
+        ) : (
+          <div className="ml-auto flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">Agents using this account lose access.</span>
+            <Button variant="ghost" size="sm" onClick={() => setConfirmUnlink(false)}>
+              Cancel
+            </Button>
+            <Button
+              data-testid={`settings-disconnect-account-${account.id}-confirm`}
+              variant="destructive"
+              size="sm"
+              onClick={() => {
+                setConfirmUnlink(false);
+                onDisconnect();
+              }}
+            >
+              Disconnect
+            </Button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // One thin connection row: brand tile + name + live status, expanding on click to the
 // connect/disconnect controls (and, for GitHub, the App-installation details).
 // Exported for the connections mocks/tests.
@@ -47,6 +127,9 @@ export function ConnectionRow({
   connecting,
   onConnect,
   onDisconnect,
+  onConnectAdditional,
+  onReconnectAccount,
+  onDisconnectAccount,
 }: {
   conn: ConnectionState;
   expanded: boolean;
@@ -54,8 +137,16 @@ export function ConnectionRow({
   connecting: boolean;
   onConnect: () => void;
   onDisconnect: () => void;
+  // Only used for integrations where getIntegrationType(conn.key)?.allowMultiple is set (X,
+  // Notion) — every other connection ignores these and behaves exactly as before.
+  onConnectAdditional?: () => void;
+  onReconnectAccount?: (connectionId: string) => void;
+  onDisconnectAccount?: (connectionId: string) => void;
 }) {
   const [confirmUnlink, setConfirmUnlink] = useState(false);
+  const allowMultiple = getIntegrationType(conn.key)?.allowMultiple === true;
+  const multiAccount = allowMultiple && conn.accounts.length > 0;
+
   return (
     <div className="overflow-hidden rounded-xl border bg-card transition-colors">
       <button
@@ -68,7 +159,15 @@ export function ConnectionRow({
         <BrandTile brand={conn.key} />
         <span className="min-w-0 flex-1">
           <span className="block text-sm font-medium leading-tight">{conn.name}</span>
-          {conn.connected && conn.needsReconnect ? (
+          {multiAccount ? (
+            <span className="flex items-center gap-1 text-xs text-emerald-600">
+              <span className="size-1.5 rounded-full bg-emerald-500" />
+              <span className="truncate">
+                {conn.accounts.length} account{conn.accounts.length === 1 ? "" : "s"} connected
+                {conn.accounts.some((a) => a.needsReconnect) ? " · reconnect needed" : ""}
+              </span>
+            </span>
+          ) : conn.connected && conn.needsReconnect ? (
             <span className="flex items-center gap-1 text-xs text-amber-600">
               <span className="size-1.5 rounded-full bg-amber-500" />
               <span className="truncate">Reconnect needed{conn.account ? ` · ${conn.account}` : ""}</span>
@@ -103,83 +202,114 @@ export function ConnectionRow({
         <div className="space-y-3 border-t bg-muted/30 px-3 py-3">
           <p className="text-xs leading-relaxed text-muted-foreground">{conn.description}</p>
 
-          {/* A dead OAuth grant (invalid_grant) looks "connected" but agents can't use it —
-              reconnecting rides the same consent flow as connecting and revives the grant. */}
-          {conn.connected && conn.needsReconnect && (
-            <div
-              className="space-y-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3"
-              data-testid={`settings-reconnect-${conn.key}`}
-            >
-              <p className="text-xs leading-relaxed text-muted-foreground">
-                This connection's authorization expired, so agents can't use it right now.
-                Reconnect to restore access — it takes a few seconds.
-              </p>
+          {multiAccount ? (
+            <>
+              <div className="space-y-2">
+                {conn.accounts.map((account) => (
+                  <AccountRow
+                    key={account.id}
+                    account={account}
+                    connKey={conn.key}
+                    connName={conn.name}
+                    connecting={connecting}
+                    onReconnect={() => onReconnectAccount?.(account.id)}
+                    onDisconnect={() => onDisconnectAccount?.(account.id)}
+                  />
+                ))}
+              </div>
               <Button
-                data-testid={`settings-reconnect-button-${conn.key}`}
+                data-testid={`settings-connect-another-${conn.key}`}
+                variant="outline"
                 size="sm"
-                onClick={onConnect}
+                onClick={onConnectAdditional}
                 disabled={connecting}
                 className="gap-1.5"
               >
                 {connecting ? <Loader2 className="size-3.5 animate-spin" /> : null}
-                {connecting ? "Waiting for authorization…" : `Reconnect ${conn.name}`}
+                {connecting ? "Waiting for authorization…" : `+ Add another ${conn.name} account`}
               </Button>
-            </div>
-          )}
-
-          {/* GitHub also surfaces its App installation state — repo access rides the App, not
-              just the account link. */}
-          {conn.key === "github" && conn.connected && conn.github && (
-            <GithubAppDetails github={conn.github} />
-          )}
-
-          <div className="flex items-center justify-between gap-2">
-            {conn.connected ? (
-              !confirmUnlink ? (
-                <Button
-                  data-testid={`settings-disconnect-${conn.key}`}
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setConfirmUnlink(true)}
-                  className="gap-1.5 text-muted-foreground hover:text-destructive"
+            </>
+          ) : (
+            <>
+              {/* A dead OAuth grant (invalid_grant) looks "connected" but agents can't use it —
+                  reconnecting rides the same consent flow as connecting and revives the grant. */}
+              {conn.connected && conn.needsReconnect && (
+                <div
+                  className="space-y-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3"
+                  data-testid={`settings-reconnect-${conn.key}`}
                 >
-                  <Unlink className="size-3.5" />
-                  Disconnect
-                </Button>
-              ) : (
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-muted-foreground">
-                    Agents using this connection will lose access.
-                  </span>
-                  <Button variant="ghost" size="sm" onClick={() => setConfirmUnlink(false)}>
-                    Cancel
-                  </Button>
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    This connection's authorization expired, so agents can't use it right now.
+                    Reconnect to restore access — it takes a few seconds.
+                  </p>
                   <Button
-                    data-testid={`settings-disconnect-${conn.key}-confirm`}
-                    variant="destructive"
+                    data-testid={`settings-reconnect-button-${conn.key}`}
                     size="sm"
-                    onClick={() => {
-                      setConfirmUnlink(false);
-                      onDisconnect();
-                    }}
+                    onClick={onConnect}
+                    disabled={connecting}
+                    className="gap-1.5"
                   >
-                    Disconnect
+                    {connecting ? <Loader2 className="size-3.5 animate-spin" /> : null}
+                    {connecting ? "Waiting for authorization…" : `Reconnect ${conn.name}`}
                   </Button>
                 </div>
-              )
-            ) : (
-              <Button
-                data-testid={`settings-connect-${conn.key}`}
-                size="sm"
-                onClick={onConnect}
-                disabled={connecting}
-                className="gap-1.5"
-              >
-                {connecting ? <Loader2 className="size-3.5 animate-spin" /> : null}
-                {connecting ? "Waiting for authorization…" : `Connect ${conn.name}`}
-              </Button>
-            )}
-          </div>
+              )}
+
+              {/* GitHub also surfaces its App installation state — repo access rides the App, not
+                  just the account link. */}
+              {conn.key === "github" && conn.connected && conn.github && (
+                <GithubAppDetails github={conn.github} />
+              )}
+
+              <div className="flex items-center justify-between gap-2">
+                {conn.connected ? (
+                  !confirmUnlink ? (
+                    <Button
+                      data-testid={`settings-disconnect-${conn.key}`}
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setConfirmUnlink(true)}
+                      className="gap-1.5 text-muted-foreground hover:text-destructive"
+                    >
+                      <Unlink className="size-3.5" />
+                      Disconnect
+                    </Button>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-muted-foreground">
+                        Agents using this connection will lose access.
+                      </span>
+                      <Button variant="ghost" size="sm" onClick={() => setConfirmUnlink(false)}>
+                        Cancel
+                      </Button>
+                      <Button
+                        data-testid={`settings-disconnect-${conn.key}-confirm`}
+                        variant="destructive"
+                        size="sm"
+                        onClick={() => {
+                          setConfirmUnlink(false);
+                          onDisconnect();
+                        }}
+                      >
+                        Disconnect
+                      </Button>
+                    </div>
+                  )
+                ) : (
+                  <Button
+                    data-testid={`settings-connect-${conn.key}`}
+                    size="sm"
+                    onClick={onConnect}
+                    disabled={connecting}
+                    className="gap-1.5"
+                  >
+                    {connecting ? <Loader2 className="size-3.5 animate-spin" /> : null}
+                    {connecting ? "Waiting for authorization…" : `Connect ${conn.name}`}
+                  </Button>
+                )}
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>
@@ -556,6 +686,9 @@ function SettingsContent({ focusConnections = false }: { focusConnections?: bool
               connecting={conns.connecting === c.key}
               onConnect={() => void conns.connect(c.key)}
               onDisconnect={() => void conns.disconnect(c.key)}
+              onConnectAdditional={() => void conns.connectAdditional(c.key)}
+              onReconnectAccount={(id) => void conns.reconnectAccount(c.key, id)}
+              onDisconnectAccount={(id) => void conns.disconnectAccount(id)}
             />
           ))}
           {!visible.length && (

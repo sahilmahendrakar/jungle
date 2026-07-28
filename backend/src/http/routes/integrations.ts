@@ -48,6 +48,10 @@ interface PendingConnect {
   // instead of redirecting the whole window to /settings.
   popup: boolean;
   createdAt: number;
+  // Set when this is a "Reconnect" on one specific existing connection — the callback updates
+  // that row in place. Absent for a fresh "Connect" / "add another account", which always
+  // creates a new row (see the callback below).
+  connectionId: string | null;
 }
 const pendingConnects = new Map<string, PendingConnect>();
 const OAUTH_STATE_TTL_MS = 15 * 60 * 1000;
@@ -71,15 +75,26 @@ function connectionAdapter(key: string) {
 // Liana web API (routes/liana.ts), whose users authenticate with a Liana token instead of a
 // Firebase session. The adapter builds the authorize URL + per-attempt state; we bind it to a
 // fresh OAuth `state` and return the URL for the caller to navigate/popup to.
+//
+// `connectionId` set = "Reconnect" on one specific existing connection (verified to belong to
+// `me`/`key`); omitted = a fresh "Connect" / "add another account", which always creates a new
+// row on callback rather than overwriting anything.
 export async function beginIntegrationConnect(
   me: db.Participant,
   key: string,
   popup: boolean,
+  connectionId?: string | null,
 ): Promise<string> {
   const adapter = connectionAdapter(key);
+  if (connectionId) {
+    const existing = await db.getIntegrationConnectionById(connectionId);
+    if (!existing || existing.participant_id !== me.id || existing.integration_key !== key) {
+      throw new ApiError(404, "connection not found");
+    }
+  }
   const state = randomBytes(16).toString("hex");
   const start = await adapter.connection!.start({ me, redirectUri: REDIRECT_URI });
-  trackConnect(state, { participantId: me.id, key, pending: start.pending, popup });
+  trackConnect(state, { participantId: me.id, key, pending: start.pending, popup, connectionId: connectionId ?? null });
   // The adapter returns an authorize URL without `state` (it can't know ours); append it.
   const url = new URL(start.authorizeUrl);
   url.searchParams.set("state", state);
@@ -91,7 +106,8 @@ router.post(
   "/api/integrations/:key/connect-url",
   wrap(async (req, res) => {
     const me = await requireRequester(req);
-    const url = await beginIntegrationConnect(me, String(req.params.key), req.body?.popup === true);
+    const connectionId = typeof req.body?.connectionId === "string" ? req.body.connectionId : null;
+    const url = await beginIntegrationConnect(me, String(req.params.key), req.body?.popup === true, connectionId);
     res.json({ url });
   }),
 );
@@ -116,16 +132,29 @@ router.get("/auth/integrations/callback", async (req, res) => {
       entry.pending,
       code,
     );
-    await db.upsertIntegrationConnection({
-      participantId: me.id,
-      key: entry.key,
-      externalAccount: result.externalAccount,
-      accessToken: result.accessToken,
-      refreshToken: result.refreshToken,
-      accessExpiresAt: result.accessExpiresAt,
-      scopes: result.scopes,
-      extra: result.extra,
-    });
+    if (entry.connectionId) {
+      // Reconnect: revive the one connection this popup targeted, in place.
+      await db.updateIntegrationConnectionById(entry.connectionId, {
+        externalAccount: result.externalAccount,
+        accessToken: result.accessToken,
+        refreshToken: result.refreshToken,
+        accessExpiresAt: result.accessExpiresAt,
+        scopes: result.scopes,
+        extra: result.extra,
+      });
+    } else {
+      // Fresh connect / "add another account": always a new row.
+      await db.createIntegrationConnection({
+        participantId: me.id,
+        key: entry.key,
+        externalAccount: result.externalAccount,
+        accessToken: result.accessToken,
+        refreshToken: result.refreshToken,
+        accessExpiresAt: result.accessExpiresAt,
+        scopes: result.scopes,
+        extra: result.extra,
+      });
+    }
     if (entry.popup) {
       return res.send(
         popupClosePage({ connection: entry.key, status: "connected", account: result.externalAccount ?? undefined }),
@@ -142,12 +171,16 @@ router.get("/auth/integrations/callback", async (req, res) => {
 // The authed user's connection status for every connection-based integration (Settings + the
 // agent integration cards read this). `{ [key]: { connected, externalAccount, needsReconnect } }`
 // — needsReconnect means the stored grant is dead (invalid_grant) and the user must re-consent.
+// Single-row-per-key shape, kept for existing callers (liana-web, the main app's legacy card);
+// when a user holds several connections for a key, this reports the most recently updated one —
+// see GET /api/integrations/connections for the full multi-account list.
 router.get(
   "/api/integrations/status",
   wrap(async (req, res) => {
     const me = await requireRequester(req);
-    const rows = await db.listIntegrationConnections(me.id);
-    const byKey = new Map(rows.map((r) => [r.integration_key, r]));
+    const rows = await db.listIntegrationConnections(me.id); // newest-updated first
+    const byKey = new Map<string, db.IntegrationConnectionRow>();
+    for (const row of rows) if (!byKey.has(row.integration_key)) byKey.set(row.integration_key, row);
     const status: Record<
       string,
       { connected: boolean; externalAccount?: string | null; needsReconnect?: boolean }
@@ -162,13 +195,52 @@ router.get(
   }),
 );
 
-// Disconnect: drop the authed user's grant for one integration. Agents whose integration was backed
-// by this connection stop getting a token at their next configure.
+// The authed user's FULL connection list for every connection-based integration, keyed by
+// integration key — the multi-account read model (Settings' "add another account" list, and the
+// agent create/edit account picker). Unlike /status, this doesn't collapse multiple connections
+// for the same key into one.
+router.get(
+  "/api/integrations/connections",
+  wrap(async (req, res) => {
+    const me = await requireRequester(req);
+    const rows = await db.listIntegrationConnections(me.id); // newest-updated first
+    const byKey: Record<
+      string,
+      Array<{ id: string; externalAccount: string | null; needsReconnect: boolean; updatedAt: string }>
+    > = {};
+    for (const key of CONNECTION_KEYS) byKey[key] = [];
+    for (const row of rows) {
+      if (!(row.integration_key in byKey)) continue;
+      byKey[row.integration_key].push({
+        id: row.id,
+        externalAccount: row.external_account,
+        needsReconnect: row.needs_reconnect,
+        updatedAt: row.updated_at,
+      });
+    }
+    res.json(byKey);
+  }),
+);
+
+// Disconnect: drop the authed user's grant for one integration (ALL connections under that key —
+// the single-slot flow other callers use). Agents whose integration was backed by any of them stop
+// getting a token at their next configure. For one specific account, see the id-based route below.
 router.delete(
   "/api/integrations/:key/connection",
   wrap(async (req, res) => {
     const me = await requireRequester(req);
     await db.deleteIntegrationConnection(me.id, String(req.params.key));
+    res.json({ ok: true });
+  }),
+);
+
+// Disconnect one specific connection by id (the multi-account "Disconnect" button in Settings).
+router.delete(
+  "/api/integrations/connections/:id",
+  wrap(async (req, res) => {
+    const me = await requireRequester(req);
+    const conn = await db.getIntegrationConnectionById(String(req.params.id));
+    if (conn && conn.participant_id === me.id) await db.deleteIntegrationConnectionById(conn.id);
     res.json({ ok: true });
   }),
 );

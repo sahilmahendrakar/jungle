@@ -7,10 +7,10 @@ import type { IntegrationAdapter } from "./types";
 
 // Google Calendar integration: the agent can list/read events and (with approval) create/update
 // them on a connected Google Calendar via the runner's in-process calendar_* MCP tools —
-// structurally identical to Google Drive. The OAuth grant is PER-USER (integration_connections),
-// connected once in Settings; attaching to an agent binds config.backingParticipantId to the
-// connecting user. Uses the same Google OAuth client as Gmail/Drive (google.ts) with
-// CALENDAR_SCOPES.
+// structurally identical to Google Drive. The OAuth grant is PER-USER (integration_connections,
+// possibly several per user), connected once in Settings; attaching to an agent binds
+// config.connectionId to one specific connection. Uses the same Google OAuth client as Gmail/
+// Drive (google.ts) with CALENDAR_SCOPES.
 
 const KEY = "google-calendar";
 
@@ -18,35 +18,33 @@ function requireApprovalOf(config: Record<string, unknown>): boolean {
   return config.requireApproval !== false; // default on
 }
 
-// A valid access token for a user's Calendar connection, refreshing from the stored refresh
-// token if near expiry (mirrors google-drive.ts:getValidDriveToken). A permanently-dead grant
+// A valid access token for one Calendar connection, refreshing from the stored refresh token if
+// near expiry (mirrors google-drive.ts:getValidDriveToken). A permanently-dead grant
 // (invalid_grant / no refresh token) flags the connection needs_reconnect; a successful refresh
 // clears it, so the state self-heals.
-async function getValidCalendarToken(participantId: string): Promise<string> {
-  const row = await db.getIntegrationConnection(participantId, KEY);
-  if (!row) throw new Error(`participant ${participantId} has no Google Calendar connection`);
+async function getValidCalendarToken(connectionId: string): Promise<string> {
+  const row = await db.getIntegrationConnectionById(connectionId);
+  if (!row) throw new Error(`Calendar connection ${connectionId} no longer exists`);
   const exp = row.access_expires_at ? new Date(row.access_expires_at).getTime() : Infinity;
   if (exp - Date.now() > 60_000) return row.access_token;
   if (!row.refresh_token) {
-    await db.setIntegrationNeedsReconnect(participantId, KEY, true);
+    await db.setIntegrationNeedsReconnectById(connectionId, true);
     throw new Error("Calendar token expired and no refresh token; reconnect");
   }
   let tok: Awaited<ReturnType<typeof google.googleRefreshToken>>;
   try {
     tok = await google.googleRefreshToken(row.refresh_token);
   } catch (e) {
-    if (isInvalidGrantError(e)) await db.setIntegrationNeedsReconnect(participantId, KEY, true);
+    if (isInvalidGrantError(e)) await db.setIntegrationNeedsReconnectById(connectionId, true);
     throw e;
   }
-  await db.updateIntegrationTokens({
-    participantId,
-    key: KEY,
+  await db.updateIntegrationTokensById(connectionId, {
     accessToken: tok.accessToken,
     refreshToken: tok.refreshToken ?? row.refresh_token,
     accessExpiresAt: tok.accessExpiresAt,
   });
   // Self-heal: a successful refresh proves the grant is alive again.
-  if (row.needs_reconnect) await db.setIntegrationNeedsReconnect(participantId, KEY, false);
+  if (row.needs_reconnect) await db.setIntegrationNeedsReconnectById(connectionId, false);
   return tok.accessToken;
 }
 
@@ -82,30 +80,37 @@ function disconnectedBlock(email: string): string {
 export const googleCalendarAdapter: IntegrationAdapter = {
   key: KEY,
 
-  // Bind to the attaching user's Calendar connection (like Drive) — 400 if not connected; a
-  // reconfigure keeps the original backing user. Stores the display email for the agent card.
+  // Bind to one of the attaching user's Calendar connections — the picker's choice
+  // (rawConfig.connectionId) when given, else the existing binding on reconfigure, else the
+  // user's sole connection if they have exactly one. Stores the display email for the agent card.
   async resolveConfig(ctx, rawConfig): Promise<Record<string, unknown>> {
     const requireApproval = rawConfig.requireApproval !== false && rawConfig.requireApproval !== "false";
-    const existingBacking =
-      typeof ctx.existing?.backingParticipantId === "string" ? ctx.existing.backingParticipantId : null;
-    if (existingBacking) {
-      return { backingParticipantId: existingBacking, email: ctx.existing?.email ?? null, requireApproval };
+    const requestedId = typeof rawConfig.connectionId === "string" ? rawConfig.connectionId : null;
+    const existingId = typeof ctx.existing?.connectionId === "string" ? ctx.existing.connectionId : null;
+    const connectionId = requestedId ?? existingId;
+    if (connectionId) {
+      const conn = await db.getIntegrationConnectionById(connectionId);
+      if (!conn || conn.participant_id !== ctx.me.id || conn.integration_key !== KEY) {
+        throw new ApiError(400, "that Google Calendar connection doesn't belong to you");
+      }
+      return { connectionId: conn.id, email: conn.external_account, requireApproval };
     }
-    const conn = await db.getIntegrationConnection(ctx.me.id, KEY);
-    if (!conn) throw new ApiError(400, "connect your Google Calendar account in Settings first");
-    return { backingParticipantId: ctx.me.id, email: conn.external_account, requireApproval };
+    const conns = await db.listIntegrationConnectionsForKey(ctx.me.id, KEY);
+    if (conns.length === 0) throw new ApiError(400, "connect your Google Calendar account in Settings first");
+    if (conns.length > 1) throw new ApiError(400, "choose which Google Calendar account this agent should use");
+    return { connectionId: conns[0].id, email: conns[0].external_account, requireApproval };
   },
 
   async buildGrant(frame: ConfigureFrame, agent, config): Promise<string | null> {
-    const backing = typeof config.backingParticipantId === "string" ? config.backingParticipantId : null;
-    if (!backing || !google.isConfigured()) return null;
+    const connectionId = typeof config.connectionId === "string" ? config.connectionId : null;
+    if (!connectionId || !google.isConfigured()) return null;
     let accessToken: string;
     try {
-      accessToken = await getValidCalendarToken(backing);
+      accessToken = await getValidCalendarToken(connectionId);
     } catch (e) {
       console.error(`runner[${agent.id}] configure: could not mint Calendar token:`, e);
       // Permanently dead or disconnected → tell the agent (see google-drive.ts); transient → silent.
-      const row = await db.getIntegrationConnection(backing, KEY).catch(() => null);
+      const row = await db.getIntegrationConnectionById(connectionId).catch(() => null);
       const email = typeof config.email === "string" && config.email ? config.email : "your calendar";
       if (!row || row.needs_reconnect) return disconnectedBlock(email);
       return null;
@@ -117,10 +122,10 @@ export const googleCalendarAdapter: IntegrationAdapter = {
   },
 
   async refreshCredentials(agent, config, send): Promise<void> {
-    const backing = typeof config.backingParticipantId === "string" ? config.backingParticipantId : null;
-    if (!backing || !google.isConfigured()) return;
+    const connectionId = typeof config.connectionId === "string" ? config.connectionId : null;
+    if (!connectionId || !google.isConfigured()) return;
     try {
-      const accessToken = await getValidCalendarToken(backing);
+      const accessToken = await getValidCalendarToken(connectionId);
       send({ type: "integration_credentials", key: KEY, accessToken });
     } catch (e) {
       console.error(`runner[${agent.id}] could not refresh Calendar token:`, e);
