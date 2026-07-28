@@ -9,16 +9,24 @@
 // credential with personal rate limits, so the write path is gated to an email allowlist that only
 // someone with shell access to the backend's .env can change.
 //
-// Note this is a NARROWER list than admins.ts: a platform operator may read cross-workspace usage
-// without it being appropriate to spend someone else's subscription quota, so the two allowlists
-// are deliberately separate and this one defaults to a single account.
+// Each allowlisted person stores their OWN token, and it only applies to agents they created — so
+// listing someone here lets them put their own subscription behind their own agents; it never
+// shares anyone else's seat.
+//
+// Kept separate from admins.ts on purpose: reading cross-workspace usage and spending a personal
+// subscription quota are different privileges, so the two lists are allowed to diverge even when
+// they currently overlap.
 import "./env";
 import type express from "express";
 import * as auth from "./auth";
 import * as db from "./db";
 import { requester } from "./http/guards";
 
-const DEFAULT_SUBSCRIPTION_EMAILS = ["sahil.mahendrakar@gmail.com"];
+const DEFAULT_SUBSCRIPTION_EMAILS = [
+  "sahil.mahendrakar@gmail.com",
+  "suhaaspk@gmail.com",
+  "ram@getverro.io",
+];
 
 const ALLOWED = new Set(
   (process.env.CLAUDE_SUBSCRIPTION_EMAILS ?? DEFAULT_SUBSCRIPTION_EMAILS.join(","))
