@@ -6,7 +6,14 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { auth, onIdTokenChanged, signInWithGoogle, signOutUser, type User } from "./firebase";
+import {
+  auth,
+  onIdTokenChanged,
+  signInWithEmail,
+  signInWithGoogle,
+  signOutUser,
+  type User,
+} from "./firebase";
 import { getMe, setAuthToken, setTokenGetter, type Me } from "./api";
 
 interface AuthCtx {
@@ -15,6 +22,7 @@ interface AuthCtx {
   me: Me | null;
   refreshMe: () => Promise<void>;
   signIn: () => Promise<void>;
+  signInEmail: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
   getToken: () => Promise<string | null>; // fresh ID token (for the WebSocket)
 }
@@ -76,13 +84,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const signIn = useCallback(async () => {
     await signInWithGoogle();
   }, []);
+  const signInEmail = useCallback(async (email: string, password: string) => {
+    await signInWithEmail(email, password);
+  }, []);
   const signOut = useCallback(async () => {
     await signOutUser();
     setMe(null);
   }, []);
 
   return (
-    <Ctx.Provider value={{ user, ready, me, refreshMe, signIn, signOut, getToken }}>
+    <Ctx.Provider value={{ user, ready, me, refreshMe, signIn, signInEmail, signOut, getToken }}>
       {children}
     </Ctx.Provider>
   );

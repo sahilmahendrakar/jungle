@@ -12,6 +12,7 @@ import {
   getReactNativePersistence,
   GoogleAuthProvider,
   signInWithCredential,
+  signInWithEmailAndPassword,
   signOut,
   onIdTokenChanged,
   type Auth,
@@ -48,6 +49,13 @@ export const auth = firebaseAuth;
 export function signInWithGoogleCredential(idToken: string) {
   if (!auth) throw new Error("firebase auth not configured");
   return signInWithCredential(auth, GoogleAuthProvider.credential(idToken));
+}
+
+// Email/password sign-in. Exists alongside Google so there's a login path that doesn't depend on a
+// third-party provider — App Review runs from a datacenter, where Google routinely blocks OAuth.
+export function signInWithEmail(email: string, password: string) {
+  if (!auth) throw new Error("firebase auth not configured");
+  return signInWithEmailAndPassword(auth, email.trim(), password);
 }
 
 export function signOutUser() {
