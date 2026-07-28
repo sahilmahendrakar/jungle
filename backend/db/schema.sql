@@ -278,7 +278,7 @@ create table if not exists google_identities (
 -- their remote MCP servers, Google Drive, X, …). You connect accounts once in Settings (like
 -- github_identities / google_identities); an agent's integration binds to one specific connection
 -- by id (config.connectionId). A user can hold several connections for the same integration_key
--- (e.g. two X accounts) — see migrations/040_multi_integration_connections.sql. `extra` holds
+-- (e.g. two X accounts) — see migrations/042_multi_integration_connections.sql. `extra` holds
 -- per-provider refresh material. mcp_oauth_clients stores the OAuth client registered (once, via
 -- DCR) per remote MCP provider. See backend/src/db/connections.ts. MVP: plaintext; encrypt at
 -- rest before real multi-tenant.

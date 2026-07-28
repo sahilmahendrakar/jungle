@@ -1,7 +1,7 @@
 import { pool } from "./pool";
 
 // Per-user OAuth connections for the connection-based integrations (see
-// migrations/040_multi_integration_connections.sql). A user can hold several connections for the
+// migrations/042_multi_integration_connections.sql). A user can hold several connections for the
 // same integration_key (e.g. two X accounts, two Notion workspaces) — each is its own row,
 // identified by `id`. An agent's integration binds to one specific connection by id
 // (agent_integrations.config.connectionId), not implicitly "the" connection for a user+key.

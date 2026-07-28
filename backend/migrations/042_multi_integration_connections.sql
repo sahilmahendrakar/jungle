@@ -1,4 +1,4 @@
--- 040_multi_integration_connections.sql — allow multiple connections per (user, integration key).
+-- 042_multi_integration_connections.sql — allow multiple connections per (user, integration key).
 --
 -- integration_connections was one row per (participant_id, integration_key) — a user could link
 -- at most one X account or one Notion workspace, ever. Re-key by a surrogate `id` so a user can
