@@ -103,6 +103,21 @@ export async function addChannelMemberAs(
   return target;
 }
 
+// Self-serve join: unlike addChannelMemberAs, the actor does NOT need to already be a member —
+// channels have no public/private flag, so any channel in the actor's workspace is joinable.
+// Extracted from POST /api/channels/:id/join.
+export async function joinChannelAs(
+  actor: db.Participant,
+  channelId: string,
+): Promise<{ id: string; name: string; kind: string }> {
+  const channel = await db.getChannel(channelId);
+  if (!channel || channel.workspace_id !== actor.workspace_id) throw new ApiError(404, "channel not found");
+  if (channel.kind === "dm") throw new ApiError(400, "cannot join a DM");
+  await db.addChannelMember(channel.id, actor.id);
+  await fanOut(channel.id, { type: "members_changed", channelId: channel.id });
+  return channel;
+}
+
 // Remove a member. Extracted from DELETE /api/channels/:id/members/:participantId.
 export async function removeChannelMemberAs(
   actor: db.Participant,

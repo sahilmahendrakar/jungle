@@ -42,6 +42,27 @@ router.get(
   }),
 );
 
+// Channels in the requester's workspace they haven't joined yet, for "Browse channels". Channels
+// have no public/private flag — every channel is browsable and self-serve joinable (see join
+// below).
+router.get(
+  "/api/channels/browse",
+  wrap(async (req, res) => {
+    const me = await requireRequester(req);
+    res.json(await db.listUnjoinedChannels(me.workspace_id, me.id));
+  }),
+);
+
+// Self-serve join: unlike POST /api/channels/:id/members, the requester doesn't need to already
+// be a member. Logic in services/directory.ts.
+router.post(
+  "/api/channels/:id/join",
+  wrap(async (req, res) => {
+    const me = await requireRequester(req);
+    res.json(await directory.joinChannelAs(me, String(req.params.id)));
+  }),
+);
+
 router.get(
   "/api/channels/:id/messages",
   wrap(async (req, res) => {
