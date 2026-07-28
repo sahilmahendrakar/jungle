@@ -74,7 +74,7 @@ router.post(
   wrap(async (req, res) => {
     const u = auth.authedUser(req)!;
     const existing = await db.getParticipantByFirebaseUid(u.uid);
-    if (existing) return res.status(200).json(existing);
+    if (existing) return res.status(200).json(publicParticipant(existing));
     const handle = String(req.body?.handle ?? "").trim();
     const displayName = String(req.body?.displayName ?? "").trim() || u.name || handle;
     if (!HANDLE_RE.test(handle)) {

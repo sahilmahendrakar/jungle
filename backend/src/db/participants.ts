@@ -6,6 +6,9 @@ import { pool } from "./pool";
 // secret. Strip runner_token (see index.ts publicParticipant) before sending to any client.
 export interface Participant extends ParticipantBase {
   runner_token: string | null; // per-agent runner secret — never reaches clients
+  // Operator-supplied Claude subscription OAuth token (migrations/040). Present on the row because
+  // participant reads are `select *`; stripped by publicParticipant so it never reaches clients.
+  claude_oauth_token: string | null;
 }
 
 // The default workspace (migrations/009_workspaces.sql) — holds all pre-multi-tenancy rows and is
@@ -271,4 +274,47 @@ export async function getParticipantByHandle(
     [workspaceId, handle],
   );
   return rows[0] ?? null;
+}
+
+// --- Claude subscription token (migrations/040) -------------------------------------------------
+// Set/cleared by an allowlisted operator on their OWN human participant row (see
+// backend/src/subscription.ts for the gate). Because a participant row is per (account, workspace),
+// storing it here scopes the subscription to exactly the workspace it was set in.
+
+export async function setClaudeOauthToken(participantId: string, token: string | null): Promise<void> {
+  await pool.query(`update participants set claude_oauth_token = $2 where id = $1`, [participantId, token]);
+}
+
+// Whether THIS participant has a token stored (drives the settings UI's configured/not state).
+// Returns the boolean only — the token itself never leaves the server.
+export async function hasClaudeOauthToken(participantId: string): Promise<boolean> {
+  const { rows } = await pool.query<{ present: boolean }>(
+    `select claude_oauth_token is not null as present from participants where id = $1`,
+    [participantId],
+  );
+  return rows[0]?.present ?? false;
+}
+
+// The subscription token that applies to an agent: the one stored by the operator who CREATED it
+// (participants.created_by). Scoping to the creator rather than the workspace keeps a personal,
+// per-seat credential from being spent by a workspace co-member's agents. Read by buildConfigure;
+// null means bill turns to the org API key as usual.
+export async function getClaudeOauthTokenForAgent(agentId: string): Promise<string | null> {
+  const { rows } = await pool.query<{ claude_oauth_token: string }>(
+    `select owner.claude_oauth_token
+       from participants agent
+       join participants owner on owner.id = agent.created_by
+      where agent.id = $1 and owner.claude_oauth_token is not null`,
+    [agentId],
+  );
+  return rows[0]?.claude_oauth_token ?? null;
+}
+
+// Agents created by this operator, for re-pushing `configure` after the token changes.
+export async function listAgentIdsCreatedBy(ownerId: string): Promise<string[]> {
+  const { rows } = await pool.query<{ id: string }>(
+    `select id from participants where kind = 'agent' and created_by = $1`,
+    [ownerId],
+  );
+  return rows.map((r) => r.id);
 }

@@ -89,6 +89,12 @@ alter table participants drop constraint if exists participants_firebase_uid_key
 create unique index if not exists participants_ws_uid_idx
   on participants (workspace_id, firebase_uid) where firebase_uid is not null;
 
+-- Operator-supplied Claude subscription (Max/Pro) OAuth token from `claude setup-token`, set by an
+-- allowlisted operator on their own human participant row. Agents that operator CREATED then
+-- authenticate their CLI child with it instead of the org API key. Server-only — never serialized
+-- to a client (publicParticipant strips it). See migrations/041_claude_subscription.sql.
+alter table participants add column if not exists claude_oauth_token text;
+
 -- Shareable workspace invites: anyone who opens /join/<token> and signs in can join. Revocable
 -- (revoked_at) and optionally expiring (expires_at).
 create table if not exists workspace_invites (

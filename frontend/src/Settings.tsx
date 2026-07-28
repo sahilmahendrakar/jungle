@@ -1,5 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "./auth";
+import {
+  clearClaudeSubscription,
+  getClaudeSubscription,
+  setClaudeSubscription,
+  type ClaudeSubscriptionStatus,
+} from "./api";
 import { navigate } from "./route";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -16,6 +22,7 @@ import {
   ExternalLink,
   Loader2,
   LogOut,
+  KeyRound,
   Mail,
   Search,
   Settings as SettingsIcon,
@@ -238,6 +245,111 @@ function GithubAppDetails({ github }: { github: NonNullable<ConnectionState["git
 // render under an AuthProvider (i.e. only in Firebase mode).
 // Desktop notifications: permission request + on/off preference (lib/notifications.ts owns the
 // mechanics; the rules of what pings — DMs, mentions, approvals — live in App).
+// Operator-only: paste a `claude setup-token` OAuth token so the agents you create bill turns to
+// your Claude subscription instead of the org API key. The backend allowlists who may do this and
+// reports it as `allowed`; for everyone else this renders nothing at all. The token is write-only —
+// once saved we can only learn THAT one exists, so the field shows a placeholder, never the value.
+function ClaudeSubscriptionSection() {
+  const [status, setStatus] = useState<ClaudeSubscriptionStatus | null>(null);
+  const [token, setToken] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    getClaudeSubscription()
+      .then(setStatus)
+      .catch(() => setStatus({ allowed: false, configured: false }));
+  }, []);
+
+  async function save() {
+    setBusy(true);
+    setError(null);
+    try {
+      setStatus(await setClaudeSubscription(token.trim()));
+      setToken("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "could not save token");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove() {
+    setBusy(true);
+    setError(null);
+    try {
+      setStatus(await clearClaudeSubscription());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "could not remove token");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!status?.allowed) return null;
+  return (
+    <section className="mt-8 space-y-3">
+      <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        Claude subscription
+      </h2>
+      <div className="rounded-xl border bg-card p-4">
+        <div className="flex items-center gap-3">
+          <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10">
+            <KeyRound className="size-5 text-primary" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-medium">Run agents on your Max subscription</div>
+            <div className="text-xs text-muted-foreground">
+              {status.configured
+                ? "Active — agents you create bill turns to your subscription instead of the API key."
+                : "Paste a token from `claude setup-token`. Agents you create will use it instead of the API key."}
+            </div>
+          </div>
+          {status.configured ? (
+            <Button
+              data-testid="settings-claude-sub-remove"
+              onClick={remove}
+              disabled={busy}
+              size="sm"
+              variant="outline"
+              className="shrink-0"
+            >
+              {busy ? <Loader2 className="size-4 animate-spin" /> : "Remove"}
+            </Button>
+          ) : null}
+        </div>
+        {status.configured ? null : (
+          <div className="mt-3 flex gap-2">
+            <Input
+              data-testid="settings-claude-sub-token"
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="sk-ant-oat01-…"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && token.trim() && !busy) void save();
+              }}
+              className="flex-1 font-mono text-xs"
+            />
+            <Button
+              data-testid="settings-claude-sub-save"
+              onClick={save}
+              disabled={busy || !token.trim()}
+              size="sm"
+              className="shrink-0"
+            >
+              {busy ? <Loader2 className="size-4 animate-spin" /> : "Save"}
+            </Button>
+          </div>
+        )}
+        {error ? <div className="mt-2 text-xs text-destructive">{error}</div> : null}
+      </div>
+    </section>
+  );
+}
+
 function NotificationsSection() {
   const [enabled, setEnabled] = useState(notificationsEnabled());
   const [perm, setPerm] = useState(notificationPermission());
@@ -410,6 +522,7 @@ function SettingsContent({ focusConnections = false }: { focusConnections?: bool
       </section>
 
       <NotificationsSection />
+      <ClaudeSubscriptionSection />
 
       {/* Connections: every account link agents can build on — one searchable list; each row
           expands for details. Integrations attach these per-agent (agent profile → Integrations). */}

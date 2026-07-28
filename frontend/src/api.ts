@@ -1211,3 +1211,35 @@ export function adminActivity(window: AdminWindow, limit = 50): Promise<AdminAct
     errorMessage: "failed to load activity",
   }).then((r) => r.items);
 }
+
+// --- Claude subscription (operator-only) --------------------------------------------------------
+// Whether this account may manage a Claude subscription token, and whether one is stored. The
+// token itself is never readable — `allowed: false` (every non-operator account) means the
+// Settings field doesn't render at all.
+export interface ClaudeSubscriptionStatus {
+  allowed: boolean;
+  configured: boolean;
+}
+
+export function getClaudeSubscription(): Promise<ClaudeSubscriptionStatus> {
+  return request<ClaudeSubscriptionStatus>("/api/claude-subscription", { auth: true, devAuth: true });
+}
+
+export function setClaudeSubscription(token: string): Promise<ClaudeSubscriptionStatus> {
+  return request<ClaudeSubscriptionStatus>("/api/claude-subscription", {
+    method: "PUT",
+    json: { token },
+    auth: true,
+    devAuth: true,
+    errorMessage: "could not save token",
+  });
+}
+
+export function clearClaudeSubscription(): Promise<ClaudeSubscriptionStatus> {
+  return request<ClaudeSubscriptionStatus>("/api/claude-subscription", {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "could not remove token",
+  });
+}
