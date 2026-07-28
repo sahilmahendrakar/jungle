@@ -94,6 +94,7 @@ export function Sidebar({
   onOpenSearch,
   workingChannelIds,
   onNewChannel,
+  onBrowseChannels,
   onAddAgent,
   onCollapse,
   onOpenProfile,
@@ -134,6 +135,7 @@ export function Sidebar({
   onOpenSearch: () => void;
   workingChannelIds: Set<string>; // channels with a turn currently running (pulsing dot)
   onNewChannel: () => void;
+  onBrowseChannels: () => void;
   onAddAgent: () => void;
   onCollapse: () => void;
   onOpenProfile: (id: string) => void;
@@ -272,6 +274,9 @@ export function Sidebar({
               actionLabel="New channel"
               onAction={onNewChannel}
               actionTestId="new-channel-toggle"
+              browseLabel="Browse channels"
+              onBrowse={onBrowseChannels}
+              browseTestId="browse-channels-toggle"
             />
             {rooms.map((c) => {
               const unread = (c.unread_count ?? 0) > 0;

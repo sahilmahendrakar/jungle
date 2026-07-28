@@ -72,6 +72,7 @@ import { MessageList } from "./components/chat/MessageList";
 import { Sidebar } from "./components/chat/Sidebar";
 import { ThreadPanel } from "./components/chat/ThreadPanel";
 import { NewChannelDialog } from "./components/chat/NewChannelDialog";
+import { BrowseChannelsDialog } from "./components/chat/BrowseChannelsDialog";
 import { MembersDialog } from "./components/chat/MembersDialog";
 import { SlackLinkDialog } from "./components/chat/SlackLinkDialog";
 import { DeleteChannelDialog } from "./components/chat/DeleteChannelDialog";
@@ -110,6 +111,8 @@ export function App({
   const [notice, setNotice] = useState("");
   // New-channel dialog (the form lives inside NewChannelDialog)
   const [showNew, setShowNew] = useState(false);
+  // Browse-channels dialog (join a channel you're not a member of yet)
+  const [showBrowse, setShowBrowse] = useState(false);
   // Add-agent form
   const [showAddAgent, setShowAddAgent] = useState(false);
   // Invite-people dialog (admins only, Firebase mode)
@@ -1077,6 +1080,7 @@ export function App({
         }}
         workingChannelIds={workingChannelIds}
         onNewChannel={() => setShowNew(true)}
+        onBrowseChannels={() => setShowBrowse(true)}
         onAddAgent={() => setShowAddAgent(true)}
         onCollapse={() => {
           setSidebarOpen(false); // desktop: collapse
@@ -1471,6 +1475,14 @@ export function App({
         others={others}
         me={me}
         onCreated={(id) => reloadChannels(id)}
+        onNotice={setNotice}
+      />
+
+      {/* ---------- Browse channels dialog ---------- */}
+      <BrowseChannelsDialog
+        open={showBrowse}
+        onOpenChange={setShowBrowse}
+        onJoined={(id) => reloadChannels(id)}
         onNotice={setNotice}
       />
 

@@ -1,4 +1,4 @@
-import type { ChannelListItem } from "@jungle/shared";
+import type { BrowsableChannel, ChannelListItem } from "@jungle/shared";
 import { pool } from "./pool";
 import { withTransaction } from "./tx";
 import type { Participant } from "./participants";
@@ -118,6 +118,29 @@ export async function listChannels(participantId?: string): Promise<ChannelListI
               where acm.channel_id = c.id
             ), '{}') as member_agent_ids
      from channels c order by c.created_at`,
+  );
+  return rows;
+}
+
+// Channels in `workspaceId` the participant hasn't joined — for "Browse channels". Channels have
+// no public/private flag (see schema.sql), so every channel in the workspace is browsable; DMs are
+// excluded (they're 1:1 by construction, not something you join).
+export async function listUnjoinedChannels(
+  workspaceId: string,
+  participantId: string,
+): Promise<BrowsableChannel[]> {
+  const { rows } = await pool.query(
+    `select c.id, c.name, count(cm.participant_id)::int as member_count
+     from channels c
+     join channel_members cm on cm.channel_id = c.id
+     where c.workspace_id = $1
+       and c.kind = 'channel'
+       and not exists (
+         select 1 from channel_members m where m.channel_id = c.id and m.participant_id = $2
+       )
+     group by c.id, c.name
+     order by c.name`,
+    [workspaceId, participantId],
   );
   return rows;
 }
