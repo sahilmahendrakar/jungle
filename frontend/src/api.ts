@@ -31,6 +31,7 @@ import type {
   WorkflowRun,
   WorkflowTrigger,
   WorkflowTemplate,
+  BrowsableChannel,
 } from "@jungle/shared";
 export {
   INTEGRATION_TYPES,
@@ -50,6 +51,7 @@ export type { AgentServiceInfo };
 export type { Schedule, Deliverable, DeliverableKind, SearchResult, ActivityItem, ActivityMessage, ActivityFilters };
 export type { Workflow, WorkflowRole, WorkflowRun, WorkflowTrigger, WorkflowTemplate };
 export type { Me, GoogleProfile, Workspace, Membership, InviteInfo };
+export type { BrowsableChannel };
 // A message as delivered to the client (attachments carry signed download urls).
 export type Message = WireMessage;
 
@@ -579,6 +581,26 @@ export function createChannel(c: {
     auth: true,
     devAuth: true,
     errorMessage: "failed to create channel",
+  });
+}
+
+// Channels in my workspace I haven't joined yet, for "Browse channels". Channels have no
+// public/private flag — every channel is browsable and self-serve joinable.
+export function browseChannels(): Promise<BrowsableChannel[]> {
+  return request<BrowsableChannel[]>(`/api/channels/browse`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load channels",
+  });
+}
+
+// Self-serve join: unlike addChannelMember, I don't need to already be a member.
+export function joinChannel(channelId: string): Promise<Channel> {
+  return request<Channel>(`/api/channels/${channelId}/join`, {
+    method: "POST",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to join channel",
   });
 }
 

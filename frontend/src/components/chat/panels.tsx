@@ -7,6 +7,7 @@ import {
   Check,
   ChevronDown,
   Cloud,
+  Compass,
   FileText,
   FoldVertical,
   MonitorSmartphone,
@@ -1224,31 +1225,54 @@ export function SectionHeader({
   actionLabel,
   onAction,
   actionTestId,
+  browseLabel,
+  onBrowse,
+  browseTestId,
 }: {
   label: string;
   actionLabel?: string;
   onAction?: () => void;
   actionTestId?: string;
+  // Second, distinct action (e.g. "Browse channels") — rendered left of the primary + action.
+  browseLabel?: string;
+  onBrowse?: () => void;
+  browseTestId?: string;
 }) {
   return (
     <div className="flex items-center justify-between px-2 pb-1 pt-1">
       <span className="text-xs font-semibold uppercase tracking-wide text-sidebar-foreground/50">
         {label}
       </span>
-      {onAction && (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              data-testid={actionTestId}
-              onClick={onAction}
-              className="flex size-5 items-center justify-center rounded text-sidebar-foreground/60 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
-            >
-              <Plus className="size-4" />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>{actionLabel}</TooltipContent>
-        </Tooltip>
-      )}
+      <div className="flex items-center gap-0.5">
+        {onBrowse && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                data-testid={browseTestId}
+                onClick={onBrowse}
+                className="flex size-5 items-center justify-center rounded text-sidebar-foreground/60 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
+              >
+                <Compass className="size-4" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>{browseLabel}</TooltipContent>
+          </Tooltip>
+        )}
+        {onAction && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                data-testid={actionTestId}
+                onClick={onAction}
+                className="flex size-5 items-center justify-center rounded text-sidebar-foreground/60 transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground"
+              >
+                <Plus className="size-4" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>{actionLabel}</TooltipContent>
+          </Tooltip>
+        )}
+      </div>
     </div>
   );
 }

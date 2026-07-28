@@ -210,6 +210,15 @@ export interface ChannelListItem {
   member_agent_ids: string[]; // agent members of this channel
 }
 
+// A channel row as returned by the browse list (GET /api/channels/browse) — channels in the
+// requester's workspace they haven't joined yet. Channels have no public/private flag; every
+// channel in a workspace is browsable and self-serve joinable.
+export interface BrowsableChannel {
+  id: string;
+  name: string;
+  member_count: number;
+}
+
 // A followed thread with unread replies, for the "Threads" view (GET /api/threads/unread).
 export interface UnreadThread {
   root_id: string;
