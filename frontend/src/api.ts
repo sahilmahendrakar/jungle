@@ -332,10 +332,15 @@ export type IntegrationStatuses = Record<string, IntegrationConnectionStatus>;
 // Begin connecting: returns the provider authorize URL for the SPA to navigate to. With
 // `popup: true` the callback returns a self-closing page instead of redirecting to /settings,
 // so the flow can run in window.open without losing SPA state (see lib/connections.tsx).
-export function integrationConnectUrl(key: string, opts?: { popup?: boolean }): Promise<{ url: string }> {
+// `connectionId` set = "Reconnect" on that one existing connection; omitted = a fresh "Connect" /
+// "add another account" (always creates a new connection on the backend).
+export function integrationConnectUrl(
+  key: string,
+  opts?: { popup?: boolean; connectionId?: string },
+): Promise<{ url: string }> {
   return request(`/api/integrations/${key}/connect-url`, {
     method: "POST",
-    json: { popup: opts?.popup === true },
+    json: { popup: opts?.popup === true, ...(opts?.connectionId ? { connectionId: opts.connectionId } : {}) },
     auth: true,
     devAuth: true,
     errorMessage: "failed to start connect",
@@ -352,6 +357,34 @@ export function getIntegrationStatuses(): Promise<IntegrationStatuses> {
 
 export function disconnectIntegration(key: string): Promise<{ ok: boolean }> {
   return request(`/api/integrations/${key}/connection`, {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to disconnect",
+  });
+}
+
+// One connection under an integration key, for the multi-account read model (a user can hold
+// several — e.g. two X accounts, two Notion workspaces).
+export interface IntegrationConnectionRecord {
+  id: string;
+  externalAccount: string | null;
+  needsReconnect: boolean;
+  updatedAt: string;
+}
+
+// Every connection-based integration's full connection list, keyed by integration key. Unlike
+// getIntegrationStatuses, this doesn't collapse multiple connections for the same key into one.
+export function getIntegrationConnections(): Promise<Record<string, IntegrationConnectionRecord[]>> {
+  return request(`/api/integrations/connections`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load integration connections",
+  });
+}
+
+export function disconnectIntegrationConnection(id: string): Promise<{ ok: boolean }> {
+  return request(`/api/integrations/connections/${id}`, {
     method: "DELETE",
     auth: true,
     devAuth: true,

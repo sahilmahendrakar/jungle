@@ -9,12 +9,15 @@ import {
   type ConnectionType,
   type GithubStatus,
   type GoogleStatus,
+  type IntegrationConnectionRecord,
   type IntegrationStatuses,
   disconnectGithub,
   disconnectGoogle,
   disconnectIntegration,
+  disconnectIntegrationConnection,
   getGithubStatus,
   getGoogleStatus,
+  getIntegrationConnections,
   getIntegrationStatuses,
   githubConnectUrl,
   googleConnectUrl,
@@ -226,6 +229,11 @@ export interface ConnectionState extends ConnectionType {
   needsReconnect?: boolean;
   // Extra GitHub detail (App installations / repo count) for the Settings expansion.
   github?: GithubStatus | null;
+  // The full list of connections under this key (integration kind only) — empty for github/google,
+  // which have exactly one identity. Integrations with IntegrationType.allowMultiple render every
+  // entry with its own Reconnect/Disconnect + an "add another account" action; everyone else keeps
+  // rendering the single connected/not-connected line above from `connected`/`account`.
+  accounts: IntegrationConnectionRecord[];
 }
 
 export interface ConnectionsApi {
@@ -240,16 +248,24 @@ export interface ConnectionsApi {
   // (statuses already refreshed); true = now connected.
   connect: (key: string) => Promise<boolean>;
   disconnect: (key: string) => Promise<void>;
+  // Multi-account integrations (allowMultiple): always creates a new connection, never touches an
+  // existing one — the "+ Add another account" action.
+  connectAdditional: (key: string) => Promise<boolean>;
+  // Revive one specific existing connection in place (its "Reconnect" button).
+  reconnectAccount: (key: string, connectionId: string) => Promise<boolean>;
+  // Drop one specific connection by id (its "Disconnect" button).
+  disconnectAccount: (connectionId: string) => Promise<void>;
 }
 
 function assemble(
   gh: GithubStatus | null,
   google: GoogleStatus | null,
   ints: IntegrationStatuses,
+  intConns: Record<string, IntegrationConnectionRecord[]>,
 ): ConnectionState[] {
   return CONNECTION_TYPES.map((c) => {
     if (c.kind === "github") {
-      return { ...c, connected: gh?.connected ?? false, account: gh?.login ? `@${gh.login}` : null, github: gh };
+      return { ...c, connected: gh?.connected ?? false, account: gh?.login ? `@${gh.login}` : null, github: gh, accounts: [] };
     }
     if (c.kind === "google") {
       return {
@@ -257,6 +273,7 @@ function assemble(
         connected: google?.connected ?? false,
         account: google?.email ?? null,
         needsReconnect: google?.needsReconnect ?? false,
+        accounts: [],
       };
     }
     const st = ints[c.key];
@@ -265,26 +282,30 @@ function assemble(
       connected: st?.connected ?? false,
       account: st?.externalAccount ?? null,
       needsReconnect: st?.needsReconnect ?? false,
+      accounts: intConns[c.key] ?? [],
     };
   });
 }
 
-async function fetchAll(): Promise<[GithubStatus | null, GoogleStatus | null, IntegrationStatuses]> {
+async function fetchAll(): Promise<
+  [GithubStatus | null, GoogleStatus | null, IntegrationStatuses, Record<string, IntegrationConnectionRecord[]>]
+> {
   // Each family fails independently (e.g. dev-bypass mode has no GitHub/Google auth routes) —
   // a failed fetch just renders as "not connected" rather than breaking the whole list.
   return Promise.all([
     getGithubStatus().catch(() => null),
     getGoogleStatus().catch(() => null),
     getIntegrationStatuses().catch(() => ({}) as IntegrationStatuses),
+    getIntegrationConnections().catch(() => ({}) as Record<string, IntegrationConnectionRecord[]>),
   ]);
 }
 
-function connectUrlFor(key: string, popup: boolean): Promise<{ url: string }> {
+function connectUrlFor(key: string, popup: boolean, connectionId?: string): Promise<{ url: string }> {
   const c = CONNECTION_TYPES.find((t) => t.key === key);
   if (!c) return Promise.reject(new Error(`unknown connection: ${key}`));
   if (c.kind === "github") return githubConnectUrl({ popup });
   if (c.kind === "google") return googleConnectUrl({ popup });
-  return integrationConnectUrl(key, { popup });
+  return integrationConnectUrl(key, { popup, connectionId });
 }
 
 function disconnectFor(key: string): Promise<unknown> {
@@ -300,12 +321,16 @@ function disconnectFor(key: string): Promise<unknown> {
 // COOP on some providers (Google) severs window.opener so it can't be relied on; (2) we poll
 // `isConnected` every few seconds as ground truth. If the popup closes without either, a short
 // grace poll catches "the page closed before its message arrived", then we give up quietly.
-async function runPopupFlow(key: string, isConnected: () => Promise<boolean>): Promise<boolean> {
-  const { url } = await connectUrlFor(key, true);
+async function runPopupFlow(
+  key: string,
+  isConnected: () => Promise<boolean>,
+  connectionId?: string,
+): Promise<boolean> {
+  const { url } = await connectUrlFor(key, true, connectionId);
   const popup = window.open(url, `jungle-connect-${key}`, "width=560,height=720");
   if (!popup) {
     // Popup blocked — fall back to the classic full-page redirect flow.
-    const { url: redirectUrl } = await connectUrlFor(key, false);
+    const { url: redirectUrl } = await connectUrlFor(key, false, connectionId);
     window.location.href = redirectUrl;
     return false;
   }
@@ -360,7 +385,7 @@ async function runPopupFlow(key: string, isConnected: () => Promise<boolean>): P
 // The one hook both Settings and the integrations editor use. Fetches all connection statuses,
 // and exposes popup-based connect + disconnect that keep the statuses fresh.
 export function useConnections(enabled = true): ConnectionsApi {
-  const [state, setState] = useState<ConnectionState[]>(() => assemble(null, null, {}));
+  const [state, setState] = useState<ConnectionState[]>(() => assemble(null, null, {}, {}));
   const [loading, setLoading] = useState(enabled);
   const [connecting, setConnecting] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -373,8 +398,8 @@ export function useConnections(enabled = true): ConnectionsApi {
   }, []);
 
   const refresh = useCallback(async () => {
-    const [gh, google, ints] = await fetchAll();
-    if (alive.current) setState(assemble(gh, google, ints));
+    const [gh, google, ints, intConns] = await fetchAll();
+    if (alive.current) setState(assemble(gh, google, ints, intConns));
   }, []);
 
   useEffect(() => {
@@ -382,8 +407,8 @@ export function useConnections(enabled = true): ConnectionsApi {
     let cancelled = false;
     setLoading(true);
     fetchAll()
-      .then(([gh, google, ints]) => {
-        if (!cancelled) setState(assemble(gh, google, ints));
+      .then(([gh, google, ints, intConns]) => {
+        if (!cancelled) setState(assemble(gh, google, ints, intConns));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -399,9 +424,9 @@ export function useConnections(enabled = true): ConnectionsApi {
       setConnecting(key);
       try {
         const ok = await runPopupFlow(key, async () => {
-          const [gh, google, ints] = await fetchAll();
-          if (alive.current) setState(assemble(gh, google, ints));
-          const c = assemble(gh, google, ints).find((x) => x.key === key);
+          const [gh, google, ints, intConns] = await fetchAll();
+          if (alive.current) setState(assemble(gh, google, ints, intConns));
+          const c = assemble(gh, google, ints, intConns).find((x) => x.key === key);
           return c?.connected ?? false;
         });
         await refresh();
@@ -429,7 +454,94 @@ export function useConnections(enabled = true): ConnectionsApi {
     [refresh],
   );
 
+  // "Add another account": always creates a new connection, so completion is "a connection id
+  // that wasn't there before showed up" (an already-connected key's plain `connected` flag can't
+  // tell us that — it was already true before this popup even opened).
+  const connectAdditional = useCallback(
+    async (key: string) => {
+      setError("");
+      setConnecting(key);
+      try {
+        const beforeConns = (await getIntegrationConnections().catch(
+          () => ({}) as Record<string, IntegrationConnectionRecord[]>,
+        ))[key];
+        const beforeIds = new Set((beforeConns ?? []).map((a) => a.id));
+        const ok = await runPopupFlow(key, async () => {
+          const [gh, google, ints, intConns] = await fetchAll();
+          if (alive.current) setState(assemble(gh, google, ints, intConns));
+          return (intConns[key] ?? []).some((a) => !beforeIds.has(a.id));
+        });
+        await refresh();
+        return ok;
+      } catch (e) {
+        if (alive.current) setError(String((e as Error).message ?? e));
+        return false;
+      } finally {
+        if (alive.current) setConnecting(null);
+      }
+    },
+    [refresh],
+  );
+
+  // Reconnect one specific existing connection: completion is that connection's updated_at
+  // changing (its needsReconnect flag may already have been false, e.g. a routine re-auth).
+  const reconnectAccount = useCallback(
+    async (key: string, connectionId: string) => {
+      setError("");
+      setConnecting(key);
+      try {
+        const beforeConns = (await getIntegrationConnections().catch(
+          () => ({}) as Record<string, IntegrationConnectionRecord[]>,
+        ))[key];
+        const beforeUpdatedAt = beforeConns?.find((a) => a.id === connectionId)?.updatedAt;
+        const ok = await runPopupFlow(
+          key,
+          async () => {
+            const [gh, google, ints, intConns] = await fetchAll();
+            if (alive.current) setState(assemble(gh, google, ints, intConns));
+            const acct = (intConns[key] ?? []).find((a) => a.id === connectionId);
+            return !!acct && acct.updatedAt !== beforeUpdatedAt;
+          },
+          connectionId,
+        );
+        await refresh();
+        return ok;
+      } catch (e) {
+        if (alive.current) setError(String((e as Error).message ?? e));
+        return false;
+      } finally {
+        if (alive.current) setConnecting(null);
+      }
+    },
+    [refresh],
+  );
+
+  const disconnectAccount = useCallback(
+    async (connectionId: string) => {
+      setError("");
+      try {
+        await disconnectIntegrationConnection(connectionId);
+      } catch (e) {
+        if (alive.current) setError(String((e as Error).message ?? e));
+      }
+      await refresh();
+    },
+    [refresh],
+  );
+
   const byKey: Record<string, ConnectionState> = {};
   for (const c of state) byKey[c.key] = c;
-  return { connections: state, byKey, loading, connecting, error, refresh, connect, disconnect };
+  return {
+    connections: state,
+    byKey,
+    loading,
+    connecting,
+    error,
+    refresh,
+    connect,
+    disconnect,
+    connectAdditional,
+    reconnectAccount,
+    disconnectAccount,
+  };
 }
