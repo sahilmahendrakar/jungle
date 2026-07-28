@@ -1,15 +1,24 @@
 // Pure helpers, constants, and view types shared across the chat UI (extracted from App.tsx).
-import { MODEL_CATALOG } from "@jungle/shared";
+import { DEFAULT_AGENT_MODE, DEFAULT_MODEL, MODEL_CATALOG } from "@jungle/shared";
 import type { AgentStatus, Attachment, Message } from "../api";
+
+// Shown on a model that's gated behind a paid plan (catalog `requiresUpgrade`).
+export const UPGRADE_REQUIRED_HINT = "Requires upgrading your plan";
 
 // Agent model choices for the create-agent dialog + settings panel, derived from the shared
 // catalog (single source of truth) so the picker never drifts from backend validation. Catalog
-// order defines UI order; the first entry is the default for new agents.
-export const MODEL_OPTIONS = MODEL_CATALOG.map(({ id, label, hint }) => ({
+// order defines UI order. Upgrade-gated models stay listed but render grayed out and
+// unselectable (with a tooltip) rather than being hidden, so the tier is discoverable.
+export const MODEL_OPTIONS = MODEL_CATALOG.map(({ id, label, hint, requiresUpgrade }) => ({
   id: id as string,
   label,
   hint,
+  disabled: !!requiresUpgrade,
+  disabledHint: requiresUpgrade ? UPGRADE_REQUIRED_HINT : undefined,
 }));
+
+// Model a new agent starts on (shared with the backend so the two can't drift).
+export const DEFAULT_MODEL_ID = DEFAULT_MODEL as string;
 // Label + hint for every backend permission mode (SDK runner). Keyed by mode id so an agent
 // already on a mode we no longer surface in the picker still renders correctly in its settings.
 export const SDK_MODE_LABELS: Record<string, { label: string; hint: string }> = {
@@ -31,8 +40,8 @@ export const SDK_MODE_OPTIONS = (["plan", "default", "bypassPermissions"] as con
   ...SDK_MODE_LABELS[id],
 }));
 
-// New agents default to "Ask on sensitive". Decoupled from picker order so it can be reordered.
-export const DEFAULT_SDK_MODE = "default";
+// New agents default to "Full autonomy". Decoupled from picker order so it can be reordered.
+export const DEFAULT_SDK_MODE: string = DEFAULT_AGENT_MODE;
 
 // Options for editing an EXISTING agent: the trimmed picker plus its current mode if that's no
 // longer offered (e.g. a legacy acceptEdits/dontAsk agent) — so we never misrepresent it or

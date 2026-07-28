@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import {
+  DEFAULT_AGENT_MODE,
   MAX_WORKFLOWS_PER_WORKSPACE,
   WORKFLOW_MAX_ROLES,
   WORKFLOW_NAME_MAX_LENGTH,
@@ -257,7 +258,7 @@ async function createSeatAgent(
         runtime: "sdk",
         runnerToken,
         model: null,
-        mode: "default",
+        mode: DEFAULT_AGENT_MODE,
         runnerProvider: "fly",
         persona: seat.persona || null,
         // Usage attribution: the human who built the workflow owns its seat agents. When the
@@ -766,7 +767,7 @@ export async function ensureArchitect(workspaceId: string): Promise<db.Participa
         runtime: "sdk",
         runnerToken,
         model: null,
-        mode: "default",
+        mode: DEFAULT_AGENT_MODE,
         runnerProvider: "fly",
         persona: ARCHITECT_PERSONA,
       },

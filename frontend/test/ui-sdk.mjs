@@ -26,8 +26,8 @@ try {
   await page.locator('[data-testid="agent-name"]').fill("UI Test Agent");
   check("create dialog has mode select", (await page.locator('[data-testid="agent-mode"]').count()) > 0);
   check("create dialog has model select", (await page.locator('[data-testid="agent-model"]').count()) > 0);
-  check("default mode is 'Ask on sensitive'",
-    /ask/i.test(await page.locator('[data-testid="agent-mode"]').innerText()));
+  check("default mode is 'Full autonomy'",
+    /full autonomy/i.test(await page.locator('[data-testid="agent-mode"]').innerText()));
   await shot(page, "create-dialog");
   await page.locator('[data-testid="add-agent-button"]').click();
   await page.waitForTimeout(2500);

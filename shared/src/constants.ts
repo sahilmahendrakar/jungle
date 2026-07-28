@@ -30,18 +30,26 @@ export interface ModelCatalogEntry {
   provider: ModelProvider;
   supportsEffort: boolean; // false => runner omits the Agent SDK `effort` option, UI disables it
   contextWindow: number; // runner fallback when the SDK doesn't report a context window
+  // Gated behind a paid upgrade: the picker shows it grayed out with an upgrade tooltip and
+  // won't let you select it. NOT a backend restriction — agents already on a gated model keep
+  // running, and the API still accepts it (so ungating is a one-flag change here).
+  requiresUpgrade?: boolean;
 }
 
 // Single source of truth for the model picker (backend validation + frontend UI derive from this).
-// Order defines the picker order; the first entry is the default for new agents.
+// Order defines the picker order: selectable models first (the first entry is DEFAULT_MODEL, the
+// default for new agents), upgrade-gated ones below.
 export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
-  { id: "claude-opus-4-8", label: "Opus 4.8", hint: "Most capable", provider: "anthropic", supportsEffort: true, contextWindow: 200_000 },
-  { id: "claude-sonnet-5", label: "Sonnet 5", hint: "Balanced", provider: "anthropic", supportsEffort: true, contextWindow: 200_000 },
-  { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5", hint: "Fastest", provider: "anthropic", supportsEffort: false, contextWindow: 200_000 },
-  { id: "glm-5.2", label: "GLM 5.2", hint: "Open source · fast & cheap", provider: "zai", supportsEffort: false, contextWindow: 200_000 },
   { id: "kimi-k3", label: "Kimi K3", hint: "Open source · 1M context", provider: "moonshot", supportsEffort: true, contextWindow: 1_048_576 },
   { id: "kimi-k2.7-code", label: "Kimi K2.7 Code", hint: "Open source · 256K context", provider: "moonshot", supportsEffort: true, contextWindow: 262_144 },
+  { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5", hint: "Fastest", provider: "anthropic", supportsEffort: false, contextWindow: 200_000 },
+  { id: "claude-opus-4-8", label: "Opus 4.8", hint: "Most capable", provider: "anthropic", supportsEffort: true, contextWindow: 200_000, requiresUpgrade: true },
+  { id: "claude-sonnet-5", label: "Sonnet 5", hint: "Balanced", provider: "anthropic", supportsEffort: true, contextWindow: 200_000, requiresUpgrade: true },
+  { id: "glm-5.2", label: "GLM 5.2", hint: "Open source · fast & cheap", provider: "zai", supportsEffort: false, contextWindow: 200_000, requiresUpgrade: true },
 ];
+
+// Default model for a new agent — the first freely-selectable catalog entry.
+export const DEFAULT_MODEL: AllowedModel = MODEL_CATALOG.find((m) => !m.requiresUpgrade)!.id;
 
 // Catalog lookup by model id. Accepts null/undefined (agent's model override may be unset) so
 // callers can pass `agent.model` directly.
@@ -57,6 +65,10 @@ export const SDK_MODES = [
   "bypassPermissions",
   "dontAsk",
 ] as const;
+
+// Permission mode a new agent starts on: full autonomy (never asks for tool confirmations).
+// Every agent-creation path defaults to this; the creator can still dial it down in the picker.
+export const DEFAULT_AGENT_MODE: PermissionMode = "bypassPermissions";
 
 export function isAllowedModel(model: string): model is AllowedModel {
   return (ALLOWED_MODELS as readonly string[]).includes(model);

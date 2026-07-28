@@ -58,10 +58,17 @@ export default function CreateAgent() {
   }
 
   function pickModel() {
-    const options = ["Cancel", "Default", ...MODEL_OPTIONS.map((m) => m.label)];
-    ActionSheetIOS.showActionSheetWithOptions({ options, cancelButtonIndex: 0 }, (i) => {
+    // Upgrade-gated models are listed but grayed out (offset 2: Cancel + Default precede them).
+    const options = [
+      "Cancel",
+      "Default",
+      ...MODEL_OPTIONS.map((m) => (m.disabled && m.disabledHint ? `${m.label} — ${m.disabledHint}` : m.label)),
+    ];
+    const disabledButtonIndices = MODEL_OPTIONS.map((m, i) => (m.disabled ? i + 2 : -1)).filter((i) => i > 0);
+    ActionSheetIOS.showActionSheetWithOptions({ options, cancelButtonIndex: 0, disabledButtonIndices }, (i) => {
       if (i === 0) return;
-      setModel(i === 1 ? undefined : MODEL_OPTIONS[i - 2].id);
+      if (i === 1) return setModel(undefined);
+      if (!MODEL_OPTIONS[i - 2].disabled) setModel(MODEL_OPTIONS[i - 2].id);
     });
   }
 

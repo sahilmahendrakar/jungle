@@ -20,6 +20,7 @@ import { StatusDot } from "../../../src/components/StatusDot";
 import {
   STATUS_LABEL,
   MODEL_OPTIONS,
+  DEFAULT_MODEL_ID,
   SDK_MODE_OPTIONS,
   EFFORT_OPTIONS,
   fmtTokens,
@@ -27,7 +28,7 @@ import {
 import { createDm, updateAgent, getAgentMemory, interruptAgent } from "../../../src/lib/api";
 import { radius } from "../../../src/theme";
 
-type Opt = { id: string; label: string; hint?: string };
+type Opt = { id: string; label: string; hint?: string; disabled?: boolean; disabledHint?: string };
 
 function PickerRow({
   label,
@@ -43,10 +44,21 @@ function PickerRow({
   const { colors } = useTheme();
   const current = options.find((o) => o.id === value);
   const open = () => {
+    // Upgrade-gated options stay visible but render grayed and unselectable (index +1 for Cancel).
+    const disabledButtonIndices = options
+      .map((o, i) => (o.disabled ? i + 1 : -1))
+      .filter((i) => i > 0);
     ActionSheetIOS.showActionSheetWithOptions(
-      { options: ["Cancel", ...options.map((o) => o.label)], cancelButtonIndex: 0 },
+      {
+        options: [
+          "Cancel",
+          ...options.map((o) => (o.disabled && o.disabledHint ? `${o.label} — ${o.disabledHint}` : o.label)),
+        ],
+        cancelButtonIndex: 0,
+        disabledButtonIndices,
+      },
       (i) => {
-        if (i > 0) onPick(options[i - 1].id);
+        if (i > 0 && !options[i - 1].disabled) onPick(options[i - 1].id);
       },
     );
   };
@@ -83,7 +95,7 @@ export default function AgentProfile() {
     if (!person) return;
     setDisplayName(person.display_name);
     setPersona(person.persona ?? "");
-    setModel(person.model ?? MODEL_OPTIONS[0]?.id ?? "");
+    setModel(person.model ?? DEFAULT_MODEL_ID);
     setMode(person.mode || "default");
     setEffort(person.effort || "medium");
   }, [person?.id]);
@@ -93,7 +105,7 @@ export default function AgentProfile() {
     !!person &&
     (displayName !== person.display_name ||
       persona !== (person.persona ?? "") ||
-      model !== (person.model ?? MODEL_OPTIONS[0]?.id ?? "") ||
+      model !== (person.model ?? DEFAULT_MODEL_ID) ||
       mode !== (person.mode || "default") ||
       effort !== (person.effort || "medium"));
 

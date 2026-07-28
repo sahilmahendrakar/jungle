@@ -1,18 +1,28 @@
 // Pure helpers + constants ported from frontend/src/lib/chat.ts. Framework-agnostic (no React),
 // so this is a near-verbatim copy shared by the message list, composer, chips, and settings.
-import { MODEL_CATALOG } from "@jungle/shared";
+import { DEFAULT_AGENT_MODE, DEFAULT_MODEL, MODEL_CATALOG } from "@jungle/shared";
 import type { AgentStatus } from "@jungle/shared";
 import type { Attachment, Message } from "./api";
 
+// Shown on a model gated behind a paid plan (catalog `requiresUpgrade`). No tooltips on native,
+// so the label carries it and the action-sheet row is disabled.
+export const UPGRADE_REQUIRED_HINT = "Requires upgrading your plan";
+
 // Agent model choices (create/settings), derived from the shared catalog so the picker never
-// drifts from backend validation. First entry is the default for new agents.
-export const MODEL_OPTIONS = MODEL_CATALOG.map(({ id, label, hint }) => ({
+// drifts from backend validation. Gated models stay listed but unselectable.
+export const MODEL_OPTIONS = MODEL_CATALOG.map(({ id, label, hint, requiresUpgrade }) => ({
   id: id as string,
   label,
   hint,
+  disabled: !!requiresUpgrade,
+  disabledHint: requiresUpgrade ? UPGRADE_REQUIRED_HINT : undefined,
 }));
 
-// Agent permission modes (SDK runner). `default` first (create-agent default).
+// Model + permission mode a new agent starts on (shared with backend/web).
+export const DEFAULT_MODEL_ID = DEFAULT_MODEL as string;
+export const DEFAULT_SDK_MODE: string = DEFAULT_AGENT_MODE;
+
+// Agent permission modes (SDK runner). New agents default to DEFAULT_SDK_MODE (full autonomy).
 export const SDK_MODE_OPTIONS = [
   {
     id: "default",

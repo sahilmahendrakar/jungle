@@ -36,8 +36,9 @@ try {
   await page.locator('[data-testid="agent-handle"]').fill(handle);
   await page.locator('[data-testid="agent-name"]').fill("Badge Bot");
   // Non-default model + permissions so prefill proves it restored OUR choices, not the globals.
+  // (Must be a selectable model — upgrade-gated ones can't be picked.)
   await page.locator('[data-testid="agent-model"]').click();
-  await page.locator('[data-testid="agent-model-option"]', { hasText: "Sonnet 5" }).click();
+  await page.locator('[data-testid="agent-model-option"]', { hasText: "Haiku 4.5" }).click();
   await page.locator('[data-testid="agent-mode"]').click();
   await page.locator('[data-testid="agent-mode-option"]', { hasText: "Plan only" }).click();
   await page.locator('[data-testid="add-agent-button"]').click();
@@ -49,7 +50,7 @@ try {
   await page.locator('[data-testid="add-agent-toggle"]').first().click();
   await page.waitForTimeout(700);
   check("dialog: permissions prefilled from last create", (await page.locator('[data-testid="agent-mode"]').textContent())?.includes("Plan only"));
-  check("dialog: model prefilled from last create", (await page.locator('[data-testid="agent-model"]').textContent())?.includes("Sonnet 5"));
+  check("dialog: model prefilled from last create", (await page.locator('[data-testid="agent-model"]').textContent())?.includes("Haiku 4.5"));
   await page.keyboard.press("Escape");
   await page.waitForTimeout(400);
 
