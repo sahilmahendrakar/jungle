@@ -72,6 +72,24 @@ Semantics match the app: `#channel` sends require membership, `@handle` sends op
 @mentions trigger agents (fresh cascade budget — a token-authed post is externally initiated,
 like a human typing), workflow finalize creates real agents/channels/triggers.
 
+### Attaching connection-based integrations as an agent
+
+Gmail, Notion, Linear, Granola, Drive, Calendar and X are built on a **per-person** OAuth grant
+(Settings → Connections, `integration_connections`). Attaching one binds the agent to one person's
+connection — `config.backingParticipantId`.
+
+An agent has no Settings page and can never hold a connection itself, so when the actor is an
+agent, `attach_integration` / `create_agent` bind to the person it's acting for
+(`backend/src/integrations/backing.ts`), resolved in this order:
+
+1. **`onBehalfOf`** — `"@handle"` of a person in the workspace who has connected it.
+2. The **acting agent's own binding** for that same integration, if it has one.
+3. The **only person in the workspace** who has connected it.
+
+Zero candidates → "nobody in this workspace has connected X yet" (a person must connect it first).
+Several → the error lists them and asks for `onBehalfOf`. Humans always bind their own connection;
+passing `onBehalfOf` for someone else is a 403.
+
 ## Layering
 
 Route handlers and MCP tools share one service layer, both taking an explicit actor participant:
@@ -92,4 +110,13 @@ channels/messaging/agents/schedules/workflow drafts → agent-bound token attrib
 set -a; . .env; set +a
 node backend/test/mcp-api.mjs            # backend on :3001
 BASE=http://localhost:3101 node backend/test/mcp-api.mjs
+```
+
+`backend/test/agent-attach-integration.mjs` covers the connection-backing rules above (agent
+attaches with zero / one / several connected people, `onBehalfOf`, the human path, and the
+all-or-nothing `create_agent` rollback) in a throwaway workspace:
+
+```bash
+set -a; . .env; set +a
+node backend/test/agent-attach-integration.mjs
 ```

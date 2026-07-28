@@ -1,9 +1,9 @@
 import type { ConfigureFrame } from "@jungle/shared";
 import * as db from "../db";
 import * as google from "../google";
-import { ApiError } from "../http/errors";
 import { isInvalidGrantError } from "./oauth";
 import type { IntegrationAdapter } from "./types";
+import { resolveBacking } from "./backing";
 
 // Google Drive integration: the agent can search, read, and (with approval) create/update files in
 // a connected Drive via the runner's in-process drive_* MCP tools — structurally like Gmail. The
@@ -82,8 +82,9 @@ function disconnectedBlock(email: string): string {
 export const googleDriveAdapter: IntegrationAdapter = {
   key: KEY,
 
-  // Bind to the attaching user's Drive connection (like gmail) — 400 if not connected; a
-  // reconfigure keeps the original backing user. Stores the display email for the agent card.
+  // Bind to the attaching user's Drive connection (like gmail) — 400 if not connected, or to the
+  // person an attaching agent is acting for (backing.ts); a reconfigure keeps the original backing
+  // user. Stores the display email for the agent card.
   async resolveConfig(ctx, rawConfig): Promise<Record<string, unknown>> {
     const requireApproval = rawConfig.requireApproval !== false && rawConfig.requireApproval !== "false";
     const existingBacking =
@@ -91,9 +92,12 @@ export const googleDriveAdapter: IntegrationAdapter = {
     if (existingBacking) {
       return { backingParticipantId: existingBacking, email: ctx.existing?.email ?? null, requireApproval };
     }
-    const conn = await db.getIntegrationConnection(ctx.me.id, KEY);
-    if (!conn) throw new ApiError(400, "connect your Google Drive account in Settings first");
-    return { backingParticipantId: ctx.me.id, email: conn.external_account, requireApproval };
+    const { participantId, connection } = await resolveBacking(ctx, {
+      key: KEY,
+      displayName: "Google Drive",
+      lookup: (id) => db.getIntegrationConnection(id, KEY),
+    });
+    return { backingParticipantId: participantId, email: connection.external_account, requireApproval };
   },
 
   async buildGrant(frame: ConfigureFrame, agent, config): Promise<string | null> {

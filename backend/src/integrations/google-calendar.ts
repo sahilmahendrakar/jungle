@@ -1,9 +1,9 @@
 import type { ConfigureFrame } from "@jungle/shared";
 import * as db from "../db";
 import * as google from "../google";
-import { ApiError } from "../http/errors";
 import { isInvalidGrantError } from "./oauth";
 import type { IntegrationAdapter } from "./types";
+import { resolveBacking } from "./backing";
 
 // Google Calendar integration: the agent can list/read events and (with approval) create/update
 // them on a connected Google Calendar via the runner's in-process calendar_* MCP tools —
@@ -82,8 +82,9 @@ function disconnectedBlock(email: string): string {
 export const googleCalendarAdapter: IntegrationAdapter = {
   key: KEY,
 
-  // Bind to the attaching user's Calendar connection (like Drive) — 400 if not connected; a
-  // reconfigure keeps the original backing user. Stores the display email for the agent card.
+  // Bind to the attaching user's Calendar connection (like Drive) — 400 if not connected, or to
+  // the person an attaching agent is acting for (backing.ts); a reconfigure keeps the original
+  // backing user. Stores the display email for the agent card.
   async resolveConfig(ctx, rawConfig): Promise<Record<string, unknown>> {
     const requireApproval = rawConfig.requireApproval !== false && rawConfig.requireApproval !== "false";
     const existingBacking =
@@ -91,9 +92,12 @@ export const googleCalendarAdapter: IntegrationAdapter = {
     if (existingBacking) {
       return { backingParticipantId: existingBacking, email: ctx.existing?.email ?? null, requireApproval };
     }
-    const conn = await db.getIntegrationConnection(ctx.me.id, KEY);
-    if (!conn) throw new ApiError(400, "connect your Google Calendar account in Settings first");
-    return { backingParticipantId: ctx.me.id, email: conn.external_account, requireApproval };
+    const { participantId, connection } = await resolveBacking(ctx, {
+      key: KEY,
+      displayName: "Google Calendar",
+      lookup: (id) => db.getIntegrationConnection(id, KEY),
+    });
+    return { backingParticipantId: participantId, email: connection.external_account, requireApproval };
   },
 
   async buildGrant(frame: ConfigureFrame, agent, config): Promise<string | null> {

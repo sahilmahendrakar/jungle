@@ -1,8 +1,8 @@
 import type { ConfigureFrame, GmailIntegrationConfig } from "@jungle/shared";
 import * as db from "../db";
 import * as google from "../google";
-import { ApiError } from "../http/errors";
 import type { IntegrationAdapter } from "./types";
+import { resolveBacking } from "./backing";
 
 // Gmail integration: the agent can read/search/send/label a connected ("creator") mailbox via the
 // runner's in-process gmail_* MCP tools. Connection-based — the config stores no secrets, only
@@ -57,7 +57,8 @@ export const gmailAdapter: IntegrationAdapter = {
 
   // A fresh attach binds to the requester's connected Google account (the "creator mailbox") —
   // 400 if they haven't connected Google yet; a reconfigure (e.g. toggling approval) keeps the
-  // original mailbox binding rather than silently rebinding to whoever edited it.
+  // original mailbox binding rather than silently rebinding to whoever edited it. An attach made
+  // by an agent binds to the person it's acting for (see backing.ts).
   async resolveConfig(ctx, rawConfig): Promise<Record<string, unknown>> {
     const requireSendApproval =
       rawConfig.requireSendApproval !== false && rawConfig.requireSendApproval !== "false"; // default on
@@ -65,9 +66,12 @@ export const gmailAdapter: IntegrationAdapter = {
     if (existing) {
       return { backingParticipantId: existing.backingParticipantId, email: existing.email, requireSendApproval };
     }
-    const id = await db.getGoogleIdentity(ctx.me.id);
-    if (!id) throw new ApiError(400, "connect your Google account in Settings first");
-    return { backingParticipantId: ctx.me.id, email: id.email, requireSendApproval };
+    const { participantId, connection } = await resolveBacking(ctx, {
+      key: "gmail",
+      displayName: "Google",
+      lookup: (id) => db.getGoogleIdentity(id),
+    });
+    return { backingParticipantId: participantId, email: connection.email, requireSendApproval };
   },
 
   // Mint the Gmail token up front so the prompt only advertises Gmail when it's actually usable

@@ -8,6 +8,7 @@ import type {
   ConnectionStartCtx,
   IntegrationAdapter,
 } from "./types";
+import { resolveBacking } from "./backing";
 
 // X (Twitter) integration: the agent can read activity on a connected X account — recent tweets,
 // mentions, replies, notifications — via the runner's in-process x_* MCP tools. Connection-based
@@ -136,17 +137,21 @@ function promptBlock(account: string): string {
 export const xAdapter: IntegrationAdapter = {
   key: KEY,
 
-  // Bind to the attaching user's X connection (like Google Drive) — 400 if not connected; a
-  // reconfigure keeps the original backing user. Stores the @handle for the agent card.
+  // Bind to the attaching user's X connection (like Google Drive) — 400 if not connected, or to
+  // the person an attaching agent is acting for (backing.ts); a reconfigure keeps the original
+  // backing user. Stores the @handle for the agent card.
   async resolveConfig(ctx, rawConfig): Promise<Record<string, unknown>> {
     const existingBacking =
       typeof ctx.existing?.backingParticipantId === "string" ? ctx.existing.backingParticipantId : null;
     if (existingBacking) {
       return { backingParticipantId: existingBacking, account: ctx.existing?.account ?? null };
     }
-    const conn = await db.getIntegrationConnection(ctx.me.id, KEY);
-    if (!conn) throw new ApiError(400, "connect your X account in Settings first");
-    return { backingParticipantId: ctx.me.id, account: conn.external_account };
+    const { participantId, connection } = await resolveBacking(ctx, {
+      key: KEY,
+      displayName: "X",
+      lookup: (id) => db.getIntegrationConnection(id, KEY),
+    });
+    return { backingParticipantId: participantId, account: connection.external_account };
   },
 
   // Mint the X token up front so the prompt only advertises x_* tools when the connection is

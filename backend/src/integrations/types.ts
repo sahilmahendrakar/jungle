@@ -17,11 +17,17 @@ import type * as db from "../db";
 //                     integrations (added in Phase 2; see connection.ts).
 
 export interface ResolveConfigCtx {
-  // The human attaching/reconfiguring the integration (their workspace-scoped participant).
+  // Whoever is attaching/reconfiguring the integration (their workspace-scoped participant) —
+  // usually the human doing it in Settings, but an AGENT when the attach comes through the agent
+  // API (mcp/tools.ts, or REST with an agent-bound token).
   me: db.Participant;
   agentId: string;
   // The integration's previously-persisted config, if this is a reconfigure (else null).
   existing: Record<string, unknown> | null;
+  // The person whose connected account should back a connection-based integration, when the
+  // caller named one. Only meaningful for an agent actor (it has no connections of its own) —
+  // see integrations/backing.ts for the full resolution order.
+  onBehalfOf?: db.Participant | null;
 }
 
 // --- OAuth connection lifecycle (connection-based integrations: linear, notion, granola, drive) ---

@@ -49,6 +49,21 @@ async function resolveAgent(actor: db.Participant, ref: string): Promise<db.Part
   return p;
 }
 
+// The optional `onBehalfOf` argument on the integration tools: the PERSON whose connected account
+// should back a connection-based integration. An agent holds no connections of its own, so when an
+// agent attaches gmail/notion/… it acts for a human (integrations/backing.ts picks one when this
+// is omitted and the choice is unambiguous).
+async function resolveOnBehalfOf(actor: db.Participant, ref: unknown): Promise<db.Participant | null> {
+  if (ref === undefined || ref === null || String(ref).trim() === "") return null;
+  const p = await resolveParticipant(actor, String(ref));
+  if (p.kind === "agent") throw new ApiError(400, `onBehalfOf must be a person, and @${p.handle} is an agent`);
+  return p;
+}
+
+const ON_BEHALF_OF_DESC =
+  '"@handle" of the person whose connected account backs connection-based integrations ' +
+  "(gmail, notion, …). Optional: needed only when several people have connected one.";
+
 // "#name" or a channel id -> the channel id. Member-scoped for names (same rule as send_message);
 // ids are checked for workspace + membership by the directory functions downstream.
 async function resolveChannelId(actor: db.Participant, ref: string): Promise<string> {
@@ -228,6 +243,7 @@ export const JUNGLE_TOOLS: JungleTool[] = [
           items: obj({ key: str("integration key"), config: { type: "object" } }, ["key"]),
           description: "Integrations to attach at creation (optional)",
         },
+        onBehalfOf: str(ON_BEHALF_OF_DESC),
       },
       ["handle", "displayName"],
     ),
@@ -238,6 +254,7 @@ export const JUNGLE_TOOLS: JungleTool[] = [
         persona: args.persona,
         model: args.model ? String(args.model) : null,
         integrations: args.integrations,
+        onBehalfOf: await resolveOnBehalfOf(actor, args.onBehalfOf),
       });
       return `Created agent @${agent.handle} (id ${agent.id}). It is provisioning and will come online shortly.`;
     },
@@ -301,20 +318,23 @@ export const JUNGLE_TOOLS: JungleTool[] = [
     name: "attach_integration",
     description:
       'Attach (or reconfigure) an integration on an agent, e.g. key "github" with config ' +
-      '{"repo":"owner/name"}. Connection-based integrations (gmail, linear, …) bind to YOUR ' +
-      "connected account — connect it in Settings first.",
+      '{"repo":"owner/name"}. Connection-based integrations (gmail, notion, linear, …) bind to a ' +
+      "PERSON'S connected account: yours if you're a human, otherwise the workspace member who " +
+      "connected it (name them with onBehalfOf if more than one has).",
     inputSchema: obj(
       {
         agent: str('"@handle" or agent id'),
         key: str('Integration key, e.g. "github" or "gmail"'),
         config: { type: "object", description: "Integration config (per its settings fields)" },
+        onBehalfOf: str(ON_BEHALF_OF_DESC),
       },
       ["agent", "key"],
     ),
     handler: async (actor, args) => {
       const agent = await resolveAgent(actor, String(args.agent ?? ""));
       const config = args.config && typeof args.config === "object" ? (args.config as Record<string, unknown>) : {};
-      await agentAdmin.attachIntegrationAs(actor, agent.id, String(args.key ?? ""), config);
+      const onBehalfOf = await resolveOnBehalfOf(actor, args.onBehalfOf);
+      await agentAdmin.attachIntegrationAs(actor, agent.id, String(args.key ?? ""), config, onBehalfOf);
       return `Attached ${args.key} to @${agent.handle}.`;
     },
   },

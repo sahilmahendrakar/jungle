@@ -1,7 +1,7 @@
 import type { ConfigureFrame } from "@jungle/shared";
 import * as db from "../db";
-import { ApiError } from "../http/errors";
 import type { IntegrationAdapter } from "./types";
+import { resolveBacking } from "./backing";
 import { mcpConnection, getValidMcpToken, type McpProviderSpec } from "./mcp-oauth";
 
 // Factory: build a full IntegrationAdapter for a remote MCP provider (Linear/Notion/Granola) from
@@ -68,18 +68,23 @@ export function createMcpRemoteAdapter(spec: McpAdapterSpec): IntegrationAdapter
   return {
     key: spec.key,
 
-    // Attach/reconfigure: binds the agent to the attaching user's connection (backingParticipantId),
-    // like gmail — 400 if they haven't connected in Settings. A reconfigure keeps the original
-    // backing user. The only other config is the approval toggle (moot for read-only integrations).
+    // Attach/reconfigure: binds the agent to a connected user (backingParticipantId), like gmail —
+    // the attaching human, or the person an attaching AGENT is acting for (backing.ts). A
+    // reconfigure keeps the original backing user. The only other config is the approval toggle
+    // (moot for read-only integrations).
     async resolveConfig(ctx, rawConfig): Promise<Record<string, unknown>> {
       const requireApproval =
         !spec.readOnly && rawConfig.requireApproval !== false && rawConfig.requireApproval !== "false";
       const existingBacking =
         typeof ctx.existing?.backingParticipantId === "string" ? ctx.existing.backingParticipantId : null;
-      const backingParticipantId = existingBacking ?? ctx.me.id;
-      if (!existingBacking) {
-        const conn = await db.getIntegrationConnection(ctx.me.id, spec.key);
-        if (!conn) throw new ApiError(400, `connect your ${spec.displayName} account in Settings first`);
+      let backingParticipantId = existingBacking;
+      if (!backingParticipantId) {
+        const backing = await resolveBacking(ctx, {
+          key: spec.key,
+          displayName: spec.displayName,
+          lookup: (id) => db.getIntegrationConnection(id, spec.key),
+        });
+        backingParticipantId = backing.participantId;
       }
       return spec.readOnly ? { backingParticipantId } : { backingParticipantId, requireApproval };
     },
