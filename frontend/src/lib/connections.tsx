@@ -43,11 +43,6 @@ const BRAND_PATHS: Record<string, string> = {
   // official mark in simple-icons). Ring page + binder tabs + two event lines.
   "google-calendar":
     "M5 4.5h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-14a1 1 0 0 1 1-1zM6 6.5v12h12v-12H6zM7.5 1.5h1.5v4h-1.5zM15 1.5h1.5v4h-1.5zM8 10h8a.75.75 0 0 1 0 1.5H8a.75.75 0 0 1 0-1.5zM8 14h5a.75.75 0 0 1 0 1.5H8a.75.75 0 0 1 0-1.5z",
-  // Jungle itself (the workspace-management integration): a leaf, hand-authored in the same
-  // style as the calendar/granola glyphs. Without an entry here it would fall through to
-  // granola's notes glyph.
-  "jungle-admin":
-    "M20.25 3.06c-4.6-.3-8.42.35-11.4 1.95C5.6 6.75 3.78 9.4 3.53 12.7c-.13 1.72.2 3.38.96 4.85l-1.7 2.72a.9.9 0 1 0 1.52.95l1.66-2.65a8.2 8.2 0 0 0 4.3 1.2c3.5-.03 6.35-1.72 8.24-4.72 1.86-2.95 2.75-6.94 2.7-11.1a.9.9 0 0 0-.96-.89zm-1.87 1.86c-.1 3.4-.9 6.6-2.4 8.98-1.57 2.5-3.8 3.8-6.62 3.83a6.4 6.4 0 0 1-2.98-.72l4.53-7.25a.9.9 0 1 0-1.53-.95l-4.5 7.2a7.2 7.2 0 0 1-.28-3.4c.22-2.75 1.66-4.82 4.4-6.3 2.5-1.35 5.7-1.97 9.38-1.4z",
   // Granola: simple meeting-notes glyph (no official mark in simple-icons).
   granola:
     "M5 2.5h14a1 1 0 0 1 1 1v17a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-17a1 1 0 0 1 1-1zm2.5 4.75a.75.75 0 0 0 0 1.5h9a.75.75 0 0 0 0-1.5zm0 4a.75.75 0 0 0 0 1.5h9a.75.75 0 0 0 0-1.5zm0 4a.75.75 0 0 0 0 1.5h5.5a.75.75 0 0 0 0-1.5z",
@@ -69,7 +64,6 @@ const BRAND_COLORS: Record<string, string> = {
   "google-drive": "#34A853",
   "google-calendar": "#4285F4",
   granola: "#D97706",
-  "jungle-admin": "#2E9E7B", // Jungle's own green
   x: "", // black/white mark — uses text-foreground
 };
 
@@ -140,9 +134,22 @@ const RICH_BRAND_GLYPHS: Record<string, RichGlyph> = {
   },
 };
 
-// The raw brand glyph (an SVG path on a 24×24 viewBox, or the official multi-color mark when
-// one exists in RICH_BRAND_GLYPHS).
+// Marks that ship as a raster asset rather than an inline path. Jungle's own logo is the app
+// icon (the same /icon-192.png the sign-in, workspace switcher and landing page render), so the
+// jungle-admin integration shows the real product mark instead of a hand-drawn stand-in.
+const BRAND_IMAGES: Record<string, string> = {
+  "jungle-admin": "/icon-192.png",
+};
+
+// The raw brand glyph (an SVG path on a 24×24 viewBox, the official multi-color mark when one
+// exists in RICH_BRAND_GLYPHS, or a raster mark from BRAND_IMAGES).
 export function BrandGlyph({ brand, className }: { brand: string; className?: string }) {
+  const image = BRAND_IMAGES[brand];
+  // The asset carries its own rounded background, so it fills the tile (like granola's rich
+  // glyph) rather than sitting as a small glyph inside it.
+  if (image) {
+    return <img src={image} alt="" aria-hidden className={cn("shrink-0 rounded-[4px] object-contain", className)} />;
+  }
   const rich = RICH_BRAND_GLYPHS[brand];
   if (rich) {
     const paths = rich.paths.map((p, i) =>
