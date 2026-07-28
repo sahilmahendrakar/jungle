@@ -32,6 +32,7 @@
     "expo-secure-store": "~56.0.4",
     "expo-status-bar": "~56.0.4",
     "expo-system-ui": "~56.0.5",
+    "expo-updates": "~56.0.22",
     "expo-web-browser": "~56.0.5",
     "firebase": "^12.16.0",
     "lowlight": "3.3.0",

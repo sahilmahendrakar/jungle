@@ -7,24 +7,33 @@
     "development": {
       "developmentClient": true,
       "distribution": "internal",
-      "ios": { "resourceClass": "m-medium" },
+      "ios": {
+        "resourceClass": "m-medium"
+      },
       "env": {
         "EXPO_PUBLIC_API_URL": "https://preprod-api.52.87.26.31.sslip.io"
-      }
+      },
+      "channel": "development"
     },
     "preview": {
       "distribution": "internal",
-      "ios": { "resourceClass": "m-medium" },
+      "ios": {
+        "resourceClass": "m-medium"
+      },
       "env": {
         "EXPO_PUBLIC_API_URL": "https://api.jungleagents.com"
-      }
+      },
+      "channel": "preview"
     },
     "production": {
       "autoIncrement": true,
-      "ios": { "resourceClass": "m-medium" },
+      "ios": {
+        "resourceClass": "m-medium"
+      },
       "env": {
         "EXPO_PUBLIC_API_URL": "https://api.jungleagents.com"
-      }
+      },
+      "channel": "production"
     }
   },
   "submit": {
