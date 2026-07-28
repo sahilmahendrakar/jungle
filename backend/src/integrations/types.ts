@@ -98,4 +98,8 @@ export interface IntegrationAdapter {
   // OAuth connect/callback lifecycle for connection-based integrations. Omitted for integrations
   // configured with plain fields (github) or backed by a per-participant identity (gmail).
   connection?: IntegrationConnection;
+
+  // Called when the integration is detached from an agent (services/agentAdmin.ts), so an adapter
+  // can revoke anything it minted for that agent — e.g. jungle deletes the agent's API token.
+  onDetach?(agent: db.Participant): Promise<void>;
 }

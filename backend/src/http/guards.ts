@@ -33,6 +33,12 @@ export function accountUid(p: db.Participant): string {
 // clients that predate the header keep working while there's effectively one workspace per user.
 // Phase 4 makes the header mandatory.
 export async function requester(req: express.Request): Promise<db.Participant | null> {
+  // API tokens ("jgl_…", db/apiTokens.ts) resolve straight to their bound participant — the token
+  // acts AS that participant, whose row already fixes the workspace, so X-Workspace-Id is ignored.
+  const raw = auth.bearer(req);
+  if (raw && raw.startsWith(db.API_TOKEN_PREFIX)) {
+    return db.getParticipantByApiToken(raw);
+  }
   const u = auth.authedUser(req);
   if (u) {
     const wsId = req.header("x-workspace-id");

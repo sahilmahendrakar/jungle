@@ -11,6 +11,7 @@ import { googleCalendarAdapter } from "./google-calendar";
 import { xAdapter } from "./x";
 import { linearAdapter, notionAdapter, granolaAdapter } from "./providers";
 import { posthogAdapter, mixpanelAdapter } from "./analytics";
+import { jungleAdapter } from "./jungle";
 
 export { registerAdapter, adapterFor, allAdapters } from "./registry";
 export type { IntegrationAdapter, ResolveConfigCtx } from "./types";
@@ -26,4 +27,5 @@ export function registerBuiltinIntegrations(): void {
   registerAdapter(granolaAdapter);
   registerAdapter(posthogAdapter);
   registerAdapter(mixpanelAdapter);
+  registerAdapter(jungleAdapter);
 }

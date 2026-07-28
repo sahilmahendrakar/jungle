@@ -2,6 +2,7 @@ import { Router } from "express";
 import * as db from "../../db";
 import * as att from "../../attachments";
 import { fanOut } from "../../ws/appSocket";
+import * as directory from "../../services/directory";
 import { wrap, ApiError } from "../errors";
 import { requireChannelMember, requireRequester } from "../guards";
 
@@ -20,18 +21,16 @@ router.post(
   }),
 );
 
+// Create a channel; the creator is always a member. Logic in services/directory.ts (shared with
+// the /mcp server).
 router.post(
   "/api/channels",
   wrap(async (req, res) => {
     const me = await requireRequester(req);
-    const { name, kind, memberHandles } = req.body ?? {};
-    if (!name || !kind) throw new ApiError(400, "name, kind required");
-    // The creator is always a member (even if their handle wasn't listed in the request).
+    const { name, memberHandles } = req.body ?? {};
+    if (!name) throw new ApiError(400, "name required");
     const handles = Array.isArray(memberHandles) ? memberHandles.map(String) : [];
-    if (!handles.includes(me.handle)) handles.push(me.handle);
-    res
-      .status(201)
-      .json(await db.createChannel({ workspaceId: me.workspace_id, name, kind, memberHandles: handles }));
+    res.status(201).json(await directory.createChannelAs(me, { name: String(name), memberHandles: handles }));
   }),
 );
 
@@ -88,17 +87,12 @@ router.get(
   }),
 );
 
+// Membership changes: logic in services/directory.ts (shared with the /mcp server).
 router.post(
   "/api/channels/:id/members",
   wrap(async (req, res) => {
-    const ctx = await requireChannelMember(req);
-    if (ctx.channel.kind === "dm") throw new ApiError(400, "cannot change members of a DM");
-    const handle = String(req.body?.handle ?? "").trim().replace(/^@/, "");
-    // Scope the handle lookup to the channel's workspace — you can't pull in someone from another.
-    const target = await db.getParticipantByHandle(ctx.channel.workspace_id, handle);
-    if (!target) throw new ApiError(404, `no participant @${handle}`);
-    await db.addChannelMember(ctx.channel.id, target.id);
-    await fanOut(ctx.channel.id, { type: "members_changed", channelId: ctx.channel.id });
+    const me = await requireRequester(req);
+    const target = await directory.addChannelMemberAs(me, String(req.params.id), String(req.body?.handle ?? ""));
     res.status(201).json(target);
   }),
 );
@@ -106,11 +100,8 @@ router.post(
 router.delete(
   "/api/channels/:id/members/:participantId",
   wrap(async (req, res) => {
-    const ctx = await requireChannelMember(req);
-    if (ctx.channel.kind === "dm") throw new ApiError(400, "cannot change members of a DM");
-    // Notify (incl. the person being removed) before the row is gone, then remove.
-    await fanOut(ctx.channel.id, { type: "members_changed", channelId: ctx.channel.id });
-    await db.removeChannelMember(ctx.channel.id, String(req.params.participantId));
+    const me = await requireRequester(req);
+    await directory.removeChannelMemberAs(me, String(req.params.id), String(req.params.participantId));
     res.json({ ok: true });
   }),
 );

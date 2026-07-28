@@ -1,202 +1,55 @@
 import { Router } from "express";
-import { randomBytes } from "node:crypto";
-import {
-  isAllowedEffort,
-  isAllowedModel,
-  isSdkMode,
-  getIntegrationType,
-  PERSONA_MAX_LENGTH,
-} from "@jungle/shared";
-import { providerConfigured } from "../../providers";
 import * as db from "../../db";
 import * as auth from "../../auth";
 import * as runners from "../../runners";
 import { provisionerFor } from "../../provisioner";
-import { broadcastWorkspace } from "../../ws/appSocket";
 import { listPendingConfirmsFor, resolveConfirmDecision } from "../../services/confirmations";
-import * as workflows from "../../services/workflows";
+import * as agentAdmin from "../../services/agentAdmin";
 import { wrap, ApiError } from "../errors";
 import { optInt } from "../validate";
-import { publicParticipant, requireAgent, requireRequester, accountUid } from "../guards";
-import { adapterFor } from "../../integrations";
+import { publicParticipant, requireAgent, requireRequester } from "../guards";
 
 const router = Router();
 
-// RUNNER_PROVIDER picks the default for newly-created agents until the Fly cutover; a per-request
-// override lets a single test agent opt in early (see POST /api/agents).
-const RUNNER_PROVIDER_DEFAULT = process.env.RUNNER_PROVIDER === "fly" ? "fly" : "docker";
-
-// An agent is a blank chat agent by default: `integrations` (optional) attaches one or more
-// integrations at creation time, e.g. [{key: "github", config: {repo: "owner/name"}}]. Unknown
-// or comingSoon integration keys are rejected — only fully-wired-up types can actually be attached.
-function validateIntegrations(
-  input: unknown,
-): Array<{ key: string; config: Record<string, unknown> }> {
-  if (input === undefined) return [];
-  if (!Array.isArray(input)) throw new ApiError(400, "integrations must be an array");
-  return input.map((entry) => {
-    const key = String(entry?.key ?? "");
-    const type = getIntegrationType(key);
-    if (!type || type.comingSoon) throw new ApiError(400, `unsupported integration: ${key}`);
-    const config = entry?.config && typeof entry.config === "object" ? entry.config : {};
-    return { key, config };
-  });
-}
-
-// Resolve the config actually persisted for an integration the requester is attaching. Most
-// integrations store the client-supplied config as-is; connection-based ones (gmail, …) normalize
-// it via their adapter's resolveConfig — e.g. gmail binds to the requester's connected Google
-// account and drops secrets. Per-service logic lives in backend/src/integrations/, not here.
-async function resolveIntegrationConfig(
-  me: db.Participant,
-  agentId: string,
-  key: string,
-  rawConfig: Record<string, unknown>,
-): Promise<Record<string, unknown>> {
-  const adapter = adapterFor(key);
-  if (!adapter?.resolveConfig) return rawConfig;
-  const existing = await db.getAgentIntegration(agentId, key);
-  return adapter.resolveConfig({ me, agentId, existing: existing?.config ?? null }, rawConfig);
-}
-
-// Create an agent = a participant of kind 'agent' running on the SDK runner: mint a per-agent
-// runner token and provision its container. It starts as a blank chat agent; `integrations`
-// (optional) attaches integrations like GitHub (see validateIntegrations above and
-// backend/src/db/integrations.ts) — the runner then gets whatever that integration grants
-// (git credentials, MCP servers, ...) in each `configure` (see runners.ts). Allowed models / SDK
-// permission modes live in @jungle/shared; keep the UI dropdown in sync.
+// Create an agent = a participant of kind 'agent' running on the SDK runner. The logic lives in
+// services/agentAdmin.ts (shared with the /mcp server); this route is the HTTP head. Allowed
+// models / SDK permission modes live in @jungle/shared; keep the UI dropdown in sync.
 router.post(
   "/api/agents",
   wrap(async (req, res) => {
     const me = await requireRequester(req);
-    const { handle, displayName } = req.body ?? {};
-    if (!handle || !displayName) throw new ApiError(400, "handle, displayName required");
-    // Optional creator-written instructions/persona, injected into the agent's system prompt. Same
-    // length cap as the profile-page edit; empty string clears it (stored as null).
-    let persona: string | null = null;
-    if (req.body?.persona !== undefined) {
-      persona = String(req.body.persona ?? "").trim() || null;
-      if (persona && persona.length > PERSONA_MAX_LENGTH) {
-        throw new ApiError(400, `instructions must be at most ${PERSONA_MAX_LENGTH} characters`);
-      }
-    }
-    const model = req.body?.model ? String(req.body.model) : null;
-    if (model && !isAllowedModel(model)) throw new ApiError(400, `unsupported model: ${model}`);
-    if (model && !providerConfigured(model)) {
-      throw new ApiError(400, `model unavailable: ${model}'s provider API key is not configured`);
-    }
-    const mode = req.body?.mode ? String(req.body.mode) : "default";
-    if (!isSdkMode(mode)) throw new ApiError(400, `unsupported mode: ${mode}`);
-    const integrations = validateIntegrations(req.body?.integrations);
-    const runnerToken = randomBytes(32).toString("hex");
-    // Environment: cloud default, 'fly' opt-in, or 'self_hosted' bound to one of the requester's
-    // registered devices (must be assignable — their own device, or one shared into this workspace).
-    let runnerProvider = RUNNER_PROVIDER_DEFAULT;
-    let hostId: string | null = null;
-    if (req.body?.runnerProvider === "fly") {
-      runnerProvider = "fly";
-    } else if (req.body?.runnerProvider === "self_hosted") {
-      runnerProvider = "self_hosted";
-      hostId = String(req.body?.hostId ?? "");
-      if (!hostId) throw new ApiError(400, "hostId is required for a self-hosted agent");
-      if (!(await db.canAssignHost(hostId, accountUid(me), me.workspace_id))) {
-        throw new ApiError(403, "you don't have access to run agents on that device");
-      }
-    }
-    // The agent joins the creator's workspace, subject to the workspace's agent cap. The cap check
-    // + insert run in one transaction (FOR UPDATE on the workspace row) so concurrent creates can't
-    // both slip past the limit.
-    const participant = await db.withTransaction(async (client) => {
-      const { count, cap } = await db.agentCountAndCap(client, me.workspace_id);
-      if (count >= cap) throw new ApiError(409, `this workspace has reached its agent limit (${cap})`);
-      return db.createParticipant({
-        kind: "agent", workspaceId: me.workspace_id, handle, displayName, runtime: "sdk", runnerToken,
-        model, mode, runnerProvider, persona,
-      }, client);
+    const integrations = agentAdmin.validateIntegrations(req.body?.integrations);
+    const participant = await agentAdmin.createAgentAs(me, {
+      handle: req.body?.handle,
+      displayName: req.body?.displayName,
+      persona: req.body?.persona,
+      model: req.body?.model ? String(req.body.model) : null,
+      mode: req.body?.mode ? String(req.body.mode) : undefined,
+      integrations: req.body?.integrations,
+      runnerProvider: req.body?.runnerProvider ? String(req.body.runnerProvider) : undefined,
+      hostId: req.body?.hostId ? String(req.body.hostId) : undefined,
     });
-    // Bind the agent to its device before provisioning reads runner_meta.hostId.
-    if (hostId) await db.setRunnerMeta(participant.id, { hostId });
-    for (const { key, config } of integrations) {
-      await db.setAgentIntegration(participant.id, key, await resolveIntegrationConfig(me, participant.id, key, config));
-    }
     // Respond immediately — provisioning (esp. a Fly machine's first boot / image pull) can take
     // up to ~1min, and the row + status UI ("waking"/"offline") already give the client what it needs.
-    const runnerMeta = hostId ? { hostId } : participant.runner_meta;
-    res.status(201).json({ ...publicParticipant({ ...participant, runner_meta: runnerMeta }), integrations });
-    // Provision + start in the background. Best-effort: if the provisioner isn't available the
-    // agent row still exists and a runner can be started later; just log the failure. For
-    // self-hosted, start() sends a run command to the device (no-op if it's offline — the agent
-    // shows `offline` until the daemon reconnects), and we only show "waking" if the device is up.
-    void (async () => {
-      try {
-        await provisionerFor(participant).create({ id: participant.id, handle, runnerToken });
-        await provisionerFor(participant).start(participant.id);
-        if (runnerProvider !== "self_hosted" || runners.isAgentDeviceOnline(participant.id)) {
-          runners.noteProvisionerStart(participant.id); // show "waking" until the runner connects
-        }
-      } catch (e) {
-        console.error("provisioner create/start:", e);
-      }
-    })();
+    res.status(201).json({ ...publicParticipant(participant), integrations });
   }),
 );
 
 // Update an agent's config from its profile page. Auth-gated (any signed-in user). `mode` is
 // pushed live to the runner (applies immediately); `model` applies at the next turn boundary.
+// Logic in services/agentAdmin.ts (shared with the /mcp server).
 router.patch(
   "/api/agents/:id",
   wrap(async (req, res) => {
-    const { agent } = await requireAgent(req);
-    const patch: {
-      displayName?: string;
-      mode?: string;
-      model?: string;
-      effort?: string;
-      persona?: string | null;
-    } = {};
-    if (req.body?.displayName !== undefined) {
-      const dn = String(req.body.displayName).trim();
-      if (!dn) throw new ApiError(400, "display name cannot be empty");
-      patch.displayName = dn;
-    }
-    if (req.body?.persona !== undefined) {
-      const persona = String(req.body.persona ?? "").trim();
-      if (persona.length > PERSONA_MAX_LENGTH) {
-        throw new ApiError(400, `persona must be at most ${PERSONA_MAX_LENGTH} characters`);
-      }
-      patch.persona = persona || null; // empty clears it
-    }
-    if (req.body?.mode !== undefined) {
-      const mode = String(req.body.mode);
-      if (!isSdkMode(mode)) throw new ApiError(400, `unsupported mode: ${mode}`);
-      if (mode !== agent.mode) runners.setPermissionMode(agent.id, mode);
-      patch.mode = mode;
-    }
-    if (req.body?.model !== undefined) {
-      const model = String(req.body.model);
-      if (!isAllowedModel(model)) throw new ApiError(400, `unsupported model: ${model}`);
-      if (!providerConfigured(model)) {
-        throw new ApiError(400, `model unavailable: ${model}'s provider API key is not configured`);
-      }
-      if (model !== agent.model) runners.setModel(agent.id, model);
-      patch.model = model;
-    }
-    if (req.body?.effort !== undefined) {
-      const effort = String(req.body.effort);
-      if (!isAllowedEffort(effort)) throw new ApiError(400, `unsupported effort: ${effort}`);
-      if (effort !== agent.effort) runners.setEffort(agent.id, effort);
-      patch.effort = effort;
-    }
-    const updated = await db.updateAgentConfig(agent.id, patch);
-    // Persona/display name live in the system prompt, which the runner only receives via
-    // `configure` — push a fresh one so a long-connected runner picks the edit up at its next
-    // turn instead of waiting for a reconnect.
-    if (updated && (patch.persona !== undefined || patch.displayName !== undefined)) {
-      await runners.reconfigure(agent.id);
-    }
-    const pub = updated ? publicParticipant(updated) : updated;
-    broadcastWorkspace(agent.workspace_id, { type: "participant_updated", participant: pub });
-    res.json(pub);
+    const { me, agent } = await requireAgent(req);
+    const updated = await agentAdmin.updateAgentConfigAs(me, agent.id, {
+      displayName: req.body?.displayName,
+      persona: req.body?.persona,
+      mode: req.body?.mode,
+      model: req.body?.model,
+      effort: req.body?.effort,
+    });
+    res.json(updated ? publicParticipant(updated) : updated);
   }),
 );
 
@@ -216,57 +69,27 @@ router.put(
   "/api/agents/:id/integrations/:key",
   wrap(async (req, res) => {
     const { me, agent } = await requireAgent(req);
-    const key = String(req.params.key);
-    const type = getIntegrationType(key);
-    if (!type || type.comingSoon) throw new ApiError(400, `unsupported integration: ${key}`);
     const config = req.body?.config && typeof req.body.config === "object" ? req.body.config : {};
-    for (const field of type.configFields) {
-      if (!config[field.key]) throw new ApiError(400, `${field.label} is required`);
-    }
-    const resolved = await resolveIntegrationConfig(me, agent.id, key, config);
-    const row = await db.setAgentIntegration(agent.id, key, resolved);
-    // Integration grants (git creds, MCP servers, prompt blocks) only reach the runner via
-    // `configure` — push a fresh one so a connected runner picks the change up at its next turn
-    // instead of silently keeping the old grants until a reconnect. No-op when offline.
-    await runners.reconfigure(agent.id);
-    // Roster seats advertise the agent's integrations (canvas chips + Connections panel) —
-    // add the key everywhere this agent sits so those views follow the attach.
-    await workflows.syncRosterIntegration(agent.id, key, "attach", resolved);
-    res.json(row);
+    res.json(await agentAdmin.attachIntegrationAs(me, agent.id, String(req.params.key), config));
   }),
 );
 
 router.delete(
   "/api/agents/:id/integrations/:key",
   wrap(async (req, res) => {
-    const { agent } = await requireAgent(req);
-    const key = String(req.params.key);
-    await db.removeAgentIntegration(agent.id, key);
-    // Revoke the grant on a live runner too (same reasoning as the PUT above).
-    await runners.reconfigure(agent.id);
-    // …and scrub the key from the agent's roster seats (mirror of the PUT's sync).
-    await workflows.syncRosterIntegration(agent.id, key, "detach");
+    const { me, agent } = await requireAgent(req);
+    await agentAdmin.detachIntegrationAs(me, agent.id, String(req.params.key));
     res.json({ ok: true });
   }),
 );
 
 // Delete an agent entirely: tear down its runner + container/volume, then remove all of its data.
-// Auth-gated (any signed-in user, matching PATCH). Best-effort on container teardown so a docker
-// hiccup doesn't strand the DB row; the DB delete is the source of truth.
+// Auth-gated (any signed-in user, matching PATCH). Logic in services/agentAdmin.ts.
 router.delete(
   "/api/agents/:id",
   wrap(async (req, res) => {
-    const { agent } = await requireAgent(req);
-    // Stop the runner working and close its socket so it can't reconnect mid-teardown.
-    runners.disconnect(agent.id);
-    // Remove the container + its workspace volume. Best-effort: log but don't fail the request.
-    try {
-      await provisionerFor(agent).destroy(agent.id);
-    } catch (e) {
-      console.error("provisioner destroy:", e);
-    }
-    await db.deleteAgent(agent.id);
-    broadcastWorkspace(agent.workspace_id, { type: "participant_deleted", participantId: agent.id });
+    const { me, agent } = await requireAgent(req);
+    await agentAdmin.deleteAgentAs(me, agent.id);
     res.json({ ok: true });
   }),
 );
