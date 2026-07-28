@@ -46,6 +46,10 @@ export interface ParticipantBase {
   // The agent's MEMORY.md mirror is NOT here — it can be large, so clients fetch it on demand
   // via GET /api/agents/:id/memory.
   persona: string | null;
+  // The human participant who created this agent (null for humans, and for agents that predate
+  // migrations/039 in a workspace with no human to attribute them to). Usage/spend rolls up by
+  // this — see shared/src/admin.ts.
+  created_by: string | null;
 }
 
 // A participant as sent to clients: the public row plus a live `status` (agents only, computed
@@ -144,6 +148,10 @@ export interface Me {
   profile: GoogleProfile;
   memberships: Membership[];
   suggestedHandle: string;
+  // Operator flag: this account's email is on the platform admin allowlist, so the settings panel
+  // offers the admin view (/admin). Server-decided — the /api/admin/* routes re-check it, so
+  // flipping this client-side gets you an empty page and a 403.
+  isAdmin: boolean;
 }
 
 // GET /api/invites/:token: what a would-be joiner sees before accepting an invite link.
