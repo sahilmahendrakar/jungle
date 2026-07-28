@@ -151,6 +151,19 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     readOnly: true,
   },
   {
+    // Jungle itself, as an integration: mounts Jungle's own MCP server (backend /mcp) into the
+    // agent with an agent-bound API token, so the agent can manage the workspace — create
+    // channels and agents, build/run workflows, manage schedules. The key is "jungle-admin"
+    // (not "jungle") because the runner's in-process chat server already owns the "jungle"
+    // MCP server name (see runner/src/runner.ts mcpServers).
+    key: "jungle-admin",
+    name: "Jungle",
+    description: "Manage this Jungle workspace — create channels & agents, build, run & schedule workflows.",
+    connectionKey: "jungle-admin", // no backing connection — the grant is minted by the backend itself
+    configFields: [],
+    settings: [{ kind: "approval", key: "requireApproval", label: "Ask me before it changes things in Jungle" }],
+  },
+  {
     key: "posthog",
     name: "PostHog",
     description: "Query product analytics — events, insights, trends, funnels & session data via PostHog's MCP server.",

@@ -19,6 +19,8 @@ import pushRouter from "./http/routes/push";
 import llmRouter from "./http/routes/llm";
 import { slackEventsRouter, slackRouter } from "./http/routes/slack";
 import { lianaEventsRouter, lianaRouter } from "./http/routes/liana";
+import tokensRouter from "./http/routes/tokens";
+import mcpRouter from "./mcp/server";
 
 // Build the Express app: global middleware, the per-domain routers, and the terminal error
 // handler. The http server + WebSocket wiring live in index.ts (boot).
@@ -71,6 +73,8 @@ export function createApp(): express.Express {
   app.use(pushRouter);
   app.use(slackRouter);
   app.use(lianaRouter);
+  app.use(tokensRouter);
+  app.use(mcpRouter);
 
   app.use(errorHandler);
   return app;

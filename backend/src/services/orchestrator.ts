@@ -337,8 +337,10 @@ async function deliverAgentMessage(
 // (backend/db/{messages,threads}.ts's *HistoryBefore), or a specific thread's transcript when
 // `threadRootId` is given. Backs the read_history tool, for context beyond the few messages
 // inlined into the turn prompt (RECENT_CONTEXT_LIMIT above).
-async function readAgentHistory(
-  agent: { id: string; handle: string; workspace_id: string },
+// Exported: the /mcp server reads history for token-authed actors (human or agent) through the
+// same member-scoped resolution.
+export async function readAgentHistory(
+  agent: { id: string; workspace_id: string },
   toolInput: runners.ReadHistoryInput,
 ): Promise<runners.ReadHistoryResult> {
   const to = String(toolInput.to ?? "").trim();

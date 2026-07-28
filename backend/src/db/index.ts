@@ -23,6 +23,7 @@ export * from "./turns";
 export * from "./push";
 export * from "./slack";
 export * from "./liana";
+export * from "./apiTokens";
 
 // Wire/domain type aliases used across the backend via the db namespace (db.PersistedMessage, …).
 export type { Kind, ChannelListItem, UnreadThread, Message as PersistedMessage, AttachmentMeta } from "@jungle/shared";

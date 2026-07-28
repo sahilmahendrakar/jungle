@@ -140,6 +140,22 @@ export function selfHostedEndpoints(): { backendWs: string; llmBaseUrl: string }
   return { backendWs: RUNNER_BACKEND_WS, llmBaseUrl: LLM_BASE_URL };
 }
 
+// The backend's HTTP origin as reachable FROM an agent's runner, per provider. Docker containers
+// reach the host via host.docker.internal (same route as JUNGLE_BACKEND_WS above); Fly and
+// self-hosted runners go through the public backend host RUNNER_BACKEND_WS names. The jungle
+// integration (integrations/jungle.ts) mounts `${base}/mcp` through this.
+export function runnerHttpBaseFor(agent: { runner_provider?: string | null }): string {
+  if ((agent.runner_provider || "docker") === "docker") {
+    return `http://host.docker.internal:${BACKEND_PORT}`;
+  }
+  try {
+    const u = new URL(RUNNER_BACKEND_WS);
+    return `${u.protocol === "wss:" ? "https:" : "http:"}//${u.host}`;
+  } catch {
+    return "https://api.jungleagents.com";
+  }
+}
+
 // Runs an agent on a user's OWN device (participants.runner_provider = 'self_hosted'). The backend
 // owns no machine here — it sends run/stop/remove commands down the device's host-control channel
 // (hostcontrol.ts) and the device's daemon spawns/kills the per-agent runner child. Lifecycle is

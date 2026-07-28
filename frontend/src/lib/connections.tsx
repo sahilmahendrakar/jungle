@@ -134,9 +134,22 @@ const RICH_BRAND_GLYPHS: Record<string, RichGlyph> = {
   },
 };
 
-// The raw brand glyph (an SVG path on a 24×24 viewBox, or the official multi-color mark when
-// one exists in RICH_BRAND_GLYPHS).
+// Marks that ship as a raster asset rather than an inline path. Jungle's own logo is the app
+// icon (the same /icon-192.png the sign-in, workspace switcher and landing page render), so the
+// jungle-admin integration shows the real product mark instead of a hand-drawn stand-in.
+const BRAND_IMAGES: Record<string, string> = {
+  "jungle-admin": "/icon-192.png",
+};
+
+// The raw brand glyph (an SVG path on a 24×24 viewBox, the official multi-color mark when one
+// exists in RICH_BRAND_GLYPHS, or a raster mark from BRAND_IMAGES).
 export function BrandGlyph({ brand, className }: { brand: string; className?: string }) {
+  const image = BRAND_IMAGES[brand];
+  // The asset carries its own rounded background, so it fills the tile (like granola's rich
+  // glyph) rather than sitting as a small glyph inside it.
+  if (image) {
+    return <img src={image} alt="" aria-hidden className={cn("shrink-0 rounded-[4px] object-contain", className)} />;
+  }
   const rich = RICH_BRAND_GLYPHS[brand];
   if (rich) {
     const paths = rich.paths.map((p, i) =>

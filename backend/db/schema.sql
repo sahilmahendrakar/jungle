@@ -546,3 +546,18 @@ create index if not exists workflow_runs_live_idx on workflow_runs (status)
 -- Backing rows for workflow schedule triggers (hidden from schedule lists/caps; the ticker
 -- fires workflow dispatch instead of a normal agent turn).
 alter table schedules add column if not exists workflow_id uuid references workflows(id) on delete cascade;
+
+-- Participant-scoped API tokens (see migrations/039_api_tokens.sql): programmatic access to the
+-- HTTP API and the /mcp server as a specific participant. Plaintext ("jgl_<hex>") is shown once
+-- at mint; only its sha256 hex is stored. Deleting the row revokes the token immediately.
+create table if not exists api_tokens (
+  id             uuid primary key default gen_random_uuid(),
+  participant_id uuid not null references participants(id) on delete cascade,
+  name           text not null,
+  token_hash     text not null,
+  created_by     uuid references participants(id) on delete set null,
+  created_at     timestamptz not null default now(),
+  last_used_at   timestamptz
+);
+create unique index if not exists api_tokens_hash_idx on api_tokens (token_hash);
+create index if not exists api_tokens_participant_idx on api_tokens (participant_id);

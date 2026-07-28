@@ -73,16 +73,19 @@ export async function verifyIdToken(idToken: string): Promise<AuthUser> {
   return toUser(await getAuth(app).verifyIdToken(idToken));
 }
 
-function bearer(req: Request): string | null {
+// The raw bearer token, if any. Exported for guards.ts, which resolves non-Firebase ("jgl_")
+// API tokens through it (see db/apiTokens.ts).
+export function bearer(req: Request): string | null {
   const h = req.header("authorization") || req.header("Authorization");
   if (h && h.startsWith("Bearer ")) return h.slice(7).trim();
   return null;
 }
 
 // Attaches req.auth when a valid token is present (does not reject — use requireAuth for that).
+// API tokens ("jgl_…") are not Firebase JWTs — skip them here; guards.requester() resolves them.
 export async function attachAuth(req: Request, _res: Response, next: NextFunction): Promise<void> {
   const token = bearer(req);
-  if (token && app) {
+  if (token && app && !token.startsWith("jgl_")) {
     try {
       (req as Request & { auth?: AuthUser }).auth = await verifyIdToken(token);
     } catch {
