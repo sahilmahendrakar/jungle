@@ -1,9 +1,9 @@
 import type { ConfigureFrame } from "@jungle/shared";
 import * as db from "../db";
 import * as google from "../google";
-import { ApiError } from "../http/errors";
 import { isInvalidGrantError } from "./oauth";
 import type { IntegrationAdapter } from "./types";
+import { resolveConnection } from "./backing";
 
 // Google Calendar integration: the agent can list/read events and (with approval) create/update
 // them on a connected Google Calendar via the runner's in-process calendar_* MCP tools —
@@ -80,25 +80,20 @@ function disconnectedBlock(email: string): string {
 export const googleCalendarAdapter: IntegrationAdapter = {
   key: KEY,
 
-  // Bind to one of the attaching user's Calendar connections — the picker's choice
-  // (rawConfig.connectionId) when given, else the existing binding on reconfigure, else the
-  // user's sole connection if they have exactly one. Stores the display email for the agent card.
+  // Bind to one specific Google Calendar connection (config.connectionId) — the picker's choice
+  // (rawConfig.connectionId) when given, else the existing binding on reconfigure, else resolved
+  // from the attacher (backing.ts: the human's sole connection, or, when an AGENT is attaching, the
+  // account of the person it's acting for). Stores the display email for the agent card.
   async resolveConfig(ctx, rawConfig): Promise<Record<string, unknown>> {
     const requireApproval = rawConfig.requireApproval !== false && rawConfig.requireApproval !== "false";
     const requestedId = typeof rawConfig.connectionId === "string" ? rawConfig.connectionId : null;
     const existingId = typeof ctx.existing?.connectionId === "string" ? ctx.existing.connectionId : null;
-    const connectionId = requestedId ?? existingId;
-    if (connectionId) {
-      const conn = await db.getIntegrationConnectionById(connectionId);
-      if (!conn || conn.participant_id !== ctx.me.id || conn.integration_key !== KEY) {
-        throw new ApiError(400, "that Google Calendar connection doesn't belong to you");
-      }
-      return { connectionId: conn.id, email: conn.external_account, requireApproval };
-    }
-    const conns = await db.listIntegrationConnectionsForKey(ctx.me.id, KEY);
-    if (conns.length === 0) throw new ApiError(400, "connect your Google Calendar account in Settings first");
-    if (conns.length > 1) throw new ApiError(400, "choose which Google Calendar account this agent should use");
-    return { connectionId: conns[0].id, email: conns[0].external_account, requireApproval };
+    const conn = await resolveConnection(ctx, {
+      key: KEY,
+      displayName: "Google Calendar",
+      requestedId: requestedId ?? existingId,
+    });
+    return { connectionId: conn.id, email: conn.external_account, requireApproval };
   },
 
   async buildGrant(frame: ConfigureFrame, agent, config): Promise<string | null> {

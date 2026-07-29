@@ -159,6 +159,7 @@ async function postToken(tokenEndpoint: string, params: Record<string, string>):
   refresh_token?: string;
   expires_in?: number;
   scope?: string;
+  raw: Record<string, unknown>;
 }> {
   const json = await fetchJson(tokenEndpoint, {
     method: "POST",
@@ -172,7 +173,19 @@ async function postToken(tokenEndpoint: string, params: Record<string, string>):
     refresh_token: json.refresh_token as string | undefined,
     expires_in: json.expires_in as number | undefined,
     scope: json.scope as string | undefined,
+    raw: json,
   };
+}
+
+// The label shown next to the connection in Settings. Providers that grant per-workspace access
+// name it in the token response (Notion sends workspace_name) — surface that, because "Notion"
+// alone can't tell you WHICH Notion workspace you authorized, which is exactly the question when
+// someone reconnects to switch workspaces. Falls back to the provider name.
+function accountLabel(spec: McpProviderSpec, tokenResponse: Record<string, unknown>): string {
+  const named = ["workspace_name", "team_name", "account_name", "org_name"]
+    .map((k) => tokenResponse[k])
+    .find((v): v is string => typeof v === "string" && v.trim() !== "");
+  return named ? `${spec.displayName} · ${named.trim()}` : spec.displayName;
 }
 
 const expiryDate = (secs?: number): Date | null =>
@@ -221,7 +234,7 @@ export function mcpConnection(spec: McpProviderSpec): IntegrationConnection {
         ...(clientSecret ? { client_secret: clientSecret } : {}),
       });
       return {
-        externalAccount: spec.displayName,
+        externalAccount: accountLabel(spec, tok.raw),
         accessToken: tok.access_token,
         refreshToken: tok.refresh_token ?? null,
         accessExpiresAt: expiryDate(tok.expires_in),

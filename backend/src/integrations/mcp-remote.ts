@@ -1,7 +1,7 @@
 import type { ConfigureFrame } from "@jungle/shared";
 import * as db from "../db";
-import { ApiError } from "../http/errors";
 import type { IntegrationAdapter } from "./types";
+import { resolveConnection } from "./backing";
 import { mcpConnection, getValidMcpToken, type McpProviderSpec } from "./mcp-oauth";
 
 // Factory: build a full IntegrationAdapter for a remote MCP provider (Linear/Notion/Granola) from
@@ -69,11 +69,11 @@ export function createMcpRemoteAdapter(spec: McpAdapterSpec): IntegrationAdapter
   return {
     key: spec.key,
 
-    // Attach/reconfigure: binds the agent to one of the attaching user's connections
-    // (config.connectionId) — the picker's choice (rawConfig.connectionId) when given, else the
-    // existing binding on reconfigure, else the user's sole connection if they have exactly one.
-    // 400 if there's no unambiguous choice. The only other config is the approval toggle (moot
-    // for read-only integrations).
+    // Attach/reconfigure: binds the agent to one specific connection (config.connectionId) — the
+    // picker's choice (rawConfig.connectionId) when given, else the existing binding on
+    // reconfigure, else resolved from the attacher (backing.ts: the human's sole connection, or,
+    // when an AGENT is attaching, the account of the person it's acting for). The only other
+    // config is the approval toggle (moot for read-only integrations).
     async resolveConfig(ctx, rawConfig): Promise<Record<string, unknown>> {
       const requireApproval =
         !spec.readOnly && rawConfig.requireApproval !== false && rawConfig.requireApproval !== "false";
@@ -81,18 +81,12 @@ export function createMcpRemoteAdapter(spec: McpAdapterSpec): IntegrationAdapter
 
       const requestedId = typeof rawConfig.connectionId === "string" ? rawConfig.connectionId : null;
       const existingId = typeof ctx.existing?.connectionId === "string" ? ctx.existing.connectionId : null;
-      const connectionId = requestedId ?? existingId;
-      if (connectionId) {
-        const conn = await db.getIntegrationConnectionById(connectionId);
-        if (!conn || conn.participant_id !== ctx.me.id || conn.integration_key !== spec.key) {
-          throw new ApiError(400, `that ${spec.displayName} connection doesn't belong to you`);
-        }
-        return { connectionId: conn.id, ...extra };
-      }
-      const conns = await db.listIntegrationConnectionsForKey(ctx.me.id, spec.key);
-      if (conns.length === 0) throw new ApiError(400, `connect your ${spec.displayName} account in Settings first`);
-      if (conns.length > 1) throw new ApiError(400, `choose which ${spec.displayName} account this agent should use`);
-      return { connectionId: conns[0].id, ...extra };
+      const conn = await resolveConnection(ctx, {
+        key: spec.key,
+        displayName: spec.displayName,
+        requestedId: requestedId ?? existingId,
+      });
+      return { connectionId: conn.id, ...extra };
     },
 
     async buildGrant(frame: ConfigureFrame, agent, config): Promise<string | null> {

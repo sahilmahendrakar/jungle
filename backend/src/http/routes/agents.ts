@@ -65,12 +65,16 @@ router.get(
 // Attach (or reconfigure) one integration on an agent. `config` must match that integration
 // type's configFields (e.g. github: {repo: "owner/name"}) — validated only for presence here;
 // the integration itself (e.g. installationTokenForRepo) surfaces a bad value at connect time.
+// `onBehalfOf` (a participant id) only matters when the requester is an AGENT — an agent-bound API
+// token attaching a connection-based integration names the person whose account backs it; a human
+// always binds their own (integrations/backing.ts).
 router.put(
   "/api/agents/:id/integrations/:key",
   wrap(async (req, res) => {
     const { me, agent } = await requireAgent(req);
     const config = req.body?.config && typeof req.body.config === "object" ? req.body.config : {};
-    res.json(await agentAdmin.attachIntegrationAs(me, agent.id, String(req.params.key), config));
+    const onBehalfOf = req.body?.onBehalfOf ? await db.getParticipant(String(req.body.onBehalfOf)) : null;
+    res.json(await agentAdmin.attachIntegrationAs(me, agent.id, String(req.params.key), config, onBehalfOf));
   }),
 );
 

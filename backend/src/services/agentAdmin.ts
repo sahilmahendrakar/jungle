@@ -44,16 +44,22 @@ export function validateIntegrations(
 // integrations store the supplied config as-is; connection-based ones (gmail, …) normalize it via
 // their adapter's resolveConfig — e.g. gmail binds to the actor's connected Google account and
 // drops secrets. Per-service logic lives in backend/src/integrations/, not here.
+// `onBehalfOf` names the person whose connection should back it when the ACTOR is an agent (which
+// has none of its own) — see integrations/backing.ts.
 export async function resolveIntegrationConfig(
   actor: db.Participant,
   agentId: string,
   key: string,
   rawConfig: Record<string, unknown>,
+  onBehalfOf?: db.Participant | null,
 ): Promise<Record<string, unknown>> {
   const adapter = adapterFor(key);
   if (!adapter?.resolveConfig) return rawConfig;
   const existing = await db.getAgentIntegration(agentId, key);
-  return adapter.resolveConfig({ me: actor, agentId, existing: existing?.config ?? null }, rawConfig);
+  return adapter.resolveConfig(
+    { me: actor, agentId, existing: existing?.config ?? null, onBehalfOf: onBehalfOf ?? null },
+    rawConfig,
+  );
 }
 
 const validatedPersona = (raw: unknown): string | null => {
@@ -79,6 +85,9 @@ export async function createAgentAs(
     integrations?: unknown;
     runnerProvider?: string;
     hostId?: string;
+    // Whose connected accounts back the connection-based integrations attached here (only
+    // meaningful when the actor is an agent) — see integrations/backing.ts.
+    onBehalfOf?: db.Participant | null;
   },
 ): Promise<db.Participant> {
   const { handle, displayName } = input;
@@ -120,8 +129,20 @@ export async function createAgentAs(
   });
   // Bind the agent to its device before provisioning reads runner_meta.hostId.
   if (hostId) await db.setRunnerMeta(participant.id, { hostId });
-  for (const { key, config } of integrations) {
-    await db.setAgentIntegration(participant.id, key, await resolveIntegrationConfig(actor, participant.id, key, config));
+  // Attach the requested integrations, or undo the whole create. An integration that can't be
+  // resolved (e.g. nobody has connected Notion yet) used to throw with the row already inserted,
+  // leaving a half-made agent: it exists, has no integrations, and — because the throw happens
+  // before the block below — was never provisioned, so it can never come online. Callers retrying
+  // then hit "handle already taken". All-or-nothing instead: the caller fixes the integration and
+  // creates again.
+  try {
+    for (const { key, config } of integrations) {
+      const resolved = await resolveIntegrationConfig(actor, participant.id, key, config, input.onBehalfOf);
+      await db.setAgentIntegration(participant.id, key, resolved);
+    }
+  } catch (e) {
+    await db.deleteAgent(participant.id).catch((err) => console.error("rollback of half-created agent:", err));
+    throw e;
   }
   if (hostId) participant.runner_meta = { hostId };
   // Provision + start in the background. Best-effort: if the provisioner isn't available the
@@ -223,6 +244,7 @@ export async function attachIntegrationAs(
   agentId: string,
   key: string,
   config: Record<string, unknown>,
+  onBehalfOf?: db.Participant | null,
 ): Promise<db.AgentIntegrationRow> {
   const agent = await requireAgentInWorkspace(actor, agentId);
   const type = getIntegrationType(key);
@@ -230,7 +252,7 @@ export async function attachIntegrationAs(
   for (const field of type.configFields) {
     if (!config[field.key]) throw new ApiError(400, `${field.label} is required`);
   }
-  const resolved = await resolveIntegrationConfig(actor, agent.id, key, config);
+  const resolved = await resolveIntegrationConfig(actor, agent.id, key, config, onBehalfOf);
   const row = await db.setAgentIntegration(agent.id, key, resolved);
   // Integration grants (git creds, MCP servers, prompt blocks) only reach the runner via
   // `configure` — push a fresh one so a connected runner picks the change up at its next turn

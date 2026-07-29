@@ -8,6 +8,7 @@ import type {
   ConnectionStartCtx,
   IntegrationAdapter,
 } from "./types";
+import { resolveConnection } from "./backing";
 
 // X (Twitter) integration: the agent can read activity on a connected X account — recent tweets,
 // mentions, replies, notifications — via the runner's in-process x_* MCP tools. Connection-based
@@ -135,25 +136,19 @@ function promptBlock(account: string): string {
 export const xAdapter: IntegrationAdapter = {
   key: KEY,
 
-  // Bind to one of the attaching user's X connections — the picker's choice
-  // (rawConfig.connectionId) when given, else the existing binding on reconfigure, else the
-  // user's sole connection if they have exactly one. 400 if there's no unambiguous choice.
-  // Stores the @handle for the agent card.
+  // Bind to one specific X connection (config.connectionId) — the picker's choice
+  // (rawConfig.connectionId) when given, else the existing binding on reconfigure, else resolved
+  // from the attacher (backing.ts: the human's sole connection, or, when an AGENT is attaching, the
+  // account of the person it's acting for). Stores the @handle for the agent card.
   async resolveConfig(ctx, rawConfig): Promise<Record<string, unknown>> {
     const requestedId = typeof rawConfig.connectionId === "string" ? rawConfig.connectionId : null;
     const existingId = typeof ctx.existing?.connectionId === "string" ? ctx.existing.connectionId : null;
-    const connectionId = requestedId ?? existingId;
-    if (connectionId) {
-      const conn = await db.getIntegrationConnectionById(connectionId);
-      if (!conn || conn.participant_id !== ctx.me.id || conn.integration_key !== KEY) {
-        throw new ApiError(400, "that X connection doesn't belong to you");
-      }
-      return { connectionId: conn.id, account: conn.external_account };
-    }
-    const conns = await db.listIntegrationConnectionsForKey(ctx.me.id, KEY);
-    if (conns.length === 0) throw new ApiError(400, "connect your X account in Settings first");
-    if (conns.length > 1) throw new ApiError(400, "choose which X account this agent should use");
-    return { connectionId: conns[0].id, account: conns[0].external_account };
+    const conn = await resolveConnection(ctx, {
+      key: KEY,
+      displayName: "X",
+      requestedId: requestedId ?? existingId,
+    });
+    return { connectionId: conn.id, account: conn.external_account };
   },
 
   // Mint the X token up front so the prompt only advertises x_* tools when the connection is
