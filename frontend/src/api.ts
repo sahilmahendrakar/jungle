@@ -32,6 +32,11 @@ import type {
   WorkflowTrigger,
   WorkflowTemplate,
   BrowsableChannel,
+  AdminOverview,
+  AdminAccount,
+  AdminAgentUsage,
+  AdminActivityItem,
+  AdminWindow,
 } from "@jungle/shared";
 export {
   INTEGRATION_TYPES,
@@ -52,6 +57,7 @@ export type { Schedule, Deliverable, DeliverableKind, SearchResult, ActivityItem
 export type { Workflow, WorkflowRole, WorkflowRun, WorkflowTrigger, WorkflowTemplate };
 export type { Me, GoogleProfile, Workspace, Membership, InviteInfo };
 export type { BrowsableChannel };
+export type { AdminOverview, AdminAccount, AdminAgentUsage, AdminActivityItem, AdminWindow };
 // A message as delivered to the client (attachments carry signed download urls).
 export type Message = WireMessage;
 
@@ -334,10 +340,15 @@ export type IntegrationStatuses = Record<string, IntegrationConnectionStatus>;
 // Begin connecting: returns the provider authorize URL for the SPA to navigate to. With
 // `popup: true` the callback returns a self-closing page instead of redirecting to /settings,
 // so the flow can run in window.open without losing SPA state (see lib/connections.tsx).
-export function integrationConnectUrl(key: string, opts?: { popup?: boolean }): Promise<{ url: string }> {
+// `connectionId` set = "Reconnect" on that one existing connection; omitted = a fresh "Connect" /
+// "add another account" (always creates a new connection on the backend).
+export function integrationConnectUrl(
+  key: string,
+  opts?: { popup?: boolean; connectionId?: string },
+): Promise<{ url: string }> {
   return request(`/api/integrations/${key}/connect-url`, {
     method: "POST",
-    json: { popup: opts?.popup === true },
+    json: { popup: opts?.popup === true, ...(opts?.connectionId ? { connectionId: opts.connectionId } : {}) },
     auth: true,
     devAuth: true,
     errorMessage: "failed to start connect",
@@ -354,6 +365,34 @@ export function getIntegrationStatuses(): Promise<IntegrationStatuses> {
 
 export function disconnectIntegration(key: string): Promise<{ ok: boolean }> {
   return request(`/api/integrations/${key}/connection`, {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to disconnect",
+  });
+}
+
+// One connection under an integration key, for the multi-account read model (a user can hold
+// several — e.g. two X accounts, two Notion workspaces).
+export interface IntegrationConnectionRecord {
+  id: string;
+  externalAccount: string | null;
+  needsReconnect: boolean;
+  updatedAt: string;
+}
+
+// Every connection-based integration's full connection list, keyed by integration key. Unlike
+// getIntegrationStatuses, this doesn't collapse multiple connections for the same key into one.
+export function getIntegrationConnections(): Promise<Record<string, IntegrationConnectionRecord[]>> {
+  return request(`/api/integrations/connections`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load integration connections",
+  });
+}
+
+export function disconnectIntegrationConnection(id: string): Promise<{ ok: boolean }> {
+  return request(`/api/integrations/connections/${id}`, {
     method: "DELETE",
     auth: true,
     devAuth: true,
@@ -1165,5 +1204,75 @@ export async function listGithubRepos(): Promise<{ connected: boolean; repos?: R
     if (r.status === 409) return { connected: false, error: (j as { error?: string }).error };
     if (!r.ok) throw new Error((j as { error?: string }).error ?? "failed to list repos");
     return j as { connected: boolean; repos: Repo[] };
+  });
+}
+
+// --- admin (operator-only) -----------------------------------------------------------------
+// Platform usage + spend. Every one of these 403s unless the signed-in account is on the
+// backend's operator allowlist, so callers must gate on me.isAdmin before rendering.
+
+export function adminOverview(window: AdminWindow): Promise<AdminOverview> {
+  return request<AdminOverview>(`/api/admin/overview?window=${window}`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load admin overview",
+  });
+}
+
+export function adminAccounts(window: AdminWindow): Promise<AdminAccount[]> {
+  return request<{ accounts: AdminAccount[] }>(`/api/admin/accounts?window=${window}`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load accounts",
+  }).then((r) => r.accounts);
+}
+
+// Per-agent usage: one account's agents (`account` = AdminAccount.key), or all of them.
+export function adminAgents(window: AdminWindow, account?: string | null): Promise<AdminAgentUsage[]> {
+  const q = account ? `&account=${encodeURIComponent(account)}` : "";
+  return request<{ agents: AdminAgentUsage[] }>(`/api/admin/agents?window=${window}${q}`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load agent usage",
+  }).then((r) => r.agents);
+}
+
+export function adminActivity(window: AdminWindow, limit = 50): Promise<AdminActivityItem[]> {
+  return request<{ items: AdminActivityItem[] }>(`/api/admin/activity?window=${window}&limit=${limit}`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load activity",
+  }).then((r) => r.items);
+}
+
+// --- Claude subscription (operator-only) --------------------------------------------------------
+// Whether this account may manage a Claude subscription token, and whether one is stored. The
+// token itself is never readable — `allowed: false` (every non-operator account) means the
+// Settings field doesn't render at all.
+export interface ClaudeSubscriptionStatus {
+  allowed: boolean;
+  configured: boolean;
+}
+
+export function getClaudeSubscription(): Promise<ClaudeSubscriptionStatus> {
+  return request<ClaudeSubscriptionStatus>("/api/claude-subscription", { auth: true, devAuth: true });
+}
+
+export function setClaudeSubscription(token: string): Promise<ClaudeSubscriptionStatus> {
+  return request<ClaudeSubscriptionStatus>("/api/claude-subscription", {
+    method: "PUT",
+    json: { token },
+    auth: true,
+    devAuth: true,
+    errorMessage: "could not save token",
+  });
+}
+
+export function clearClaudeSubscription(): Promise<ClaudeSubscriptionStatus> {
+  return request<ClaudeSubscriptionStatus>("/api/claude-subscription", {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "could not remove token",
   });
 }

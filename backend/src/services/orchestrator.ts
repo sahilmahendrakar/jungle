@@ -570,6 +570,10 @@ export function buildRunnerHooks(): runners.RunnerHooks {
     // on every frame so a client that loads mid-turn still learns the turn's home.
     onAgentEvent: (agentId, turnId, event, context) => {
       void db.insertAgentEvent(agentId, turnId, event).catch((e) => console.error("insertAgentEvent:", e));
+      // A `result` event carries the turn's token counts + the SDK's cost estimate per model —
+      // extract it into agent_usage so spend is aggregatable (the admin view). Idempotent on the
+      // event uuid, and a no-op for every other event type.
+      void db.recordTurnUsage(agentId, turnId, event).catch((e) => console.error("recordTurnUsage:", e));
       broadcastAgentWorkspace(agentId, {
         type: "agent_event",
         agentId,

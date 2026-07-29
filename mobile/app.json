@@ -9,6 +9,9 @@
     "scheme": "jungle",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
+    "runtimeVersion": {
+      "policy": "fingerprint"
+    },
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.jungleagents.jungle",
@@ -66,6 +69,9 @@
         "appId": "1:782624295113:ios:7340c4cdab32e1bfc46518"
       },
       "googleIosClientId": "782624295113-0nbkafjmibkk436ehseeqrr2aodah174.apps.googleusercontent.com"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/4e1a7101-bfb0-40f3-9331-7224eb76fd27"
     }
   }
 }

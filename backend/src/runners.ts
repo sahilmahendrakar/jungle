@@ -494,6 +494,15 @@ async function buildConfigure(agent: db.AgentRow): Promise<ConfigureFrame> {
     provider: resolveProvider(agent.model ?? null),
     systemPromptAppend: "",
   };
+  // Operator subscription auth (migrations/041): if the operator who CREATED this agent has stored
+  // a `claude setup-token` token, bill turns to that subscription instead of the org API key. Only
+  // an allowlisted operator can store one (see subscription.ts), so a hit here is always
+  // authorized. Skipped for routed models — a provider brings its own endpoint + key and takes
+  // precedence, and the runner enforces the same ordering.
+  if (!frame.provider) {
+    const oauthToken = await db.getClaudeOauthTokenForAgent(agent.id);
+    if (oauthToken) frame.subscription = { oauthToken };
+  }
   const blocks: string[] = [];
   for (const row of await db.listAgentIntegrations(agent.id)) {
     const adapter = adapterFor(row.integration_key);

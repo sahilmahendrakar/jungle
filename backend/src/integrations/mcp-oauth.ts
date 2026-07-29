@@ -251,18 +251,18 @@ export function mcpConnection(spec: McpProviderSpec): IntegrationConnection {
   };
 }
 
-// Return a valid access token for a user's connection to this provider, refreshing from the stored
+// Return a valid access token for one connection to this provider, refreshing from the stored
 // refresh token if it's expired/near expiry (mirrors google.ts:getValidGmailToken). Throws if the
-// user isn't connected or the token expired with no refresh token (→ reconnect). A permanently-dead
+// connection is gone or the token expired with no refresh token (→ reconnect). A permanently-dead
 // grant (invalid_grant) flags the connection needs_reconnect; a successful refresh clears it
 // (see migration 027).
-export async function getValidMcpToken(spec: McpProviderSpec, participantId: string): Promise<string> {
-  const row = await db.getIntegrationConnection(participantId, spec.key);
-  if (!row) throw new Error(`participant ${participantId} is not connected to ${spec.key}`);
+export async function getValidMcpToken(spec: McpProviderSpec, connectionId: string): Promise<string> {
+  const row = await db.getIntegrationConnectionById(connectionId);
+  if (!row) throw new Error(`${spec.key} connection ${connectionId} no longer exists`);
   const exp = row.access_expires_at ? new Date(row.access_expires_at).getTime() : Infinity;
   if (exp - Date.now() > 60_000) return row.access_token;
   if (!row.refresh_token) {
-    await db.setIntegrationNeedsReconnect(participantId, spec.key, true);
+    await db.setIntegrationNeedsReconnectById(connectionId, true);
     throw new Error(`${spec.key} token expired and no refresh token; reconnect`);
   }
 
@@ -283,17 +283,15 @@ export async function getValidMcpToken(spec: McpProviderSpec, participantId: str
       ...(clientSecret ? { client_secret: clientSecret } : {}),
     });
   } catch (e) {
-    if (isInvalidGrantError(e)) await db.setIntegrationNeedsReconnect(participantId, spec.key, true);
+    if (isInvalidGrantError(e)) await db.setIntegrationNeedsReconnectById(connectionId, true);
     throw e;
   }
-  await db.updateIntegrationTokens({
-    participantId,
-    key: spec.key,
+  await db.updateIntegrationTokensById(connectionId, {
     accessToken: tok.access_token,
     refreshToken: tok.refresh_token ?? row.refresh_token, // providers often omit it on refresh
     accessExpiresAt: expiryDate(tok.expires_in),
   });
   // Self-heal: a successful refresh proves the grant is alive again.
-  if (row.needs_reconnect) await db.setIntegrationNeedsReconnect(participantId, spec.key, false);
+  if (row.needs_reconnect) await db.setIntegrationNeedsReconnectById(connectionId, false);
   return tok.access_token;
 }

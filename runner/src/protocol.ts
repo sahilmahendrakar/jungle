@@ -299,6 +299,13 @@ export interface ConfigureFrame {
   // Non-Anthropic provider routing for `model`, if any (see ProviderConfig). Absent/null = the
   // model is served by first-party Anthropic using the runner container's ANTHROPIC_API_KEY.
   provider?: ProviderConfig | null;
+  // Operator-supplied Claude subscription (Max/Pro) OAuth token, minted by `claude setup-token`.
+  // When set — and `provider` is null — the runner authenticates the CLI child with
+  // CLAUDE_CODE_OAUTH_TOKEN instead of the container's ANTHROPIC_API_KEY, so turns bill against
+  // that subscription's rate limits rather than the org API key. Gated server-side to an operator
+  // email allowlist (backend/src/subscription.ts); never settable by ordinary users.
+  // `oauthToken` is a secret — never log it.
+  subscription?: { oauthToken: string } | null;
   systemPromptAppend?: string;
   // Git credentials for the agent's repo. `login` is the agent's handle (used for the credential
   // store and the default commit identity). authorName/authorEmail optionally override the commit

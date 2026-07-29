@@ -5,6 +5,7 @@ import * as db from "../../db";
 import * as auth from "../../auth";
 import { wrap, ApiError } from "../errors";
 import { publicParticipant } from "../guards";
+import { isAdminEmail } from "../../admins";
 
 const router = Router();
 
@@ -41,6 +42,8 @@ router.get(
       profile: { uid: u.uid, email: u.email, name: u.name, picture: u.picture },
       memberships,
       suggestedHandle: suggestHandle(u),
+      // Platform operator? Drives the admin entry point in settings; /api/admin/* re-checks.
+      isAdmin: isAdminEmail(u.email),
     };
     res.json(me);
   }),
@@ -71,7 +74,7 @@ router.post(
   wrap(async (req, res) => {
     const u = auth.authedUser(req)!;
     const existing = await db.getParticipantByFirebaseUid(u.uid);
-    if (existing) return res.status(200).json(existing);
+    if (existing) return res.status(200).json(publicParticipant(existing));
     const handle = String(req.body?.handle ?? "").trim();
     const displayName = String(req.body?.displayName ?? "").trim() || u.name || handle;
     if (!HANDLE_RE.test(handle)) {

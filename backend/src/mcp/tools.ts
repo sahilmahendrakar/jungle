@@ -179,6 +179,36 @@ export const JUNGLE_TOOLS: JungleTool[] = [
     },
   },
   {
+    name: "list_connections",
+    description:
+      "List the workspace's connected accounts (Notion workspaces, Gmail/Drive/Calendar, Linear, " +
+      "Granola, X) with their owner and connection id. A person can hold several accounts for one " +
+      "integration, so this is how you find the connectionId to pass to attach_integration.",
+    inputSchema: obj({ key: str('Only this integration key, e.g. "notion" (optional)') }),
+    readOnly: true,
+    handler: async (actor, args) => {
+      const key = String(args.key ?? "").trim();
+      const lines: string[] = [];
+      for (const person of await db.listParticipants(actor.workspace_id)) {
+        if (person.kind === "agent") continue; // connections belong to people, never to agents
+        for (const c of await db.listIntegrationConnections(person.id)) {
+          if (key && c.integration_key !== key) continue;
+          const flag = c.needs_reconnect ? " — NEEDS RECONNECT" : "";
+          lines.push(
+            `${c.integration_key}: ${c.external_account ?? "(unnamed)"} — @${person.handle}, ` +
+              `connectionId ${c.id}${flag}`,
+          );
+        }
+      }
+      if (!lines.length) {
+        return key
+          ? `Nobody in this workspace has connected ${key} yet — a person connects it in Settings → Connections.`
+          : "No connected accounts in this workspace yet.";
+      }
+      return lines.join("\n");
+    },
+  },
+  {
     name: "create_channel",
     description:
       "Create a channel. You are always a member; memberHandles adds others (agents included) at creation.",
@@ -320,12 +350,18 @@ export const JUNGLE_TOOLS: JungleTool[] = [
       'Attach (or reconfigure) an integration on an agent, e.g. key "github" with config ' +
       '{"repo":"owner/name"}. Connection-based integrations (gmail, notion, linear, …) bind to a ' +
       "PERSON'S connected account: yours if you're a human, otherwise the workspace member who " +
-      "connected it (name them with onBehalfOf if more than one has).",
+      "connected it (name them with onBehalfOf if more than one has). To pick a specific account " +
+      'when someone has several, pass config {"connectionId":"…"} from list_connections.',
     inputSchema: obj(
       {
         agent: str('"@handle" or agent id'),
         key: str('Integration key, e.g. "github" or "gmail"'),
-        config: { type: "object", description: "Integration config (per its settings fields)" },
+        config: {
+          type: "object",
+          description:
+            "Integration config (per its settings fields); connectionId picks one specific " +
+            "connected account (see list_connections)",
+        },
         onBehalfOf: str(ON_BEHALF_OF_DESC),
       },
       ["agent", "key"],

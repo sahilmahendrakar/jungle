@@ -4,14 +4,22 @@ import * as auth from "../auth";
 import { ApiError } from "./errors";
 
 // Strip server-only secrets before a participant row leaves the backend. runner_token
-// authenticates an agent's runner socket — it must NEVER reach clients. memory/memory_updated_at
-// aren't secret (GET /api/agents/:id/memory serves them) but the MEMORY.md mirror can be ~12KB
-// per agent — too fat to ride along in every participant list, so they're stripped here too.
+// authenticates an agent's runner socket — it must NEVER reach clients. claude_oauth_token is a
+// long-lived Claude subscription credential (migrations/040) and likewise must never leave the
+// server — not even to the operator who set it (the settings endpoint reports only whether one is
+// configured). Participant reads are `select *`, so both would otherwise ride along in every
+// participant list. memory/memory_updated_at aren't secret (GET /api/agents/:id/memory serves
+// them) but the MEMORY.md mirror can be ~12KB per agent — too fat for every list, so they go too.
 export function publicParticipant<T extends { runner_token?: unknown }>(
   p: T,
-): Omit<T, "runner_token" | "memory" | "memory_updated_at"> {
-  const { runner_token: _secret, memory: _mem, memory_updated_at: _memAt, ...pub } =
-    p as T & { memory?: unknown; memory_updated_at?: unknown };
+): Omit<T, "runner_token" | "claude_oauth_token" | "memory" | "memory_updated_at"> {
+  const {
+    runner_token: _secret,
+    claude_oauth_token: _sub,
+    memory: _mem,
+    memory_updated_at: _memAt,
+    ...pub
+  } = p as T & { claude_oauth_token?: unknown; memory?: unknown; memory_updated_at?: unknown };
   return pub;
 }
 

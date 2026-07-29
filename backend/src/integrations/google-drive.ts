@@ -3,13 +3,13 @@ import * as db from "../db";
 import * as google from "../google";
 import { isInvalidGrantError } from "./oauth";
 import type { IntegrationAdapter } from "./types";
-import { resolveBacking } from "./backing";
+import { resolveConnection } from "./backing";
 
 // Google Drive integration: the agent can search, read, and (with approval) create/update files in
 // a connected Drive via the runner's in-process drive_* MCP tools — structurally like Gmail. The
-// OAuth grant is PER-USER (integration_connections), connected once in Settings; attaching to an
-// agent binds config.backingParticipantId to the connecting user. Uses the same Google OAuth client
-// as Gmail (google.ts) with DRIVE_SCOPES.
+// OAuth grant is PER-USER (integration_connections, possibly several per user), connected once in
+// Settings; attaching to an agent binds config.connectionId to one specific connection. Uses the
+// same Google OAuth client as Gmail (google.ts) with DRIVE_SCOPES.
 
 const KEY = "google-drive";
 
@@ -17,35 +17,33 @@ function requireApprovalOf(config: Record<string, unknown>): boolean {
   return config.requireApproval !== false; // default on
 }
 
-// A valid access token for a user's Drive connection, refreshing from the stored refresh token if
-// near expiry (mirrors google.ts:getValidGmailToken but reads/writes integration_connections).
-// A permanently-dead grant (invalid_grant / no refresh token) flags the connection
-// needs_reconnect; a successful refresh clears it (see migration 027).
-async function getValidDriveToken(participantId: string): Promise<string> {
-  const row = await db.getIntegrationConnection(participantId, KEY);
-  if (!row) throw new Error(`participant ${participantId} has no Google Drive connection`);
+// A valid access token for one Drive connection, refreshing from the stored refresh token if near
+// expiry (mirrors google.ts:getValidGmailToken but reads/writes integration_connections). A
+// permanently-dead grant (invalid_grant / no refresh token) flags the connection needs_reconnect;
+// a successful refresh clears it (see migration 027).
+async function getValidDriveToken(connectionId: string): Promise<string> {
+  const row = await db.getIntegrationConnectionById(connectionId);
+  if (!row) throw new Error(`Drive connection ${connectionId} no longer exists`);
   const exp = row.access_expires_at ? new Date(row.access_expires_at).getTime() : Infinity;
   if (exp - Date.now() > 60_000) return row.access_token;
   if (!row.refresh_token) {
-    await db.setIntegrationNeedsReconnect(participantId, KEY, true);
+    await db.setIntegrationNeedsReconnectById(connectionId, true);
     throw new Error("Drive token expired and no refresh token; reconnect");
   }
   let tok: Awaited<ReturnType<typeof google.googleRefreshToken>>;
   try {
     tok = await google.googleRefreshToken(row.refresh_token);
   } catch (e) {
-    if (isInvalidGrantError(e)) await db.setIntegrationNeedsReconnect(participantId, KEY, true);
+    if (isInvalidGrantError(e)) await db.setIntegrationNeedsReconnectById(connectionId, true);
     throw e;
   }
-  await db.updateIntegrationTokens({
-    participantId,
-    key: KEY,
+  await db.updateIntegrationTokensById(connectionId, {
     accessToken: tok.accessToken,
     refreshToken: tok.refreshToken ?? row.refresh_token,
     accessExpiresAt: tok.accessExpiresAt,
   });
   // Self-heal: a successful refresh proves the grant is alive again.
-  if (row.needs_reconnect) await db.setIntegrationNeedsReconnect(participantId, KEY, false);
+  if (row.needs_reconnect) await db.setIntegrationNeedsReconnectById(connectionId, false);
   return tok.accessToken;
 }
 
@@ -82,34 +80,32 @@ function disconnectedBlock(email: string): string {
 export const googleDriveAdapter: IntegrationAdapter = {
   key: KEY,
 
-  // Bind to the attaching user's Drive connection (like gmail) — 400 if not connected, or to the
-  // person an attaching agent is acting for (backing.ts); a reconfigure keeps the original backing
-  // user. Stores the display email for the agent card.
+  // Bind to one specific Google Drive connection (config.connectionId) — the picker's choice
+  // (rawConfig.connectionId) when given, else the existing binding on reconfigure, else resolved
+  // from the attacher (backing.ts: the human's sole connection, or, when an AGENT is attaching, the
+  // account of the person it's acting for). Stores the display email for the agent card.
   async resolveConfig(ctx, rawConfig): Promise<Record<string, unknown>> {
     const requireApproval = rawConfig.requireApproval !== false && rawConfig.requireApproval !== "false";
-    const existingBacking =
-      typeof ctx.existing?.backingParticipantId === "string" ? ctx.existing.backingParticipantId : null;
-    if (existingBacking) {
-      return { backingParticipantId: existingBacking, email: ctx.existing?.email ?? null, requireApproval };
-    }
-    const { participantId, connection } = await resolveBacking(ctx, {
+    const requestedId = typeof rawConfig.connectionId === "string" ? rawConfig.connectionId : null;
+    const existingId = typeof ctx.existing?.connectionId === "string" ? ctx.existing.connectionId : null;
+    const conn = await resolveConnection(ctx, {
       key: KEY,
       displayName: "Google Drive",
-      lookup: (id) => db.getIntegrationConnection(id, KEY),
+      requestedId: requestedId ?? existingId,
     });
-    return { backingParticipantId: participantId, email: connection.external_account, requireApproval };
+    return { connectionId: conn.id, email: conn.external_account, requireApproval };
   },
 
   async buildGrant(frame: ConfigureFrame, agent, config): Promise<string | null> {
-    const backing = typeof config.backingParticipantId === "string" ? config.backingParticipantId : null;
-    if (!backing || !google.isConfigured()) return null;
+    const connectionId = typeof config.connectionId === "string" ? config.connectionId : null;
+    if (!connectionId || !google.isConfigured()) return null;
     let accessToken: string;
     try {
-      accessToken = await getValidDriveToken(backing);
+      accessToken = await getValidDriveToken(connectionId);
     } catch (e) {
       console.error(`runner[${agent.id}] configure: could not mint Drive token:`, e);
       // Permanently dead or disconnected → tell the agent (see gmail.ts); transient → silent.
-      const row = await db.getIntegrationConnection(backing, KEY).catch(() => null);
+      const row = await db.getIntegrationConnectionById(connectionId).catch(() => null);
       const email = typeof config.email === "string" && config.email ? config.email : "your Drive";
       if (!row || row.needs_reconnect) return disconnectedBlock(email);
       return null;
@@ -121,10 +117,10 @@ export const googleDriveAdapter: IntegrationAdapter = {
   },
 
   async refreshCredentials(agent, config, send): Promise<void> {
-    const backing = typeof config.backingParticipantId === "string" ? config.backingParticipantId : null;
-    if (!backing || !google.isConfigured()) return;
+    const connectionId = typeof config.connectionId === "string" ? config.connectionId : null;
+    if (!connectionId || !google.isConfigured()) return;
     try {
-      const accessToken = await getValidDriveToken(backing);
+      const accessToken = await getValidDriveToken(connectionId);
       send({ type: "integration_credentials", key: KEY, accessToken });
     } catch (e) {
       console.error(`runner[${agent.id}] could not refresh Drive token:`, e);

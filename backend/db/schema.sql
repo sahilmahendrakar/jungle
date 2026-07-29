@@ -89,6 +89,12 @@ alter table participants drop constraint if exists participants_firebase_uid_key
 create unique index if not exists participants_ws_uid_idx
   on participants (workspace_id, firebase_uid) where firebase_uid is not null;
 
+-- Operator-supplied Claude subscription (Max/Pro) OAuth token from `claude setup-token`, set by an
+-- allowlisted operator on their own human participant row. Agents that operator CREATED then
+-- authenticate their CLI child with it instead of the org API key. Server-only — never serialized
+-- to a client (publicParticipant strips it). See migrations/041_claude_subscription.sql.
+alter table participants add column if not exists claude_oauth_token text;
+
 -- Shareable workspace invites: anyone who opens /join/<token> and signs in can join. Revocable
 -- (revoked_at) and optionally expiring (expires_at).
 create table if not exists workspace_invites (
@@ -269,13 +275,15 @@ create table if not exists google_identities (
 );
 
 -- Per-USER OAuth connections for the connection-based integrations (Linear/Notion/Granola via
--- their remote MCP servers, Google Drive). You connect your accounts once in Settings (like
--- github_identities / google_identities); an agent's integration references the connecting user by
--- id (config.backingParticipantId), like the gmail integration. `extra` holds per-provider refresh
--- material. mcp_oauth_clients stores the OAuth client registered (once, via DCR) per remote MCP
--- provider. See migrations/014 + 015_integration_connections_per_user.sql and
--- backend/src/db/connections.ts. MVP: plaintext; encrypt at rest before real multi-tenant.
+-- their remote MCP servers, Google Drive, X, …). You connect accounts once in Settings (like
+-- github_identities / google_identities); an agent's integration binds to one specific connection
+-- by id (config.connectionId). A user can hold several connections for the same integration_key
+-- (e.g. two X accounts) — see migrations/040_multi_integration_connections.sql. `extra` holds
+-- per-provider refresh material. mcp_oauth_clients stores the OAuth client registered (once, via
+-- DCR) per remote MCP provider. See backend/src/db/connections.ts. MVP: plaintext; encrypt at
+-- rest before real multi-tenant.
 create table if not exists integration_connections (
+  id                uuid primary key default gen_random_uuid(),
   participant_id    uuid not null references participants(id) on delete cascade,
   integration_key   text not null,
   external_account  text,
@@ -284,10 +292,13 @@ create table if not exists integration_connections (
   access_expires_at timestamptz,
   scopes            text,
   extra             jsonb not null default '{}'::jsonb,
+  -- True when the refresh grant is permanently dead (invalid_grant) — see migrations/027.
+  needs_reconnect   boolean not null default false,
   created_at        timestamptz not null default now(),
-  updated_at        timestamptz not null default now(),
-  primary key (participant_id, integration_key)
+  updated_at        timestamptz not null default now()
 );
+create index if not exists integration_connections_participant_key_idx
+  on integration_connections (participant_id, integration_key);
 
 create table if not exists mcp_oauth_clients (
   provider_key      text primary key,
@@ -561,3 +572,39 @@ create table if not exists api_tokens (
 );
 create unique index if not exists api_tokens_hash_idx on api_tokens (token_hash);
 create index if not exists api_tokens_participant_idx on api_tokens (participant_id);
+
+-- Usage + spend, extracted from the SDK `result` events runners forward (one row per event per
+-- model). Denormalized labels so history outlives a deleted agent/owner; written by
+-- backend/src/db/usage.ts and read by the operator-only admin view. See migrations/040.
+create table if not exists agent_usage (
+  id                  bigserial primary key,
+  event_uuid          text,                                            -- idempotency key
+  agent_id            uuid references participants(id) on delete set null,
+  agent_handle        text not null,
+  workspace_id        uuid references workspaces(id) on delete set null,
+  owner_id            uuid references participants(id) on delete set null,
+  owner_email         text,
+  owner_name          text,
+  turn_id             text,
+  model               text not null,
+  input_tokens        bigint not null default 0,
+  output_tokens       bigint not null default 0,
+  cache_read_tokens   bigint not null default 0,
+  cache_write_tokens  bigint not null default 0,
+  web_search_requests integer not null default 0,
+  cost_usd            numeric(14, 6) not null default 0,               -- the SDK's own estimate
+  duration_ms         integer,
+  ok                  boolean not null default true,
+  created_at          timestamptz not null default now()
+);
+create unique index if not exists agent_usage_event_model_idx
+  on agent_usage (event_uuid, model) where event_uuid is not null;
+create index if not exists agent_usage_created_idx on agent_usage (created_at desc);
+create index if not exists agent_usage_owner_idx on agent_usage (lower(owner_email), created_at desc);
+create index if not exists agent_usage_agent_idx on agent_usage (agent_id, created_at desc);
+create index if not exists agent_usage_workspace_idx on agent_usage (workspace_id, created_at desc);
+
+-- Who created an agent (usage attribution). Null for humans, and for agents created by an
+-- internal path (the Architect) — those resolve to the workspace admin at read time.
+alter table participants add column if not exists created_by uuid references participants(id) on delete set null;
+create index if not exists participants_created_by_idx on participants (created_by);

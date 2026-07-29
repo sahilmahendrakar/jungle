@@ -148,6 +148,7 @@ export async function ensureLianaAgent(owner: db.Participant): Promise<db.Partic
     runnerProvider: "fly",
     persona: LIANA_PERSONA,
     lianaConductor: true,
+    createdBy: owner.id, // per-user agent — its spend is the owner's
   });
   await db.setLianaAgentId(owner.id, participant.id);
 
@@ -1059,7 +1060,7 @@ export async function disconnectConnection(owner: db.Participant, key: string): 
 // the seat's integrations: `config` = the user-settable values (repo, requireApproval, …) — the
 // live agent_integrations config when attached, else the roster's pending spec, else empty
 // (defaults come from the shared descriptor client-side); `connected` = whether the backing
-// connection is linked. Internal keys (backingParticipantId, email, account) are stripped.
+// connection is linked. Internal keys (connectionId, backingParticipantId, email, account) are stripped.
 export async function workflowIntegrationSettings(
   wf: db.WorkflowRow,
   owner: db.Participant,

@@ -221,6 +221,10 @@ export class Runner {
   // Non-Anthropic provider routing for `model` (from `configure`/`set_model`). null = first-party
   // Anthropic (use the container's ANTHROPIC_API_KEY). Applied to the CLI child env per turn.
   private provider: ProviderConfig | null = null;
+  // Claude subscription (Max/Pro) OAuth token from `configure`. null = bill turns to the
+  // container's ANTHROPIC_API_KEY as usual. Only consulted when `provider` is null — a routed
+  // provider brings its own credentials and wins.
+  private subscriptionToken: string | null = null;
   private permissionMode: PermissionMode = "default";
   // Reasoning effort passed to query(). undefined = let the SDK/CLI use its default (the backend
   // always sends one post-migration, so this is only undefined against an old backend).
@@ -523,6 +527,7 @@ export class Runner {
   private async handleConfigure(frame: ConfigureFrame): Promise<void> {
     this.model = frame.model;
     this.provider = frame.provider ?? null;
+    this.subscriptionToken = frame.subscription?.oauthToken ?? null;
     this.permissionMode = frame.permissionMode;
     this.effort = frame.effort as EffortLevel | undefined;
     this.systemPromptAppend = frame.systemPromptAppend ?? "";
@@ -816,6 +821,13 @@ export class Runner {
     if (this.provider) {
       childEnv.ANTHROPIC_BASE_URL = this.provider.baseUrl;
       childEnv.ANTHROPIC_AUTH_TOKEN = this.provider.authToken;
+      delete childEnv.ANTHROPIC_API_KEY;
+    } else if (this.subscriptionToken) {
+      // Bill this turn to a Claude subscription instead of the org API key. Same deletion rule as
+      // above, and for the same reason: ANTHROPIC_API_KEY outranks CLAUDE_CODE_OAUTH_TOKEN in the
+      // CLI's credential precedence, so leaving it set (even empty) makes the turn fail with
+      // "401 API key is invalid" — verified against the runner image.
+      childEnv.CLAUDE_CODE_OAUTH_TOKEN = this.subscriptionToken;
       delete childEnv.ANTHROPIC_API_KEY;
     }
     const q = query({

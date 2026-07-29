@@ -18,6 +18,7 @@ export function ViewShell({
   onOpenDrawer,
   onExpandSidebar,
   testId,
+  wide = false,
   children,
 }: {
   icon: ReactNode;
@@ -27,6 +28,9 @@ export function ViewShell({
   onOpenDrawer: () => void;
   onExpandSidebar: () => void;
   testId?: string;
+  // Roomier body column for views built around tables (Admin). Default stays the reading width
+  // every other view uses.
+  wide?: boolean;
   children: ReactNode;
 }) {
   return (
@@ -64,7 +68,7 @@ export function ViewShell({
         {actions && <div className="ml-auto flex items-center gap-2">{actions}</div>}
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto w-full max-w-3xl px-4 py-6">{children}</div>
+        <div className={`mx-auto w-full ${wide ? "max-w-5xl" : "max-w-3xl"} px-4 py-6`}>{children}</div>
       </div>
     </main>
   );

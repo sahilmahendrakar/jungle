@@ -58,12 +58,13 @@ claude mcp add --transport http jungle https://api.jungleagents.com/mcp \
   --header "Authorization: Bearer jgl_…"
 ```
 
-Tools (24; read-only ones are annotated `readOnlyHint` and listed in `SAFE_JUNGLE_TOOLS`):
+Tools (25; read-only ones are annotated `readOnlyHint` and listed in `SAFE_JUNGLE_TOOLS`):
 
 | Area | Tools |
 |---|---|
 | Messaging | `send_message`, `read_history` |
 | Channels & people | `list_channels`, `list_participants`, `create_channel`, `add_channel_member`, `remove_channel_member` |
+| Connections | `list_connections` |
 | Agents | `create_agent`, `get_agent`, `update_agent`, `delete_agent`, `attach_integration`, `detach_integration` |
 | Workflows | `list_workflows`, `workflow_list_templates`, `workflow_draft_create`, `workflow_draft_get`, `workflow_draft_set`, `workflow_finalize`, `workflow_run`, `workflow_set_paused` |
 | Schedules | `schedule_create`, `schedule_list`, `schedule_cancel` |
@@ -75,20 +76,31 @@ like a human typing), workflow finalize creates real agents/channels/triggers.
 ### Attaching connection-based integrations as an agent
 
 Gmail, Notion, Linear, Granola, Drive, Calendar and X are built on a **per-person** OAuth grant
-(Settings → Connections, `integration_connections`). Attaching one binds the agent to one person's
-connection — `config.backingParticipantId`.
+(Settings → Connections). Attaching one binds the agent to one specific account —
+`config.connectionId` (a row in `integration_connections`), or `config.backingParticipantId` for
+gmail, whose account is a participant's Google identity. A person can hold several accounts for one
+integration (two Notion workspaces, two X accounts), so `list_connections` lists them with their
+owner and id.
 
-An agent has no Settings page and can never hold a connection itself, so when the actor is an
-agent, `attach_integration` / `create_agent` bind to the person it's acting for
+An agent has no Settings page and can never hold a connection itself, so when the actor is an agent,
+`attach_integration` / `create_agent` bind to the account of the person it's acting for
 (`backend/src/integrations/backing.ts`), resolved in this order:
 
-1. **`onBehalfOf`** — `"@handle"` of a person in the workspace who has connected it.
-2. The **acting agent's own binding** for that same integration, if it has one.
-3. The **only person in the workspace** who has connected it.
+1. **`config.connectionId`** — one specific account, from `list_connections`. Must belong to
+   someone in the agent's workspace.
+2. **`onBehalfOf`** — `"@handle"` of the person whose account to use.
+3. The **acting agent's own binding** for that same integration, if it has one.
+4. The agent's **owner** — `participants.created_by`, walked up to the first human.
+5. The **only person in the workspace** who has connected it.
 
-Zero candidates → "nobody in this workspace has connected X yet" (a person must connect it first).
-Several → the error lists them and asks for `onBehalfOf`. Humans always bind their own connection;
-passing `onBehalfOf` for someone else is a 403.
+Nothing ambiguous is ever picked silently: no candidate → "nobody in this workspace has connected X
+yet" (a person must connect it first); several people → the error lists them and asks for
+`onBehalfOf`; several accounts belonging to the chosen person → the error names them and asks for
+`connectionId`. Humans are unaffected — they bind their own accounts, and passing `onBehalfOf` for
+someone else is a 403.
+
+`create_agent` is all-or-nothing: if an integration can't be resolved, the agent row is rolled back
+rather than left existing-but-unprovisioned.
 
 ## Layering
 

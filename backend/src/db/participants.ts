@@ -6,6 +6,9 @@ import { pool } from "./pool";
 // secret. Strip runner_token (see index.ts publicParticipant) before sending to any client.
 export interface Participant extends ParticipantBase {
   runner_token: string | null; // per-agent runner secret — never reaches clients
+  // Operator-supplied Claude subscription OAuth token (migrations/040). Present on the row because
+  // participant reads are `select *`; stripped by publicParticipant so it never reaches clients.
+  claude_oauth_token: string | null;
 }
 
 // The default workspace (migrations/009_workspaces.sql) — holds all pre-multi-tenancy rows and is
@@ -29,19 +32,20 @@ export async function createParticipant(p: {
   runnerProvider?: string | null;
   persona?: string | null; // creator-written role/personality, injected into the system prompt
   lianaConductor?: boolean; // true = a persistent per-user Liana conductor (compact@40% + suspend)
+  createdBy?: string | null; // the human participant creating this agent (usage attribution)
 }, client?: pg.PoolClient): Promise<Participant> {
   const { rows } = await (client ?? pool).query<Participant>(
     `insert into participants
        (kind, workspace_id, handle, display_name, role, repo, firebase_uid, email, avatar_url,
-        model, mode, runtime, runner_token, runner_provider, persona, liana_conductor)
+        model, mode, runtime, runner_token, runner_provider, persona, liana_conductor, created_by)
      values ($1, $2, $3, $4, coalesce($5, 'member'), $6, $7, $8, $9, $10, coalesce($11, 'default'),
-             coalesce($12, 'sdk'), $13, coalesce($14, 'docker'), $15, coalesce($16, false))
+             coalesce($12, 'sdk'), $13, coalesce($14, 'docker'), $15, coalesce($16, false), $17)
      returning *`,
     [
       p.kind, p.workspaceId, p.handle, p.displayName, p.role ?? null, p.repo ?? null,
       p.firebaseUid ?? null, p.email ?? null, p.avatarUrl ?? null,
       p.model ?? null, p.mode ?? null, p.runtime ?? null, p.runnerToken ?? null,
-      p.runnerProvider ?? null, p.persona ?? null, p.lianaConductor ?? null,
+      p.runnerProvider ?? null, p.persona ?? null, p.lianaConductor ?? null, p.createdBy ?? null,
     ],
   );
   return rows[0];
@@ -270,4 +274,47 @@ export async function getParticipantByHandle(
     [workspaceId, handle],
   );
   return rows[0] ?? null;
+}
+
+// --- Claude subscription token (migrations/040) -------------------------------------------------
+// Set/cleared by an allowlisted operator on their OWN human participant row (see
+// backend/src/subscription.ts for the gate). Because a participant row is per (account, workspace),
+// storing it here scopes the subscription to exactly the workspace it was set in.
+
+export async function setClaudeOauthToken(participantId: string, token: string | null): Promise<void> {
+  await pool.query(`update participants set claude_oauth_token = $2 where id = $1`, [participantId, token]);
+}
+
+// Whether THIS participant has a token stored (drives the settings UI's configured/not state).
+// Returns the boolean only — the token itself never leaves the server.
+export async function hasClaudeOauthToken(participantId: string): Promise<boolean> {
+  const { rows } = await pool.query<{ present: boolean }>(
+    `select claude_oauth_token is not null as present from participants where id = $1`,
+    [participantId],
+  );
+  return rows[0]?.present ?? false;
+}
+
+// The subscription token that applies to an agent: the one stored by the operator who CREATED it
+// (participants.created_by). Scoping to the creator rather than the workspace keeps a personal,
+// per-seat credential from being spent by a workspace co-member's agents. Read by buildConfigure;
+// null means bill turns to the org API key as usual.
+export async function getClaudeOauthTokenForAgent(agentId: string): Promise<string | null> {
+  const { rows } = await pool.query<{ claude_oauth_token: string }>(
+    `select owner.claude_oauth_token
+       from participants agent
+       join participants owner on owner.id = agent.created_by
+      where agent.id = $1 and owner.claude_oauth_token is not null`,
+    [agentId],
+  );
+  return rows[0]?.claude_oauth_token ?? null;
+}
+
+// Agents created by this operator, for re-pushing `configure` after the token changes.
+export async function listAgentIdsCreatedBy(ownerId: string): Promise<string[]> {
+  const { rows } = await pool.query<{ id: string }>(
+    `select id from participants where kind = 'agent' and created_by = $1`,
+    [ownerId],
+  );
+  return rows.map((r) => r.id);
 }

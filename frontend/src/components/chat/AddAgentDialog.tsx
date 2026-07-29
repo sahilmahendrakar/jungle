@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Cloud, MonitorSmartphone } from "lucide-react";
 import { createParticipant, listDevices, listParticipants, type Participant, type RunnerHost } from "../../api";
-import { MODEL_OPTIONS, SDK_MODE_OPTIONS, DEFAULT_SDK_MODE } from "../../lib/chat";
+import { MODEL_OPTIONS, SDK_MODE_OPTIONS, DEFAULT_SDK_MODE, DEFAULT_MODEL_ID } from "../../lib/chat";
 import { randomFreePreset, toKebab } from "../../lib/agent-presets";
 import { avatarClass, initials } from "@/lib/people";
 import { SelectMenu } from "./panels";
@@ -71,7 +71,7 @@ export function AddAgentDialog({
   const [handleTouched, setHandleTouched] = useState(false);
   const [integrations, setIntegrations] = useState<IntegrationDraft[]>([]);
   const [agPersona, setAgPersona] = useState("");
-  const [agModel, setAgModel] = useState(MODEL_OPTIONS[0].id);
+  const [agModel, setAgModel] = useState(DEFAULT_MODEL_ID);
   const [agMode, setAgMode] = useState(DEFAULT_SDK_MODE); // new agents are sdk runtime
   const [addingAgent, setAddingAgent] = useState(false);
   // Environment: "cloud" (default) or `self:<hostId>` for one of the account's registered devices.
@@ -87,7 +87,12 @@ export function AddAgentDialog({
     // back to the global defaults on first use). A saved self-host env is validated against the
     // devices that still exist once they load — a since-removed device falls back to Cloud.
     const defaults = loadAgentDefaults();
-    setAgModel(MODEL_OPTIONS.some((o) => o.id === defaults.model) ? defaults.model! : MODEL_OPTIONS[0].id);
+    // A remembered model that's since been upgrade-gated falls back to the default.
+    setAgModel(
+      MODEL_OPTIONS.some((o) => o.id === defaults.model && !o.disabled)
+        ? defaults.model!
+        : DEFAULT_MODEL_ID,
+    );
     setAgMode(SDK_MODE_OPTIONS.some((o) => o.id === defaults.mode) ? defaults.mode! : DEFAULT_SDK_MODE);
     const wantEnv = defaults.env ?? "cloud";
     listDevices()

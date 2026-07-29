@@ -1,11 +1,11 @@
 // Agent-initiated attach of a connection-based integration (integrations/backing.ts).
 //
 // The bug this pins: an agent using the jungle-admin MCP tools (or an agent-bound API token) could
-// never attach notion/gmail/linear/… — resolveConfig looked for a connection on the ACTOR, and an
-// agent has no Settings page and never holds one, so it always failed with "connect your Notion
-// account in Settings first" no matter how many times the human reconnected. Now the attach binds
-// to the person the agent is acting for, and a failed attach during create_agent no longer strands
-// a half-created agent.
+// never attach notion/gmail/linear/… — resolveConfig required the connection to belong to the
+// ACTOR, and an agent has no Settings page and never holds one, so the attach always failed with
+// "connect your Notion account in Settings first" no matter how many times the human reconnected.
+// Now it binds to the account of the person the agent is acting for, and a failed attach during
+// create_agent no longer strands a half-created agent.
 //
 // Everything runs in a throwaway workspace (POST /api/_dev/workspaces) so the "who in this
 // workspace has connected it" resolution can't be perturbed by real connections in the dev DB.
@@ -19,7 +19,7 @@ const sfx = Date.now().toString(36);
 const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
 
 let pass = false;
-let wsId, aliceId, bobId, archId, targetId, tokenId, madeHandle;
+let wsId, aliceId, bobId, archId, targetId, tokenId, humanTokenId, madeHandle;
 
 const post = (path, body) =>
   fetch(BASE + path, {
@@ -46,39 +46,38 @@ const assert = (cond, msg) => {
   console.log(`ok: ${msg}`);
 };
 
-const addAgent = async (handle) =>
+const addAgent = async (handle, createdBy = null) =>
   (
     await pool.query(
-      `insert into participants (kind, workspace_id, handle, display_name, runtime)
-       values ('agent', $1, $2, $3, 'sdk') returning id`,
-      [wsId, handle, handle],
+      `insert into participants (kind, workspace_id, handle, display_name, runtime, created_by)
+       values ('agent', $1, $2, $3, 'sdk', $4) returning id`,
+      [wsId, handle, handle, createdBy],
     )
   ).rows[0].id;
 
 // A stand-in for "this person connected Notion in Settings" — the tokens are never used here, only
-// the row's existence is. Delete-then-insert rather than an upsert: this has to work whatever the
-// table is keyed on.
-async function connectNotion(participantId) {
-  await pool.query(`delete from integration_connections where participant_id = $1 and integration_key = 'notion'`, [
-    participantId,
-  ]);
-  await pool.query(
-    `insert into integration_connections
-       (participant_id, integration_key, external_account, access_token, refresh_token, extra)
-     values ($1, 'notion', 'Notion · Test Workspace', 'fake-access', 'fake-refresh', '{}'::jsonb)`,
-    [participantId],
-  );
-}
+// the row's existence. Returns the connection id, which is what an attach now binds to.
+const connectNotion = async (participantId, workspaceName) =>
+  (
+    await pool.query(
+      `insert into integration_connections
+         (participant_id, integration_key, external_account, access_token, refresh_token, extra)
+       values ($1, 'notion', $2, 'fake-access', 'fake-refresh', '{}'::jsonb) returning id`,
+      [participantId, `Notion · ${workspaceName}`],
+    )
+  ).rows[0].id;
 
-const backingOf = async (agentId) =>
+const boundTo = async (agentId) =>
   (
     await pool.query(`select config from agent_integrations where agent_id = $1 and integration_key = 'notion'`, [
       agentId,
     ])
-  ).rows[0]?.config?.backingParticipantId ?? null;
+  ).rows[0]?.config?.connectionId ?? null;
+
+const detach = (token, agentHandle) => call(token, "detach_integration", { agent: agentHandle, key: "notion" });
 
 try {
-  // -- a throwaway workspace: alice (its creator) + bob, one acting agent, one target agent --
+  // -- a throwaway workspace: alice (its creator) + bob; an acting agent alice made, and a target --
   const ws = await post("/api/_dev/workspaces", { name: `attach-${sfx}`, handle: `alice${sfx}` });
   wsId = ws.workspace?.id;
   aliceId = ws.participant?.id;
@@ -90,8 +89,10 @@ try {
       [wsId, `bob${sfx}`],
     )
   ).rows[0].id;
-  archId = await addAgent(`arch${sfx}`);
-  targetId = await addAgent(`target${sfx}`);
+  const arch = `@arch${sfx}`;
+  const target = `@target${sfx}`;
+  archId = await addAgent(`arch${sfx}`, aliceId); // created_by alice — she owns it
+  targetId = await addAgent(`target${sfx}`, aliceId);
 
   const mint = await post(`/api/tokens?participantId=${aliceId}`, { name: `attach e2e ${sfx}`, participantId: archId });
   tokenId = mint.id;
@@ -99,43 +100,79 @@ try {
   assert(agentToken?.startsWith("jgl_"), "minted an agent-bound token for the acting agent");
 
   // -- nobody has connected Notion: a precise error, not "connect your Notion account" --
-  const none = await call(agentToken, "attach_integration", { agent: `@target${sfx}`, key: "notion" });
+  const none = await call(agentToken, "attach_integration", { agent: target, key: "notion" });
   assert(none.isError, "attach fails while nobody in the workspace has connected Notion");
   assert(
     none.text.includes("nobody in this workspace has connected Notion") && !none.text.includes("connect your Notion"),
     "the error names the real problem instead of telling the agent to open Settings",
   );
 
-  // -- one connected person: the attach binds to them --
-  await connectNotion(aliceId);
-  const one = await call(agentToken, "attach_integration", { agent: `@target${sfx}`, key: "notion" });
+  // -- one connected person: the attach binds to their account --
+  const aliceCrm = await connectNotion(aliceId, "CRM");
+  const one = await call(agentToken, "attach_integration", { agent: target, key: "notion" });
   assert(!one.isError, `agent attaches Notion once a person has connected it (${one.text})`);
-  assert((await backingOf(targetId)) === aliceId, "it is backed by the connected person's account");
+  assert((await boundTo(targetId)) === aliceCrm, "it is bound to that person's connection");
 
-  // -- two connected people: ambiguous, so the caller must say who --
-  await call(agentToken, "detach_integration", { agent: `@target${sfx}`, key: "notion" });
-  await connectNotion(bobId);
-  const many = await call(agentToken, "attach_integration", { agent: `@target${sfx}`, key: "notion" });
-  assert(many.isError, "attach fails when several people have connected Notion");
+  // -- two people connected: the agent's OWNER (participants.created_by) wins, no ambiguity --
+  await detach(agentToken, target);
+  const bobCrm = await connectNotion(bobId, "Bob's notes");
+  const owned = await call(agentToken, "attach_integration", { agent: target, key: "notion" });
+  assert(!owned.isError, `two people connected, but the acting agent's owner settles it (${owned.text})`);
+  assert((await boundTo(targetId)) === aliceCrm, "…bound to the owner's connection, not the other person's");
+
+  // -- an agent with no recorded creator (made before created_by existed) must ask --
+  await detach(agentToken, target);
+  await pool.query(`update participants set created_by = null where id = $1`, [archId]);
+  const many = await call(agentToken, "attach_integration", { agent: target, key: "notion" });
+  assert(many.isError, "an ownerless agent can't guess between two connected people");
   assert(
     many.text.includes(`@alice${sfx}`) && many.text.includes(`@bob${sfx}`) && many.text.includes("onBehalfOf"),
     "the error lists the candidates and how to choose one",
   );
 
-  const named = await call(agentToken, "attach_integration", {
-    agent: `@target${sfx}`,
-    key: "notion",
-    onBehalfOf: `@bob${sfx}`,
-  });
+  const named = await call(agentToken, "attach_integration", { agent: target, key: "notion", onBehalfOf: `@bob${sfx}` });
   assert(!named.isError, `onBehalfOf resolves the ambiguity (${named.text})`);
-  assert((await backingOf(targetId)) === bobId, "it is backed by the named person's account");
+  assert((await boundTo(targetId)) === bobCrm, "it is bound to the named person's connection");
 
-  const asAgent = await call(agentToken, "attach_integration", {
-    agent: `@target${sfx}`,
-    key: "notion",
-    onBehalfOf: `@arch${sfx}`,
-  });
+  const asAgent = await call(agentToken, "attach_integration", { agent: target, key: "notion", onBehalfOf: arch });
   assert(asAgent.isError && asAgent.text.includes("must be a person"), "onBehalfOf rejects an agent");
+
+  // -- one person, several Notion workspaces (what #102 made possible): name the connection --
+  const aliceSide = await connectNotion(aliceId, "Side project");
+  await detach(agentToken, target);
+  const twoOfHers = await call(agentToken, "attach_integration", {
+    agent: target,
+    key: "notion",
+    onBehalfOf: `@alice${sfx}`,
+  });
+  assert(twoOfHers.isError, "attach fails when the chosen person has several Notion workspaces");
+  assert(
+    twoOfHers.text.includes("Side project") && twoOfHers.text.includes("connectionId"),
+    "the error names the accounts and points at connectionId",
+  );
+
+  const listed = await call(agentToken, "list_connections", { key: "notion" });
+  assert(!listed.isError, "list_connections works");
+  assert(
+    listed.text.includes(aliceSide) && listed.text.includes(bobCrm) && listed.text.includes(`@alice${sfx}`),
+    "list_connections shows each connection's id and owner, so connectionId is discoverable",
+  );
+
+  const byId = await call(agentToken, "attach_integration", {
+    agent: target,
+    key: "notion",
+    config: { connectionId: aliceSide },
+  });
+  assert(!byId.isError, `an explicit connectionId picks one specific workspace (${byId.text})`);
+  assert((await boundTo(targetId)) === aliceSide, "…and that is what gets bound");
+
+  await detach(agentToken, target);
+  const bogus = await call(agentToken, "attach_integration", {
+    agent: target,
+    key: "notion",
+    config: { connectionId: "00000000-0000-0000-0000-000000000000" },
+  });
+  assert(bogus.isError, "a connectionId that belongs to nobody here is rejected");
 
   // -- create_agent: a failing integration must not strand a half-created agent --
   madeHandle = `made${sfx}`;
@@ -155,29 +192,37 @@ try {
     handle: madeHandle,
     displayName: "Made By An Agent",
     integrations: [{ key: "notion", config: {} }],
-    onBehalfOf: `@alice${sfx}`,
+    onBehalfOf: `@bob${sfx}`,
   });
   assert(!made.isError, `create_agent attaches the integration when told whose account to use (${made.text})`);
   const madeId = made.text.match(/id ([0-9a-f-]{36})/)?.[1];
-  assert((await backingOf(madeId)) === aliceId, "the new agent's Notion is backed by the named person");
+  assert((await boundTo(madeId)) === bobCrm, "the new agent is bound to the named person's connection");
   await call(agentToken, "delete_agent", { agent: `@${madeHandle}` });
   madeHandle = null;
 
-  // -- a human still binds their own account, and can't borrow someone else's --
+  // -- humans are unchanged: own accounts only, and the picker still asks when they hold several --
   const humanMint = await post(`/api/tokens?participantId=${aliceId}`, { name: `attach e2e human ${sfx}` });
+  humanTokenId = humanMint.id;
   const humanToken = humanMint.token;
-  await call(agentToken, "detach_integration", { agent: `@target${sfx}`, key: "notion" });
-  const mine = await call(humanToken, "attach_integration", { agent: `@target${sfx}`, key: "notion" });
-  assert(!mine.isError, "a human attaching Notion still binds their own connection");
-  assert((await backingOf(targetId)) === aliceId, "…to their own account");
-  await call(agentToken, "detach_integration", { agent: `@target${sfx}`, key: "notion" });
-  const theirs = await call(humanToken, "attach_integration", {
-    agent: `@target${sfx}`,
+  const hers = await call(humanToken, "attach_integration", { agent: target, key: "notion" });
+  assert(
+    hers.isError && hers.text.includes("choose which Notion account"),
+    "a human with two Notion workspaces is still asked to choose",
+  );
+  const herPick = await call(humanToken, "attach_integration", {
+    agent: target,
     key: "notion",
-    onBehalfOf: `@bob${sfx}`,
+    config: { connectionId: aliceCrm },
   });
-  assert(theirs.isError && theirs.text.includes("your own connected accounts"), "a human can't bind someone else's");
-  await pool.query(`delete from api_tokens where id = $1`, [humanMint.id]);
+  assert(!herPick.isError, "…and binds the one she picks");
+  assert((await boundTo(targetId)) === aliceCrm, "…to her own account");
+  await detach(agentToken, target);
+  const theirs = await call(humanToken, "attach_integration", {
+    agent: target,
+    key: "notion",
+    config: { connectionId: bobCrm },
+  });
+  assert(theirs.isError, "a human cannot bind someone else's connection");
 
   pass = true;
 } catch (e) {
@@ -187,7 +232,9 @@ try {
     if (madeHandle && wsId) {
       await pool.query(`delete from participants where workspace_id = $1 and handle = $2`, [wsId, madeHandle]);
     }
-    if (tokenId) await pool.query("delete from api_tokens where id = $1", [tokenId]);
+    for (const id of [tokenId, humanTokenId]) {
+      if (id) await pool.query("delete from api_tokens where id = $1", [id]);
+    }
     // participants cascade to their integration connections / agent integrations.
     if (wsId) {
       await pool.query("delete from participants where workspace_id = $1", [wsId]);

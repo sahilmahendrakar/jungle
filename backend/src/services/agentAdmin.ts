@@ -4,6 +4,7 @@ import {
   isAllowedModel,
   isSdkMode,
   getIntegrationType,
+  DEFAULT_AGENT_MODE,
   PERSONA_MAX_LENGTH,
 } from "@jungle/shared";
 import { providerConfigured } from "../providers";
@@ -97,7 +98,7 @@ export async function createAgentAs(
   if (model && !providerConfigured(model)) {
     throw new ApiError(400, `model unavailable: ${model}'s provider API key is not configured`);
   }
-  const mode = input.mode ? String(input.mode) : "default";
+  const mode = input.mode ? String(input.mode) : DEFAULT_AGENT_MODE;
   if (!isSdkMode(mode)) throw new ApiError(400, `unsupported mode: ${mode}`);
   const integrations = validateIntegrations(input.integrations);
   const runnerToken = randomBytes(32).toString("hex");
@@ -123,7 +124,7 @@ export async function createAgentAs(
     if (count >= cap) throw new ApiError(409, `this workspace has reached its agent limit (${cap})`);
     return db.createParticipant({
       kind: "agent", workspaceId: actor.workspace_id, handle, displayName, runtime: "sdk", runnerToken,
-      model, mode, runnerProvider, persona,
+      model, mode, runnerProvider, persona, createdBy: actor.id,
     }, client);
   });
   // Bind the agent to its device before provisioning reads runner_meta.hostId.

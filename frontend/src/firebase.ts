@@ -3,6 +3,7 @@ import {
   getAuth,
   GoogleAuthProvider,
   signInWithPopup,
+  signInWithEmailAndPassword,
   signOut,
   onIdTokenChanged,
   type Auth,
@@ -32,6 +33,13 @@ const provider = new GoogleAuthProvider();
 export function signInWithGoogle() {
   if (!auth) throw new Error("firebase auth not configured");
   return signInWithPopup(auth, provider);
+}
+
+// Email/password sign-in, alongside Google — a login path that doesn't depend on a third-party
+// provider (and the one Apple's reviewers use, since Google blocks OAuth from datacenter IPs).
+export function signInWithEmail(email: string, password: string) {
+  if (!auth) throw new Error("firebase auth not configured");
+  return signInWithEmailAndPassword(auth, email.trim(), password);
 }
 
 export function signOutUser() {

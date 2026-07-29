@@ -16,10 +16,12 @@ import workflowsRouter from "./http/routes/workflows";
 import workfeedRouter from "./http/routes/workfeed";
 import devicesRouter from "./http/routes/devices";
 import pushRouter from "./http/routes/push";
+import adminRouter from "./http/routes/admin";
 import llmRouter from "./http/routes/llm";
 import { slackEventsRouter, slackRouter } from "./http/routes/slack";
 import { lianaEventsRouter, lianaRouter } from "./http/routes/liana";
 import tokensRouter from "./http/routes/tokens";
+import subscriptionRouter from "./http/routes/subscription";
 import mcpRouter from "./mcp/server";
 
 // Build the Express app: global middleware, the per-domain routers, and the terminal error
@@ -71,9 +73,11 @@ export function createApp(): express.Express {
   app.use(workfeedRouter);
   app.use(devicesRouter);
   app.use(pushRouter);
+  app.use(adminRouter); // operator-only platform usage/spend (see admins.ts)
   app.use(slackRouter);
   app.use(lianaRouter);
   app.use(tokensRouter);
+  app.use(subscriptionRouter);
   app.use(mcpRouter);
 
   app.use(errorHandler);

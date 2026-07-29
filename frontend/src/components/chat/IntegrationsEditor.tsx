@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ChevronDown, Loader2, Plus, Search, X } from "lucide-react";
 import {
   INTEGRATION_TYPES,
@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { SelectMenu } from "./panels";
 import { cn } from "@/lib/utils";
 
 export interface IntegrationDraft {
@@ -56,6 +57,9 @@ export function integrationFingerprint(entry: IntegrationDraft): string {
   }
   const apKey = type ? approvalKey(type) : null;
   if (apKey) parts.push(`${apKey}=${approvalOn(entry.config[apKey])}`);
+  // Multi-account integrations (X, Notion): which connection backs this agent is user-editable
+  // via the picker, so it has to count toward the dirty check like any other typed field.
+  if (type?.allowMultiple) parts.push(`connectionId=${String(entry.config.connectionId ?? "").trim()}`);
   return parts.join("\0");
 }
 
@@ -77,6 +81,9 @@ export function validateIntegrations(list: IntegrationDraft[], connections: Conn
     const conn = connType ? connections.byKey[connType.key] : undefined;
     if (conn && !conn.connected && connectionRequired(type)) {
       return `${type.name}: connect your ${conn.name} account first (or remove the integration).`;
+    }
+    if (type.allowMultiple && conn && conn.accounts.length > 1 && !String(entry.config.connectionId ?? "").trim()) {
+      return `${type.name}: choose which account this agent should use.`;
     }
     for (const f of type.configFields) {
       if (!String(entry.config[f.key] ?? "").trim()) return `${type.name}: ${f.label} is required.`;
@@ -109,7 +116,12 @@ function rowSummary(
   if (type.key === "github") {
     return config.repo ? { text: config.repo, warn: false } : { text: "Choose a repository", warn: true };
   }
-  const account = config.email || conn?.account || "";
+  // Multi-account integrations show the SPECIFIC chosen account, not just "some connected
+  // account" — conn.account is arbitrary once a user has more than one.
+  const chosenAccount = type.allowMultiple
+    ? conn?.accounts.find((a) => a.id === config.connectionId)?.externalAccount
+    : null;
+  const account = config.email || chosenAccount || conn?.account || "";
   const key = approvalKey(type);
   const approval = key ? (approvalOn(config[key]) ? "asks before changes" : "acts without asking") : "";
   const parts = [account, approval].filter(Boolean);
@@ -198,6 +210,16 @@ function IntegrationRow({
   const apKey = approvalKey(type);
   const connecting = conn ? connections.connecting === conn.key : false;
 
+  // Multi-account integrations (X, Notion): default the picker to an actual account as soon as
+  // one exists, so what's displayed always matches what would be saved — otherwise the dropdown
+  // could visually show an account that config.connectionId doesn't actually carry yet.
+  useEffect(() => {
+    if (type.allowMultiple && conn?.connected && !config.connectionId && conn.accounts.length > 0) {
+      onChange({ ...config, connectionId: conn.accounts[0].id });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [type.allowMultiple, conn?.connected, conn?.accounts.length, config.connectionId]);
+
   return (
     <div
       className={cn("overflow-hidden rounded-lg border bg-card", expanded && "ring-1 ring-primary/20")}
@@ -268,12 +290,47 @@ function IntegrationRow({
           ) : (
             <>
               {conn?.connected && type.configFields.length === 0 && (
-                <p className="text-[11px] text-muted-foreground">
-                  Using{" "}
-                  <span className="font-medium text-foreground">
-                    {config.email || conn.account || `your ${conn.name}`}
-                  </span>
-                </p>
+                type.allowMultiple ? (
+                  <div className="space-y-1.5">
+                    <Label className="text-xs text-muted-foreground">Account</Label>
+                    {conn.accounts.length > 1 ? (
+                      <SelectMenu
+                        value={config.connectionId ?? ""}
+                        onChange={(v) => onChange({ ...config, connectionId: v })}
+                        options={conn.accounts.map((a) => ({
+                          id: a.id,
+                          label: (a.externalAccount || "Connected account") + (a.needsReconnect ? " (needs reconnect)" : ""),
+                        }))}
+                        testId={`${type.key}-connection-picker`}
+                      />
+                    ) : (
+                      <p className="text-[11px] text-muted-foreground">
+                        Using{" "}
+                        <span className="font-medium text-foreground">
+                          {conn.accounts[0]?.externalAccount || `your ${conn.name}`}
+                        </span>
+                      </p>
+                    )}
+                    <Button
+                      type="button"
+                      variant="link"
+                      size="sm"
+                      className="h-auto p-0 text-[11px]"
+                      disabled={connecting}
+                      data-testid={`integration-connect-another-${type.key}`}
+                      onClick={() => void connections.connectAdditional(conn.key)}
+                    >
+                      + Connect another {conn.name} account
+                    </Button>
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-muted-foreground">
+                    Using{" "}
+                    <span className="font-medium text-foreground">
+                      {config.email || conn.account || `your ${conn.name}`}
+                    </span>
+                  </p>
+                )
               )}
               {/* Soft nudge (github): usable without the user's link, but connecting unlocks
                   the searchable repo picker. */}

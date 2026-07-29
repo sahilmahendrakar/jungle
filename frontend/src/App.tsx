@@ -38,6 +38,7 @@ import {
 import { notify, setAppBadge } from "./lib/notifications";
 import { SignIn } from "./SignIn";
 import { SettingsPanel } from "./Settings";
+import { Admin } from "./Admin";
 import { Scheduled } from "./Scheduled";
 import { Approvals } from "./Approvals";
 import { ActivityView } from "./Activity";
@@ -197,6 +198,9 @@ export function App({
   const agentsOpen = path === "/agents" || path === "/team";
   const environmentsOpen = path === "/environments";
   const linkOpen = path === "/link";
+  // Operator-only platform usage/spend. Routed like any other main-column view; the backend
+  // re-checks the allowlist, so a non-operator who lands here just sees the error card.
+  const adminOpen = path === "/admin";
   const overlayViewOpen =
     homeOpen ||
     activityOpen ||
@@ -208,7 +212,8 @@ export function App({
     deliverablesOpen ||
     agentsOpen ||
     environmentsOpen ||
-    linkOpen;
+    linkOpen ||
+    adminOpen;
   // Reading "am I on an overlay view" from long-lived callbacks without re-binding them.
   const overlayViewRef = useRef(false);
   overlayViewRef.current = overlayViewOpen;
@@ -1214,6 +1219,12 @@ export function App({
       ) : environmentsOpen ? (
         <Environments
           workspaceId={workspaceId ?? null}
+          sidebarOpen={sidebarOpen}
+          onOpenDrawer={() => setDrawerOpen(true)}
+          onExpandSidebar={() => setSidebarOpen(true)}
+        />
+      ) : adminOpen ? (
+        <Admin
           sidebarOpen={sidebarOpen}
           onOpenDrawer={() => setDrawerOpen(true)}
           onExpandSidebar={() => setSidebarOpen(true)}

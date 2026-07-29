@@ -8,13 +8,14 @@ import type {
   ConnectionStartCtx,
   IntegrationAdapter,
 } from "./types";
-import { resolveBacking } from "./backing";
+import { resolveConnection } from "./backing";
 
 // X (Twitter) integration: the agent can read activity on a connected X account — recent tweets,
 // mentions, replies, notifications — via the runner's in-process x_* MCP tools. Connection-based
-// (per-user OAuth 2.0 PKCE User Context grant stored in integration_connections, key "x"); the
-// per-agent config holds only which participant's connection backs it and the @handle for display.
-// Read-only by design (Basic API tier), so there are no write tools and nothing to approve.
+// (per-user OAuth 2.0 PKCE User Context grant stored in integration_connections, key "x"); a user
+// may hold several X connections, so the per-agent config names which one backs it
+// (config.connectionId) plus the @handle for display. Read-only by design (Basic API tier), so
+// there are no write tools and nothing to approve.
 //
 // X has no hosted MCP server, so unlike Linear/Notion this is NOT a remote-MCP integration — it's
 // an in-process server (like Gmail/Drive). The token is minted server-side per drain and pushed to
@@ -91,12 +92,12 @@ async function fetchMyUser(accessToken: string): Promise<{ id: string; name: str
   return json.data;
 }
 
-// A valid access token for a user's X connection, refreshing from the stored refresh token if it's
-// expired/near expiry (mirrors google-drive.ts:getValidDriveToken). Throws if the user isn't
-// connected or the token expired with no refresh token (→ reconnect).
-async function getValidXToken(participantId: string): Promise<string> {
-  const row = await db.getIntegrationConnection(participantId, KEY);
-  if (!row) throw new Error(`participant ${participantId} has no X connection`);
+// A valid access token for one X connection, refreshing from the stored refresh token if it's
+// expired/near expiry (mirrors google-drive.ts:getValidDriveToken). Throws if the connection is
+// gone or the token expired with no refresh token (→ reconnect).
+async function getValidXToken(connectionId: string): Promise<string> {
+  const row = await db.getIntegrationConnectionById(connectionId);
+  if (!row) throw new Error(`X connection ${connectionId} no longer exists`);
   const exp = row.access_expires_at ? new Date(row.access_expires_at).getTime() : Infinity;
   if (exp - Date.now() > 60_000) return row.access_token;
   if (!row.refresh_token) throw new Error("X token expired and no refresh token; reconnect");
@@ -105,9 +106,7 @@ async function getValidXToken(participantId: string): Promise<string> {
     refresh_token: row.refresh_token,
   });
   if (!tok.access_token) throw new Error("x oauth: refresh returned no access_token");
-  await db.updateIntegrationTokens({
-    participantId,
-    key: KEY,
+  await db.updateIntegrationTokensById(connectionId, {
     accessToken: tok.access_token,
     // X returns a new refresh_token on each refresh; fall back to the stored one if omitted.
     refreshToken: tok.refresh_token ?? row.refresh_token,
@@ -118,8 +117,8 @@ async function getValidXToken(participantId: string): Promise<string> {
 
 function parseXConfig(config: Record<string, unknown>): XIntegrationConfig | null {
   const c = config as Partial<XIntegrationConfig>;
-  if (typeof c.backingParticipantId !== "string" || typeof c.account !== "string") return null;
-  return { backingParticipantId: c.backingParticipantId, account: c.account };
+  if (typeof c.connectionId !== "string" || typeof c.account !== "string") return null;
+  return { connectionId: c.connectionId, account: c.account };
 }
 
 function promptBlock(account: string): string {
@@ -137,32 +136,30 @@ function promptBlock(account: string): string {
 export const xAdapter: IntegrationAdapter = {
   key: KEY,
 
-  // Bind to the attaching user's X connection (like Google Drive) — 400 if not connected, or to
-  // the person an attaching agent is acting for (backing.ts); a reconfigure keeps the original
-  // backing user. Stores the @handle for the agent card.
+  // Bind to one specific X connection (config.connectionId) — the picker's choice
+  // (rawConfig.connectionId) when given, else the existing binding on reconfigure, else resolved
+  // from the attacher (backing.ts: the human's sole connection, or, when an AGENT is attaching, the
+  // account of the person it's acting for). Stores the @handle for the agent card.
   async resolveConfig(ctx, rawConfig): Promise<Record<string, unknown>> {
-    const existingBacking =
-      typeof ctx.existing?.backingParticipantId === "string" ? ctx.existing.backingParticipantId : null;
-    if (existingBacking) {
-      return { backingParticipantId: existingBacking, account: ctx.existing?.account ?? null };
-    }
-    const { participantId, connection } = await resolveBacking(ctx, {
+    const requestedId = typeof rawConfig.connectionId === "string" ? rawConfig.connectionId : null;
+    const existingId = typeof ctx.existing?.connectionId === "string" ? ctx.existing.connectionId : null;
+    const conn = await resolveConnection(ctx, {
       key: KEY,
       displayName: "X",
-      lookup: (id) => db.getIntegrationConnection(id, KEY),
+      requestedId: requestedId ?? existingId,
     });
-    return { backingParticipantId: participantId, account: connection.external_account };
+    return { connectionId: conn.id, account: conn.external_account };
   },
 
   // Mint the X token up front so the prompt only advertises x_* tools when the connection is
-  // actually usable (e.g. not when the backing user disconnected) — otherwise the agent would see
-  // x_* instructions with no tools behind them.
+  // actually usable (e.g. not when it was disconnected) — otherwise the agent would see x_*
+  // instructions with no tools behind them.
   async buildGrant(frame: ConfigureFrame, agent, config): Promise<string | null> {
     const x = parseXConfig(config);
     if (!x || !isConfigured()) return null;
     let accessToken: string;
     try {
-      accessToken = await getValidXToken(x.backingParticipantId);
+      accessToken = await getValidXToken(x.connectionId);
     } catch (e) {
       console.error(`runner[${agent.id}] configure: could not mint X token:`, e);
       return null;
@@ -176,7 +173,7 @@ export const xAdapter: IntegrationAdapter = {
     const x = parseXConfig(config);
     if (!x || !isConfigured()) return;
     try {
-      const accessToken = await getValidXToken(x.backingParticipantId);
+      const accessToken = await getValidXToken(x.connectionId);
       send({ type: "integration_credentials", key: KEY, accessToken });
     } catch (e) {
       console.error(`runner[${agent.id}] could not refresh X token:`, e);

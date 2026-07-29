@@ -16,6 +16,7 @@ import {
   auth,
   firebaseEnabled,
   onIdTokenChanged,
+  signInWithEmail,
   signInWithGoogleCredential,
   signOutUser,
   type User,
@@ -36,6 +37,7 @@ interface AuthCtx {
   signingIn: boolean;
   refreshMe: () => Promise<void>;
   signIn: () => Promise<void>;
+  signInEmail: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
   getToken: () => Promise<string | null>; // fresh ID token (for the WebSocket handshake)
 }
@@ -127,6 +129,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [promptAsync]);
 
+  // Email/password sign-in. onIdTokenChanged does the rest; errors propagate so the form can show
+  // them (firebase throws auth/invalid-credential for a wrong password or unknown address).
+  const signInEmail = useCallback(async (email: string, password: string) => {
+    if (!firebaseEnabled) throw new Error("firebase not configured");
+    setSigningIn(true);
+    try {
+      await signInWithEmail(email, password);
+    } finally {
+      setSigningIn(false);
+    }
+  }, []);
+
   const signOut = useCallback(async () => {
     await unregisterPush().catch(() => {});
     await signOutUser();
@@ -134,7 +148,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <Ctx.Provider value={{ user, ready, me, signingIn, refreshMe, signIn, signOut, getToken }}>
+    <Ctx.Provider
+      value={{ user, ready, me, signingIn, refreshMe, signIn, signInEmail, signOut, getToken }}
+    >
       {children}
     </Ctx.Provider>
   );

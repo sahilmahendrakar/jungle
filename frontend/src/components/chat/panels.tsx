@@ -10,6 +10,7 @@ import {
   Compass,
   FileText,
   FoldVertical,
+  Lock,
   MonitorSmartphone,
   Plus,
   Server,
@@ -53,6 +54,7 @@ import {
   snippet,
   INLINE_IMAGE_MIMES,
   MODEL_OPTIONS,
+  DEFAULT_MODEL_ID,
   sdkModeOptionsFor,
   STATUS_DOT,
   STATUS_LABEL,
@@ -139,6 +141,9 @@ export function AttachmentList({ attachments }: { attachments: Attachment[] }) {
 
 // A shadcn-styled single-select built on the DropdownMenu primitive (portal=false so it
 // works inside dialogs). Shows the current option's label; lists options with an optional hint.
+// An option may be individually `disabled` (grayed + unselectable, with `disabledHint` shown as
+// a tooltip and inline note) — used for upgrade-gated models. We don't use the primitive's own
+// `disabled` prop because it kills pointer events, and with it the tooltip.
 export function SelectMenu({
   value,
   onChange,
@@ -148,7 +153,7 @@ export function SelectMenu({
 }: {
   value: string;
   onChange: (v: string) => void;
-  options: { id: string; label: ReactNode; hint?: string }[];
+  options: { id: string; label: ReactNode; hint?: string; disabled?: boolean; disabledHint?: string }[];
   testId?: string;
   disabled?: boolean;
 }) {
@@ -171,20 +176,42 @@ export function SelectMenu({
         collisionPadding={8}
         className="w-[var(--radix-dropdown-menu-trigger-width)] max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto"
       >
-        {options.map((o) => (
-          <DropdownMenuItem
-            key={o.id}
-            data-testid={testId ? `${testId}-option` : undefined}
-            onClick={() => onChange(o.id)}
-            className="flex items-center justify-between gap-3"
-          >
-            <span className="flex flex-col">
-              <span>{o.label}</span>
-              {o.hint && <span className="text-xs text-muted-foreground">{o.hint}</span>}
-            </span>
-            {o.id === value && <Check className="size-4 shrink-0" />}
-          </DropdownMenuItem>
-        ))}
+        {options.map((o) => {
+          const item = (
+            <DropdownMenuItem
+              key={o.id}
+              data-testid={testId ? `${testId}-option` : undefined}
+              data-locked={o.disabled ? "" : undefined}
+              // Keep the menu open and the value unchanged when a gated option is clicked.
+              onSelect={(e) => (o.disabled ? e.preventDefault() : onChange(o.id))}
+              className={cn(
+                "flex items-center justify-between gap-3",
+                o.disabled && "cursor-not-allowed opacity-50 focus:bg-transparent",
+              )}
+            >
+              <span className="flex flex-col">
+                <span>{o.label}</span>
+                {(o.disabled ? o.disabledHint : o.hint) && (
+                  <span className="text-xs text-muted-foreground">
+                    {o.disabled ? o.disabledHint : o.hint}
+                  </span>
+                )}
+              </span>
+              {o.disabled ? (
+                <Lock className="size-3.5 shrink-0 text-muted-foreground" />
+              ) : (
+                o.id === value && <Check className="size-4 shrink-0" />
+              )}
+            </DropdownMenuItem>
+          );
+          if (!o.disabled || !o.disabledHint) return item;
+          return (
+            <Tooltip key={o.id}>
+              <TooltipTrigger asChild>{item}</TooltipTrigger>
+              <TooltipContent side="right">{o.disabledHint}</TooltipContent>
+            </Tooltip>
+          );
+        })}
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -255,7 +282,7 @@ export function ParticipantProfilePanel({
   const [name, setName] = useState(person.display_name);
   const [persona, setPersona] = useState(person.persona ?? "");
   const [mode, setMode] = useState(person.mode ?? "default");
-  const [model, setModel] = useState(person.model ?? MODEL_OPTIONS[0].id);
+  const [model, setModel] = useState(person.model ?? DEFAULT_MODEL_ID);
   const [effort, setEffort] = useState(person.effort ?? EFFORT_OPTIONS[1].id);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -352,7 +379,7 @@ export function ParticipantProfilePanel({
     name.trim() !== person.display_name ||
     persona.trim() !== (person.persona ?? "") ||
     mode !== (person.mode ?? "default") ||
-    model !== (person.model ?? MODEL_OPTIONS[0].id) ||
+    model !== (person.model ?? DEFAULT_MODEL_ID) ||
     effort !== (person.effort ?? EFFORT_OPTIONS[1].id) ||
     integrationsFingerprint(integrations) !== integrationsFingerprint(origIntegrations);
 

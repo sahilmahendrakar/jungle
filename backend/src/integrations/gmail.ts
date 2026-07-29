@@ -2,7 +2,7 @@ import type { ConfigureFrame, GmailIntegrationConfig } from "@jungle/shared";
 import * as db from "../db";
 import * as google from "../google";
 import type { IntegrationAdapter } from "./types";
-import { resolveBacking } from "./backing";
+import { resolveBackingParticipant } from "./backing";
 
 // Gmail integration: the agent can read/search/send/label a connected ("creator") mailbox via the
 // runner's in-process gmail_* MCP tools. Connection-based — the config stores no secrets, only
@@ -66,8 +66,7 @@ export const gmailAdapter: IntegrationAdapter = {
     if (existing) {
       return { backingParticipantId: existing.backingParticipantId, email: existing.email, requireSendApproval };
     }
-    const { participantId, connection } = await resolveBacking(ctx, {
-      key: "gmail",
+    const { participantId, connection } = await resolveBackingParticipant(ctx, {
       displayName: "Google",
       lookup: (id) => db.getGoogleIdentity(id),
     });

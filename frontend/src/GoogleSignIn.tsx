@@ -1,9 +1,23 @@
-import { useState } from "react";
+import { useState, type FormEvent } from "react";
 import { useAuth } from "./auth";
 import { navigate } from "./route";
 import { Fireflies } from "./Fireflies";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Bot, GitPullRequest, Zap } from "lucide-react";
+
+// Firebase collapses wrong-password and unknown-email into auth/invalid-credential on purpose
+// (account enumeration), so those share one message.
+function friendlyError(e: unknown): string {
+  const code = String((e as { code?: string })?.code ?? "");
+  if (/invalid-credential|wrong-password|user-not-found/.test(code)) {
+    return "That email or password isn't right.";
+  }
+  if (code.includes("invalid-email")) return "That doesn't look like an email address.";
+  if (code.includes("too-many-requests")) return "Too many attempts. Try again in a few minutes.";
+  if (code.includes("operation-not-allowed")) return "Email sign-in isn't enabled for this project.";
+  return String((e as Error)?.message ?? e);
+}
 
 function GoogleMark() {
   return (
@@ -35,9 +49,11 @@ const FEATURES = [
 ];
 
 export function GoogleSignIn() {
-  const { signIn } = useAuth();
+  const { signIn, signInEmail } = useAuth();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
 
   async function go() {
     setError("");
@@ -48,6 +64,19 @@ export function GoogleSignIn() {
       const msg = String((e as Error).message ?? e);
       // Don't shout about the user simply closing the Google popup.
       if (!/popup-closed|cancelled-popup|popup_closed/i.test(msg)) setError(msg);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function goEmail(e: FormEvent) {
+    e.preventDefault();
+    setError("");
+    setBusy(true);
+    try {
+      await signInEmail(email, password);
+    } catch (err) {
+      setError(friendlyError(err));
     } finally {
       setBusy(false);
     }
@@ -113,6 +142,42 @@ export function GoogleSignIn() {
             <GoogleMark />
             {busy ? "Opening Google…" : "Continue with Google"}
           </Button>
+
+          <div className="my-6 flex items-center gap-3">
+            <div className="h-px flex-1 bg-border" />
+            <span className="text-xs text-muted-foreground">or</span>
+            <div className="h-px flex-1 bg-border" />
+          </div>
+
+          <form onSubmit={goEmail} className="space-y-3">
+            <Input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="Email"
+              autoComplete="username"
+              disabled={busy}
+              data-testid="email-signin-email"
+            />
+            <Input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Password"
+              autoComplete="current-password"
+              disabled={busy}
+              data-testid="email-signin-password"
+            />
+            <Button
+              type="submit"
+              size="lg"
+              className="w-full text-base font-medium"
+              disabled={busy || !email.trim() || !password}
+              data-testid="email-signin-submit"
+            >
+              Sign in
+            </Button>
+          </form>
 
           <p className="mt-6 text-center text-xs text-muted-foreground">
             By continuing you agree to let Jungle act on your behalf for the agents you create.
