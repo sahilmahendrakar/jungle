@@ -33,10 +33,14 @@ export function popupClosePage(result: PopupResult): string {
     </style>
   </head>
   <body>
-    <main><h1>${heading}</h1><p>${detail}</p></main>
+    <main><h1>${heading}</h1><p>${detail}</p>${
+      result.status === "error" ? `<p><button onclick="window.close()">Close</button></p>` : ""
+    }</main>
     <script>
       try { window.opener && window.opener.postMessage(${payload}, "*"); } catch (e) {}
-      setTimeout(function () { window.close(); }, 300);
+      // Only a SUCCESSFUL flow self-closes. Auto-closing an error made every failed connect look
+      // like "the popup blinked and nothing happened" — the reason has to stay readable.
+      ${result.status === "connected" ? 'setTimeout(function () { window.close(); }, 300);' : ""}
     </script>
   </body>
 </html>`;

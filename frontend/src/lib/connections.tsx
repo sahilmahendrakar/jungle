@@ -427,7 +427,11 @@ export function useConnections(enabled = true): ConnectionsApi {
           const [gh, google, ints, intConns] = await fetchAll();
           if (alive.current) setState(assemble(gh, google, ints, intConns));
           const c = assemble(gh, google, ints, intConns).find((x) => x.key === key);
-          return c?.connected ?? false;
+          // A reconnect starts from connected-but-dead (needsReconnect), so `connected` alone is
+          // already true — polling it would "succeed" on the first tick, ~1.5s after the popup
+          // opened, and abandon the flow before the user had even picked their account. Done here
+          // means a LIVE grant: connected AND no longer needing a reconnect.
+          return (c?.connected ?? false) && !c?.needsReconnect;
         });
         await refresh();
         return ok;

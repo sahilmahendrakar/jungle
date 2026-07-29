@@ -46,28 +46,45 @@ router.post(
     if (!p) return res.status(409).json({ error: "finish onboarding first" });
     const state = randomBytes(16).toString("hex");
     trackOAuthState(state, p.id, req.body?.popup === true);
+    console.log(`google oauth: begin connect for participant ${p.id} (popup=${req.body?.popup === true})`);
     res.json({ url: google.authorizeUrl(state) });
   }),
 );
 
 // Step 2: Google redirects back here with ?code & ?state. Exchange + store the identity.
+// Every exit path logs: a failed (re)connect is otherwise invisible — the popup page closes
+// itself, so the only record of *why* it failed is here.
 router.get("/auth/google/callback", async (req, res) => {
   const state = (req.query.state as string | undefined) || "";
   const pending = pendingOAuth.get(state);
+  const fail = (reason: string, status = 200) => {
+    console.error(`google oauth callback failed: ${reason}`);
+    if (pending?.popup) return res.send(popupClosePage({ connection: "google", status: "error", reason }));
+    if (!pending) return res.status(status).send(reason);
+    res.redirect(`${FRONTEND_URL}/settings?google=error&reason=${encodeURIComponent(reason)}`);
+  };
   try {
     const code = (req.query.code as string | undefined) || "";
-    if (!code || !pending) return res.status(400).send("invalid or expired OAuth state");
+    // Google reports a refused consent by redirecting HERE with ?error (access_denied,
+    // admin_policy_enforced, …) and no code — surface its reason instead of blaming our state.
+    const denied = (req.query.error as string | undefined) || "";
+    if (denied) {
+      const detail = (req.query.error_description as string | undefined) || "";
+      return fail(`Google refused the authorization: ${denied}${detail ? ` — ${detail}` : ""}`);
+    }
+    if (!code) return fail("Google returned no authorization code", 400);
+    // `pendingOAuth` is in-memory, so a backend restart mid-flow invalidates the round-trip.
+    if (!pending) return fail("invalid or expired OAuth state", 400);
     pendingOAuth.delete(state);
     const { email } = await google.exchangeCodeAndStore(pending.participantId, code);
+    console.log(`google oauth: connected ${email} for participant ${pending.participantId}`);
     if (pending.popup) {
       return res.send(popupClosePage({ connection: "google", status: "connected", account: email }));
     }
     // Back to the SPA, which reads ?google=connected to refresh the Connections section.
     res.redirect(`${FRONTEND_URL}/settings?google=connected&email=${encodeURIComponent(email)}`);
   } catch (e) {
-    const reason = String((e as Error).message ?? e);
-    if (pending?.popup) return res.send(popupClosePage({ connection: "google", status: "error", reason }));
-    res.redirect(`${FRONTEND_URL}/settings?google=error&reason=${encodeURIComponent(reason)}`);
+    fail(String((e as Error).message ?? e));
   }
 });
 
