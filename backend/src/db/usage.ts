@@ -9,6 +9,7 @@ import type {
   AdminTotals,
   AdminWindow,
 } from "@jungle/shared";
+import { providerForModelId } from "@jungle/shared";
 import { pool } from "./pool";
 
 // Usage + spend: writing one agent_usage row per (SDK result event, model), and the aggregate
@@ -114,21 +115,28 @@ export async function recordTurnUsage(
   if (!models.length) return 0;
 
   // The labels we freeze onto each row (the agent and its creator can both be deleted later).
+  // `subscription` rides along: whether this turn was billed to the creator's own Claude
+  // subscription rather than the org API key, which is what makes the spend cap able to exclude it
+  // (see migrations/043_spend_limits.sql). Read as "does the owner have a token now" — the runner
+  // resolves it the same way at configure time, so the two agree except across a token change
+  // mid-session, which is not worth a second source of truth.
   const { rows: ctx } = await pool.query<{
     handle: string;
     workspace_id: string;
     owner_id: string | null;
     owner_email: string | null;
     owner_name: string | null;
+    subscription: boolean;
   }>(
     // Owner = the recorded creator, else the workspace's admin (earliest human): agents created
     // by a workflow's Architect or by an internal path have no creator, and their spend still has
     // to land on somebody. Same rule the 040 backfill used.
     `select a.handle, a.workspace_id, o.id as owner_id, o.email as owner_email,
-            o.display_name as owner_name
+            o.display_name as owner_name,
+            o.claude_oauth_token is not null as subscription
        from participants a
        left join lateral (
-         select h.id, h.email, h.display_name
+         select h.id, h.email, h.display_name, h.claude_oauth_token
            from participants h
           where h.id = a.created_by
              or (a.created_by is null and h.workspace_id = a.workspace_id and h.kind = 'human')
@@ -141,9 +149,13 @@ export async function recordTurnUsage(
   if (!ctx.length) return 0; // agent deleted mid-turn
   const c = ctx[0];
 
-  const cols = 17;
+  const cols = 19;
   const values: unknown[] = [];
   const tuples = models.map(([model, mu], i) => {
+    // Which provider's key this model's share of the turn was billed to, and whether it went to
+    // the creator's personal subscription instead. Both are what the daily spend cap reads; a
+    // model we can't classify records a null provider and counts against no cap.
+    const provider = providerForModelId(model);
     values.push(
       e.uuid ?? null,
       agentId,
@@ -154,6 +166,10 @@ export async function recordTurnUsage(
       c.owner_name,
       turnId,
       model,
+      provider,
+      // Routed providers bring their own endpoint + key, so a subscription token never applies to
+      // them — the runner enforces the same precedence when it builds the CLI child env.
+      provider === "anthropic" && c.subscription,
       Math.round(num(mu?.inputTokens)),
       Math.round(num(mu?.outputTokens)),
       Math.round(num(mu?.cacheReadInputTokens)),
@@ -170,8 +186,8 @@ export async function recordTurnUsage(
   const { rowCount } = await pool.query(
     `insert into agent_usage
        (event_uuid, agent_id, agent_handle, workspace_id, owner_id, owner_email, owner_name,
-        turn_id, model, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-        web_search_requests, cost_usd, duration_ms, ok)
+        turn_id, model, provider, subscription, input_tokens, output_tokens, cache_read_tokens,
+        cache_write_tokens, web_search_requests, cost_usd, duration_ms, ok)
      values ${tuples.join(", ")}
      on conflict do nothing`,
     values,

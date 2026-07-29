@@ -4,6 +4,7 @@ export * from "./ws-events.js";
 export * from "./runner-protocol.js";
 export * from "./host-protocol.js";
 export * from "./constants.js";
+export * from "./spend.js";
 export * from "./integrations.js";
 export * from "./schedules.js";
 export * from "./workflows.js";

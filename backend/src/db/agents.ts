@@ -205,6 +205,20 @@ export async function latestConsumedContext(agentId: string): Promise<DispatchCo
   return rows[0]?.context ?? null;
 }
 
+// The dispatch context of the work an agent has QUEUED but not yet run — where a reply would have
+// landed. Mirrors latestConsumedContext for the not-yet-consumed side: last-enqueued wins, so a
+// notice about held-back work (e.g. the spend cap) speaks in the place the person most recently
+// invoked the agent from.
+export async function pendingDispatchContext(agentId: string): Promise<DispatchContext | null> {
+  const { rows } = await pool.query<{ context: DispatchContext }>(
+    `select context from agent_inbox
+     where agent_id = $1 and delivered_at is null and context is not null
+     order by created_at desc limit 1`,
+    [agentId],
+  );
+  return rows[0]?.context ?? null;
+}
+
 // The dispatch context of a turn's inbox batch (the runner's `turn_started` names the items).
 // Last-enqueued non-null context wins, matching latestConsumedContext's semantics.
 export async function contextForInboxIds(

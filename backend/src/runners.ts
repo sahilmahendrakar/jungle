@@ -9,6 +9,7 @@ import type {
   AgentStatus,
   PermissionMode,
   AgentServiceInfo,
+  SpendBlock,
 } from "@jungle/shared";
 import { isSdkMode, catalogEntry } from "@jungle/shared";
 import { resolveProvider } from "./providers";
@@ -17,6 +18,7 @@ import { signedPath } from "./attachments";
 import { provisionerFor } from "./provisioner";
 import * as hostcontrol from "./hostcontrol";
 import { adapterFor } from "./integrations";
+import * as spend from "./services/spend";
 
 export type { AgentStatus };
 
@@ -160,9 +162,28 @@ export interface RunnerHooks {
   onTurnFinished?: (agentId: string, turnId: string, ok: boolean, error?: string) => void;
   // The agent's live status changed (see AgentStatus). Backend broadcasts it to app sockets.
   onStatusChanged: (agentId: string, status: AgentStatus) => void;
+  // Queued work was held back because the owning account is over its daily spend cap. Tell the
+  // people who invoked the agent, in whatever surface they invoked it from — otherwise the agent
+  // just goes quiet and looks broken. Fired at most once per agent per cap period.
+  onSpendBlocked?: (agentId: string, block: SpendBlock) => void;
 }
 
 let hooks: RunnerHooks | null = null;
+
+// Agents already told about the cap, and for which period (the UTC-day key of the block's reset
+// time). Keyed by agent so the map is bounded by agent count, and re-arms on its own when the
+// period rolls over — no timers, and a backend restart just re-notifies once.
+const spendNotified = new Map<string, string>();
+
+function noteSpendBlocked(agentId: string, block: SpendBlock): void {
+  const period = block.resetAt.slice(0, 10);
+  if (spendNotified.get(agentId) === period) return;
+  spendNotified.set(agentId, period);
+  console.warn(
+    `runner[${agentId}] spend cap: ${block.provider} $${block.spentUsd.toFixed(2)}/$${block.limitUsd.toFixed(2)} — holding queued work until ${block.resetAt}`,
+  );
+  hooks?.onSpendBlocked?.(agentId, block);
+}
 
 // --- Permission mode mapping (protocol §"Permission modes") ---
 
@@ -582,10 +603,22 @@ export async function drain(agentId: string): Promise<void> {
         : {}),
     }));
   if (!items.length) return;
+  const agent = await db.getAgentRow(agentId);
+  // Daily spend cap (services/spend.ts). This is the choke point every trigger path funnels
+  // through — mention, DM, schedule, workflow step, Liana surface — so gating here can't be
+  // bypassed by a new dispatch site. Blocked work STAYS PENDING rather than being dropped: the
+  // same durable-inbox semantics as an offline agent, so it drains on the next trigger once the
+  // period rolls over at 00:00 UTC. The user is told why (once per day) via onSpendBlocked.
+  if (agent) {
+    const block = await spend.blockedFor(agent);
+    if (block) {
+      noteSpendBlocked(agentId, block);
+      return;
+    }
+  }
   // Push fresh integration credentials before the work so a long-lived runner never begins a turn
   // with an expired token. Ordered before `enqueue` so the runner applies them before the turn
   // (and any git/gmail/… ops in it) starts.
-  const agent = await db.getAgentRow(agentId);
   if (agent) await refreshCredentials(conn, agent);
   for (const it of items) conn.sentInbox.add(it.inboxId);
   send(conn, { type: "enqueue", items });
@@ -617,6 +650,16 @@ async function sweepOnce(): Promise<void> {
       const selfHosted = agent.runner_provider === "self_hosted";
       try {
         if (conn) {
+          // Spend-cap heal: work we held back on a CONNECTED runner has nothing to re-trigger it
+          // (drain only runs on a new dispatch or a fresh `hello`), so once the period resets it
+          // would sit until someone spoke again. Re-drain here instead. Scoped to agents we
+          // actually blocked so the common sweep stays query-free. Deliberately falls THROUGH when
+          // still capped, so the idle-stop below can put a held agent's machine to sleep — the one
+          // thing that should still happen while it isn't allowed to run turns.
+          if (spendNotified.has(agent.id) && !(await spend.blockedFor(agent))) {
+            spendNotified.delete(agent.id);
+            await drain(agent.id);
+          }
           // Self-hosted: keep the runner child alive while the device is online (no idle-stop) —
           // it's cheap when idle on the user's own machine, and killing/respawning it would add
           // session-resume latency to every message. The child stops when the device disconnects.
@@ -634,7 +677,10 @@ async function sweepOnce(): Promise<void> {
               conn.contextPercent >= compactAt &&
               idleFor >= COMPACT_IDLE_MS &&
               !autoCompactFired.has(agent.id) &&
-              (await db.pendingInbox(agent.id)).length === 0
+              (await db.pendingInbox(agent.id)).length === 0 &&
+              // A compaction is itself a billed turn, so it waits for the cap too. Safe to defer:
+              // context can't grow while the agent isn't running turns.
+              !(await spend.blockedFor(agent))
             ) {
               autoCompactFired.add(agent.id);
               compact(agent.id);
@@ -656,6 +702,15 @@ async function sweepOnce(): Promise<void> {
           if (selfHosted && !hostcontrol.isAgentDeviceOnline(agent.id)) continue;
           if (machine.get(agent.id)?.kind === "starting") continue;
           if ((await db.pendingInbox(agent.id)).length === 0) continue;
+          // Don't boot a machine for work the spend cap won't let run — that's pure cost for a
+          // runner that would connect, drain nothing, and idle-stop again. The queued work is
+          // picked up by the next drain after the period rolls over.
+          const block = await spend.blockedFor(agent);
+          if (block) {
+            noteSpendBlocked(agent.id, block);
+            continue;
+          }
+          spendNotified.delete(agent.id);
           await provisionerFor(agent).start(agent.id);
           noteProvisionerStart(agent.id);
         }

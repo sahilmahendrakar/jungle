@@ -6,6 +6,8 @@
 // models routed to a non-Anthropic provider (GLM/kimi via z.ai) the SDK prices them at
 // Anthropic-ish rates, so those rows read high relative to what the provider actually bills.
 
+import type { ModelProvider } from "./constants.js";
+
 // The lookback every admin query is scoped to.
 export type AdminWindow = "24h" | "7d" | "30d" | "all";
 
@@ -95,6 +97,31 @@ export interface AdminAgentUsage {
   tokens: AdminTokens;
   costUsd: number;
   lastActiveAt: string | null;
+}
+
+// --- Spend caps (operator-editable) -------------------------------------------------------------
+
+// One provider's cap for one account, plus what's been spent against it today. `limitUsd` is the
+// EFFECTIVE limit: the per-account override when there is one, else the platform default — with
+// `isDefault` saying which, so the UI can show "default" instead of a value the operator never set.
+// `limitUsd: null` = uncapped (either the default is uncapped, or an operator set it to unlimited).
+export interface AdminProviderLimit {
+  provider: ModelProvider;
+  limitUsd: number | null;
+  isDefault: boolean;
+  spentUsd: number; // billed to our keys today (UTC day); subscription-billed turns excluded
+  blocked: boolean; // spentUsd >= limitUsd — this account's agents on this provider won't start
+  updatedAt: string | null; // when an operator last set the override
+  updatedByEmail: string | null;
+}
+
+// Every provider's cap for one account. Always carries a row per provider in MODEL_PROVIDERS, so
+// the editor renders the same shape whether or not overrides exist.
+export interface AdminAccountLimits {
+  accountKey: string;
+  // ISO — 00:00 UTC tomorrow, when today's spend resets. Echoed so the UI needn't recompute it.
+  resetAt: string;
+  providers: AdminProviderLimit[];
 }
 
 // A single recent turn, newest first — the "activity" tail of the admin view.

@@ -1,3 +1,4 @@
+import { SUPPORT_EMAIL, spendBlockedNotice, type SpendBlock } from "@jungle/shared";
 import * as db from "../db";
 import type { PersistedMessage } from "../db";
 import * as att from "../attachments";
@@ -184,6 +185,35 @@ export async function triggerMentionedAgents(
     }
   } catch (e) {
     console.error("triggerMentionedAgents:", e);
+  }
+}
+
+// Tell the people waiting on an agent that its account is over the daily spend cap, in the place
+// they invoked it from — the channel/thread for a Jungle dispatch, the originating surface for a
+// Liana one (Slack/Telegram/iMessage). Fired once per agent per period by runners.noteSpendBlocked.
+//
+// Posted as the AGENT (cascadeBudget 0, so a notice can never trigger another agent — which would
+// be the one turn we're refusing to run). A dispatch with no surface at all — a workflow's internal
+// kickoff, say — has nobody to tell, so it only logs; the admin view is where that shows up.
+async function announceSpendBlocked(agentId: string, block: SpendBlock): Promise<void> {
+  try {
+    const ctx = await db.pendingDispatchContext(agentId);
+    const body = spendBlockedNotice(block, SUPPORT_EMAIL);
+    if (ctx?.lianaSurface) {
+      await liana.deliverToLianaSurface(ctx.lianaSurface, body);
+      return;
+    }
+    if (!ctx?.channelId) return;
+    const msg = await db.persistMessage({
+      channelId: ctx.channelId,
+      senderId: agentId,
+      body,
+      cascadeBudget: 0,
+      threadRootId: ctx.threadRootId ?? null,
+    });
+    await fanOut(ctx.channelId, { type: "message", message: att.withUrls(msg) });
+  } catch (e) {
+    console.error("announceSpendBlocked:", e);
   }
 }
 
@@ -632,6 +662,11 @@ export function buildRunnerHooks(): runners.RunnerHooks {
     // The agent's live status changed -> broadcast to its workspace so every client's dot updates.
     onStatusChanged: (agentId, status) => {
       broadcastAgentWorkspace(agentId, { type: "agent_status_changed", agentId, status });
+    },
+    // The account is over its daily spend cap and the agent's work is being held -> say so where
+    // the person invoked it, instead of leaving them staring at an agent that never replies.
+    onSpendBlocked: (agentId, block) => {
+      void announceSpendBlocked(agentId, block);
     },
   };
 }

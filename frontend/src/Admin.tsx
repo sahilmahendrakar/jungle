@@ -1,14 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
 import { ChevronRight, Loader2, ShieldCheck } from "lucide-react";
+import { PROVIDER_LABEL } from "@jungle/shared";
 import {
   adminAccounts,
   adminActivity,
   adminAgents,
+  adminLimits,
   adminOverview,
+  setAdminLimit,
   type AdminAccount,
+  type AdminAccountLimits,
   type AdminActivityItem,
   type AdminAgentUsage,
   type AdminOverview,
+  type AdminProviderLimit,
   type AdminWindow,
 } from "./api";
 import { fmtRelative, fmtTokens } from "./lib/chat";
@@ -186,6 +191,166 @@ function AgentRows({ agents }: { agents: AdminAgentUsage[] }) {
   );
 }
 
+// --- spend caps ---------------------------------------------------------------------------
+
+// One provider's daily cap for one account: today's spend against it, an editable dollar amount,
+// and a way back to the platform default.
+//
+// The input holds a STRING, not a number, so a half-typed "1." or a cleared field stays exactly
+// what the operator typed instead of being normalized mid-keystroke. It's parsed on save. An empty
+// field means unlimited — spelled out in the placeholder, because "blank = no limit" is otherwise
+// the kind of guess nobody should have to make about a spend control.
+function LimitRow({
+  limit,
+  onSave,
+}: {
+  limit: AdminProviderLimit;
+  onSave: (limitUsd: number | null, reset: boolean) => Promise<void>;
+}) {
+  const stored = limit.limitUsd == null ? "" : String(limit.limitUsd);
+  const [draft, setDraft] = useState(stored);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  // Re-sync when the server's value changes under us (a save elsewhere, or a reset).
+  useEffect(() => {
+    setDraft(stored);
+  }, [stored]);
+
+  const parsed = draft.trim() === "" ? null : Number(draft);
+  const invalid = parsed != null && (!Number.isFinite(parsed) || parsed < 0);
+  const dirty = draft.trim() !== stored.trim();
+
+  async function run(fn: () => Promise<void>) {
+    setBusy(true);
+    setErr(null);
+    try {
+      await fn();
+    } catch (e) {
+      setErr(String((e as Error).message));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 py-1.5">
+      <span className="w-20 shrink-0 text-xs font-medium">{PROVIDER_LABEL[limit.provider]}</span>
+      <span
+        className={cn(
+          "w-32 shrink-0 text-xs tabular-nums",
+          limit.blocked ? "font-medium text-destructive" : "text-muted-foreground",
+        )}
+      >
+        {usd(limit.spentUsd)} today
+        {limit.limitUsd != null && ` / ${usd(limit.limitUsd)}`}
+      </span>
+      <span className="text-xs text-muted-foreground">$</span>
+      <input
+        type="text"
+        inputMode="decimal"
+        value={draft}
+        disabled={busy}
+        onChange={(e) => setDraft(e.target.value)}
+        placeholder="unlimited"
+        data-testid={`admin-limit-${limit.provider}`}
+        aria-label={`${PROVIDER_LABEL[limit.provider]} daily limit in USD`}
+        className="h-7 w-24 rounded-md border bg-background px-2 text-xs tabular-nums outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
+      />
+      <span className="text-xs text-muted-foreground">/ day</span>
+      <Button
+        size="sm"
+        variant="secondary"
+        className="h-7 px-2 text-xs"
+        disabled={busy || invalid || !dirty}
+        onClick={() => void run(() => onSave(parsed, false))}
+      >
+        {busy ? <Loader2 className="size-3.5 animate-spin" /> : "Save"}
+      </Button>
+      {!limit.isDefault && (
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-7 px-2 text-xs text-muted-foreground"
+          disabled={busy}
+          onClick={() => void run(() => onSave(null, true))}
+        >
+          Use default
+        </Button>
+      )}
+      {limit.isDefault && <span className="text-[11px] text-muted-foreground">default</span>}
+      {limit.blocked && (
+        <span className="text-[11px] font-medium text-destructive">
+          over limit — turns are held
+        </span>
+      )}
+      {invalid && <span className="text-[11px] text-destructive">must be a number ≥ 0</span>}
+      {err && <span className="text-[11px] text-destructive">{err}</span>}
+    </div>
+  );
+}
+
+// The spend-cap block inside an expanded account row. Loads with the row; every save returns the
+// account's full updated caps, so the displayed spend/blocked state stays server-authoritative
+// rather than being patched locally.
+function AccountLimits({ accountKey }: { accountKey: string }) {
+  const [limits, setLimits] = useState<AdminAccountLimits | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    setError(null);
+    adminLimits(accountKey)
+      .then((l) => live && setLimits(l))
+      .catch((e) => live && setError(String((e as Error).message)));
+    return () => {
+      live = false;
+    };
+  }, [accountKey]);
+
+  if (error) return <div className="px-4 py-2 text-xs text-destructive">{error}</div>;
+  if (!limits) {
+    return (
+      <div className="flex items-center gap-2 px-4 py-2 text-xs text-muted-foreground">
+        <Loader2 className="size-3.5 animate-spin" /> Loading limits…
+      </div>
+    );
+  }
+
+  const resetsIn = new Date(limits.resetAt).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: "UTC",
+  });
+
+  return (
+    <div className="border-b px-4 py-3">
+      <div className="flex items-baseline justify-between gap-3">
+        <h4 className="text-xs font-medium">Daily spend limits</h4>
+        <span className="text-[11px] text-muted-foreground">
+          resets {resetsIn} UTC · blank = unlimited
+        </span>
+      </div>
+      <div className="mt-1 divide-y">
+        {limits.providers.map((p) => (
+          <LimitRow
+            key={p.provider}
+            limit={p}
+            onSave={(limitUsd, reset) =>
+              setAdminLimit(accountKey, p.provider, limitUsd, reset).then(setLimits)
+            }
+          />
+        ))}
+      </div>
+      <p className="mt-2 text-[11px] text-muted-foreground">
+        Over the limit, this account's agents hold queued work instead of starting turns, and say so
+        in the channel they were invoked from. Turns billed to a personal Claude subscription are
+        never counted or capped.
+      </p>
+    </div>
+  );
+}
+
 function AccountRow({ account, window: w }: { account: AdminAccount; window: AdminWindow }) {
   const [open, setOpen] = useState(false);
   const [agents, setAgents] = useState<AdminAgentUsage[] | null>(null);
@@ -235,6 +400,7 @@ function AccountRow({ account, window: w }: { account: AdminAccount; window: Adm
       </button>
       {open && (
         <div className="bg-muted/30">
+          <AccountLimits accountKey={account.key} />
           {error ? (
             <div className="px-4 py-3 text-xs text-destructive">{error}</div>
           ) : agents ? (

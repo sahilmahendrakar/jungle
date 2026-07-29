@@ -5,12 +5,17 @@ import type { PermissionMode } from "./runner-protocol.js";
 // Agent handles: 2–30 chars, lowercase/digits/_/-, no leading symbol.
 export const HANDLE_RE = /^[a-z0-9][a-z0-9_-]{1,29}$/;
 
+// Where a user is told to write when they hit a platform limit they can't lift themselves (today:
+// the daily spend cap — see spend.ts). One constant so the address in a capped agent's channel
+// notice and the one in the UI can't drift apart.
+export const SUPPORT_EMAIL = "sahil.mahendrakar@gmail.com";
+
 // Model ids selectable for an agent. Membership list for validation; the catalog below carries
 // the per-model metadata. Kept as a `const` tuple so `AllowedModel` stays a literal union.
 export const ALLOWED_MODELS = [
   "claude-haiku-4-5-20251001",
   "claude-sonnet-5",
-  "claude-opus-4-8",
+  "claude-opus-5",
   "glm-5.2",
   "kimi-k3",
   "kimi-k2.7-code",
@@ -39,12 +44,17 @@ export interface ModelCatalogEntry {
 // Single source of truth for the model picker (backend validation + frontend UI derive from this).
 // Order defines the picker order: selectable models first (the first entry is DEFAULT_MODEL, the
 // default for new agents), upgrade-gated ones below.
+//
+// The Anthropic models are ungated: what used to be an upgrade wall is now a per-account daily
+// SPEND cap (see spend.ts + backend/src/services/spend.ts), which bounds the cost directly
+// instead of by proxy. GLM stays gated — it's routed to z.ai on our key and isn't part of the
+// first-party offering.
 export const MODEL_CATALOG: readonly ModelCatalogEntry[] = [
   { id: "kimi-k3", label: "Kimi K3", hint: "Open source · 1M context", provider: "moonshot", supportsEffort: true, contextWindow: 1_048_576 },
   { id: "kimi-k2.7-code", label: "Kimi K2.7 Code", hint: "Open source · 256K context", provider: "moonshot", supportsEffort: true, contextWindow: 262_144 },
   { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5", hint: "Fastest", provider: "anthropic", supportsEffort: false, contextWindow: 200_000 },
-  { id: "claude-opus-4-8", label: "Opus 4.8", hint: "Most capable", provider: "anthropic", supportsEffort: true, contextWindow: 200_000, requiresUpgrade: true },
-  { id: "claude-sonnet-5", label: "Sonnet 5", hint: "Balanced", provider: "anthropic", supportsEffort: true, contextWindow: 200_000, requiresUpgrade: true },
+  { id: "claude-sonnet-5", label: "Sonnet 5", hint: "Balanced", provider: "anthropic", supportsEffort: true, contextWindow: 200_000 },
+  { id: "claude-opus-5", label: "Opus 5", hint: "Most capable", provider: "anthropic", supportsEffort: true, contextWindow: 200_000 },
   { id: "glm-5.2", label: "GLM 5.2", hint: "Open source · fast & cheap", provider: "zai", supportsEffort: false, contextWindow: 200_000, requiresUpgrade: true },
 ];
 

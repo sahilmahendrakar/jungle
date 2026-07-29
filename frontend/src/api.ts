@@ -37,6 +37,9 @@ import type {
   AdminAgentUsage,
   AdminActivityItem,
   AdminWindow,
+  AdminAccountLimits,
+  AdminProviderLimit,
+  ModelProvider,
 } from "@jungle/shared";
 export {
   INTEGRATION_TYPES,
@@ -58,6 +61,7 @@ export type { Workflow, WorkflowRole, WorkflowRun, WorkflowTrigger, WorkflowTemp
 export type { Me, GoogleProfile, Workspace, Membership, InviteInfo };
 export type { BrowsableChannel };
 export type { AdminOverview, AdminAccount, AdminAgentUsage, AdminActivityItem, AdminWindow };
+export type { AdminAccountLimits, AdminProviderLimit, ModelProvider };
 // A message as delivered to the client (attachments carry signed download urls).
 export type Message = WireMessage;
 
@@ -1243,6 +1247,33 @@ export function adminActivity(window: AdminWindow, limit = 50): Promise<AdminAct
     devAuth: true,
     errorMessage: "failed to load activity",
   }).then((r) => r.items);
+}
+
+// One account's daily spend caps + what it has spent today, per provider. `account` is an
+// AdminAccount.key.
+export function adminLimits(account: string): Promise<AdminAccountLimits> {
+  return request<AdminAccountLimits>(`/api/admin/limits?account=${encodeURIComponent(account)}`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load spend limits",
+  });
+}
+
+// Set one provider's cap for one account. Pass `limitUsd: null` for unlimited, or `reset: true` to
+// drop the override and fall back to the platform default. Returns the account's updated caps.
+export function setAdminLimit(
+  account: string,
+  provider: ModelProvider,
+  limitUsd: number | null,
+  reset = false,
+): Promise<AdminAccountLimits> {
+  return request<AdminAccountLimits>("/api/admin/limits", {
+    method: "PUT",
+    json: { account, provider, limitUsd, reset },
+    auth: true,
+    devAuth: true,
+    errorMessage: "could not save spend limit",
+  });
 }
 
 // --- Claude subscription (operator-only) --------------------------------------------------------

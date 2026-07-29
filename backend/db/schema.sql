@@ -587,6 +587,8 @@ create table if not exists agent_usage (
   owner_name          text,
   turn_id             text,
   model               text not null,
+  provider            text,                                            -- anthropic | zai | moonshot
+  subscription        boolean not null default false,                  -- billed to a personal Claude sub
   input_tokens        bigint not null default 0,
   output_tokens       bigint not null default 0,
   cache_read_tokens   bigint not null default 0,
@@ -603,8 +605,29 @@ create index if not exists agent_usage_created_idx on agent_usage (created_at de
 create index if not exists agent_usage_owner_idx on agent_usage (lower(owner_email), created_at desc);
 create index if not exists agent_usage_agent_idx on agent_usage (agent_id, created_at desc);
 create index if not exists agent_usage_workspace_idx on agent_usage (workspace_id, created_at desc);
+-- The spend cap's hot query: today's non-subscription spend for one account on one provider. The
+-- leading expression must match db/usage.ts's ACCOUNT_KEY. See migrations/043.
+create index if not exists agent_usage_account_provider_idx
+  on agent_usage (
+    coalesce(lower(owner_email), 'participant:' || owner_id::text, 'unattributed'),
+    provider,
+    created_at desc
+  )
+  where subscription = false;
 
 -- Who created an agent (usage attribution). Null for humans, and for agents created by an
 -- internal path (the Architect) — those resolve to the workspace admin at read time.
 alter table participants add column if not exists created_by uuid references participants(id) on delete set null;
 create index if not exists participants_created_by_idx on participants (created_by);
+
+-- Daily spend caps, per ACCOUNT (lower(email), or 'participant:<id>') per provider. A missing row
+-- means "use the platform default" (shared/src/spend.ts); limit_usd null means explicitly
+-- unlimited. Enforced in backend/src/services/spend.ts. See migrations/043.
+create table if not exists spend_limits (
+  account_key      text not null,
+  provider         text not null,
+  limit_usd        numeric(12, 2),                                     -- null = unlimited
+  updated_by_email text,
+  updated_at       timestamptz not null default now(),
+  primary key (account_key, provider)
+);
