@@ -428,7 +428,7 @@ function ClaudeSubscriptionSection() {
             <KeyRound className="size-5 text-primary" />
           </div>
           <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium">Run agents on your Max subscription</div>
+            <div className="text-sm font-medium">Run agents on your Claude subscription</div>
             <div className="text-xs text-muted-foreground">
               {status.configured
                 ? "Active — agents you create bill turns to your subscription instead of the API key."
