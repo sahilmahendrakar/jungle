@@ -1,8 +1,16 @@
 import type { PoolClient } from "pg";
 import { pool } from "./pool";
 
-// Data access for the Slack integration (migrations/023_slack.sql). All bridge logic lives in
-// services/slackBridge.ts and the routes in http/routes/slack.ts — this module is plain SQL.
+// Data access for the Slack integration (migrations/023_slack.sql, 045_slack_agent_app.sql). All
+// bridge logic lives in services/slackBridge.ts + services/slackAgentBridge.ts and the routes in
+// http/routes/slack.ts — this module is plain SQL.
+//
+// A workspace can hold TWO installs, distinguished by `kind`: the original channel-mirror app
+// ('mirror') and the agent app that backs @jungle's Slack DM ('agent'). They are separate Slack
+// apps because `features.agent_view` is an irreversible per-app switch. Every function here
+// defaults to 'mirror' so existing callers keep their exact behavior.
+
+export type SlackInstallKind = "mirror" | "agent";
 
 export interface SlackInstall {
   workspace_id: string;
@@ -14,9 +22,13 @@ export interface SlackInstall {
   scopes: string | null;
   installed_by: string | null;
   status: "active" | "revoked";
+  kind: SlackInstallKind;
   created_at: string;
 }
 
+// One row is either a channel mirror (dm_agent_id null — the original feature) or an agent's DM
+// binding (dm_agent_id set: a Jungle DM channel <-> a Slack IM "D…"). Modelling the DM as a link
+// is what lets ingress and the entire transactional outbox serve DMs with no new code.
 export interface SlackChannelLinkRow {
   id: string;
   workspace_id: string;
@@ -27,6 +39,9 @@ export interface SlackChannelLinkRow {
   status: "active" | "error";
   last_error: string | null;
   created_by: string | null;
+  install_kind: SlackInstallKind;
+  dm_agent_id: string | null;
+  dm_slack_user_id: string | null;
   created_at: string;
 }
 
@@ -57,43 +72,61 @@ export async function upsertSlackInstall(i: {
   botId: string | null;
   scopes: string | null;
   installedBy: string | null;
+  kind?: SlackInstallKind;
 }): Promise<SlackInstall> {
   const { rows } = await pool.query<SlackInstall>(
     `insert into slack_installs
-       (workspace_id, team_id, team_name, bot_token, bot_user_id, bot_id, scopes, installed_by, status)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, 'active')
-     on conflict (workspace_id) do update set
+       (workspace_id, team_id, team_name, bot_token, bot_user_id, bot_id, scopes, installed_by, status, kind)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, 'active', $9)
+     on conflict (workspace_id, kind) do update set
        team_id = excluded.team_id, team_name = excluded.team_name, bot_token = excluded.bot_token,
        bot_user_id = excluded.bot_user_id, bot_id = excluded.bot_id, scopes = excluded.scopes,
        installed_by = excluded.installed_by, status = 'active'
      returning *`,
-    [i.workspaceId, i.teamId, i.teamName, i.botToken, i.botUserId, i.botId, i.scopes, i.installedBy],
+    [i.workspaceId, i.teamId, i.teamName, i.botToken, i.botUserId, i.botId, i.scopes, i.installedBy, i.kind ?? "mirror"],
   );
   return rows[0];
 }
 
-export async function getSlackInstallByWorkspace(workspaceId: string): Promise<SlackInstall | null> {
+export async function getSlackInstallByWorkspace(
+  workspaceId: string,
+  kind: SlackInstallKind = "mirror",
+): Promise<SlackInstall | null> {
   const { rows } = await pool.query<SlackInstall>(
-    `select * from slack_installs where workspace_id = $1`,
-    [workspaceId],
+    `select * from slack_installs where workspace_id = $1 and kind = $2`,
+    [workspaceId, kind],
   );
   return rows[0] ?? null;
 }
 
-export async function getSlackInstallByTeam(teamId: string): Promise<SlackInstall | null> {
+export async function getSlackInstallByTeam(
+  teamId: string,
+  kind: SlackInstallKind = "mirror",
+): Promise<SlackInstall | null> {
   const { rows } = await pool.query<SlackInstall>(
-    `select * from slack_installs where team_id = $1`,
-    [teamId],
+    `select * from slack_installs where team_id = $1 and kind = $2`,
+    [teamId, kind],
   );
   return rows[0] ?? null;
 }
 
-export async function setInstallStatus(workspaceId: string, status: "active" | "revoked"): Promise<void> {
-  await pool.query(`update slack_installs set status = $2 where workspace_id = $1`, [workspaceId, status]);
+export async function setInstallStatus(
+  workspaceId: string,
+  status: "active" | "revoked",
+  kind: SlackInstallKind = "mirror",
+): Promise<void> {
+  await pool.query(`update slack_installs set status = $2 where workspace_id = $1 and kind = $3`, [
+    workspaceId,
+    status,
+    kind,
+  ]);
 }
 
-export async function deleteSlackInstall(workspaceId: string): Promise<void> {
-  await pool.query(`delete from slack_installs where workspace_id = $1`, [workspaceId]);
+export async function deleteSlackInstall(
+  workspaceId: string,
+  kind: SlackInstallKind = "mirror",
+): Promise<void> {
+  await pool.query(`delete from slack_installs where workspace_id = $1 and kind = $2`, [workspaceId, kind]);
 }
 
 // --- Channel links ---
@@ -105,15 +138,42 @@ export async function createChannelLink(l: {
   slackChannelId: string;
   slackChannelName: string | null;
   createdBy: string | null;
+  installKind?: SlackInstallKind;
+  dmAgentId?: string | null;
+  dmSlackUserId?: string | null;
 }): Promise<SlackChannelLinkRow> {
   const { rows } = await pool.query<SlackChannelLinkRow>(
     `insert into slack_channel_links
-       (workspace_id, jungle_channel_id, slack_team_id, slack_channel_id, slack_channel_name, created_by)
-     values ($1, $2, $3, $4, $5, $6)
+       (workspace_id, jungle_channel_id, slack_team_id, slack_channel_id, slack_channel_name,
+        created_by, install_kind, dm_agent_id, dm_slack_user_id)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      returning *`,
-    [l.workspaceId, l.jungleChannelId, l.slackTeamId, l.slackChannelId, l.slackChannelName, l.createdBy],
+    [
+      l.workspaceId,
+      l.jungleChannelId,
+      l.slackTeamId,
+      l.slackChannelId,
+      l.slackChannelName,
+      l.createdBy,
+      l.installKind ?? "mirror",
+      l.dmAgentId ?? null,
+      l.dmSlackUserId ?? null,
+    ],
   );
   return rows[0];
+}
+
+// The DM binding for one (agent, Slack user) pair, if it exists. Used to decide whether an inbound
+// message.im needs a fresh binding or already has one.
+export async function getDmLink(
+  agentId: string,
+  slackUserId: string,
+): Promise<SlackChannelLinkRow | null> {
+  const { rows } = await pool.query<SlackChannelLinkRow>(
+    `select * from slack_channel_links where dm_agent_id = $1 and dm_slack_user_id = $2`,
+    [agentId, slackUserId],
+  );
+  return rows[0] ?? null;
 }
 
 export async function getLinkByJungleChannel(jungleChannelId: string): Promise<SlackChannelLinkRow | null> {
@@ -268,6 +328,8 @@ export interface OutboxJob {
   slack_team_id: string;
   bot_token: string;
   bot_id: string | null;
+  install_kind: SlackInstallKind;
+  workspace_id: string;
 }
 
 // Claim due jobs (pending, due, under an active link + active install), oldest first per link.
@@ -278,12 +340,15 @@ export async function claimDueOutbox(client: PoolClient, limit = 50): Promise<Ou
             m.id as message_id, m.body, m.thread_root_id, m.also_to_channel,
             p.display_name as sender_display_name, p.avatar_url as sender_avatar_url,
             l.id as link_id, l.slack_channel_id, l.slack_team_id,
-            i.bot_token, i.bot_id
+            i.bot_token, i.bot_id, i.kind as install_kind, i.workspace_id
      from slack_outbox o
      join messages m on m.id = o.jungle_message_id
      join participants p on p.id = m.sender_id
      join slack_channel_links l on l.id = o.link_id
-     join slack_installs i on i.workspace_id = l.workspace_id
+     -- Match the install that OWNS this link: a workspace can have both the mirror app and the
+     -- agent app installed, and posting a DM reply with the mirror's token would speak as the
+     -- wrong bot (or fail outright).
+     join slack_installs i on i.workspace_id = l.workspace_id and i.kind = l.install_kind
      where o.status = 'pending' and o.next_attempt_at <= now()
        and l.status = 'active' and i.status = 'active'
      order by o.link_id, o.id

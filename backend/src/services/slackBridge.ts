@@ -145,13 +145,23 @@ async function getOrCreateSlackParticipant(
   link: db.SlackChannelLinkRow,
   slackUserId: string,
 ): Promise<db.Participant | null> {
+  const p = await resolveSlackParticipant(install, slackUserId);
+  if (!p) return null;
+  await db.addChannelMember(link.jungle_channel_id, p.id);
+  return p;
+}
+
+// The channel-independent half of the above: Slack user -> Jungle participant, creating a shadow
+// the first time. Exported because the agent app (services/slackAgentBridge.ts) resolves a sender
+// before it knows which channel the message belongs to — a DM's channel is derived FROM the sender.
+export async function resolveSlackParticipant(
+  install: db.SlackInstall,
+  slackUserId: string,
+): Promise<db.Participant | null> {
   const existing = await db.getUserLink(install.team_id, slackUserId);
   if (existing) {
     const p = await db.getParticipant(existing.participant_id);
-    if (p) {
-      await db.addChannelMember(link.jungle_channel_id, p.id);
-      return p;
-    }
+    if (p) return p;
     // Link dangles (participant deleted) — fall through and recreate.
   }
 
@@ -168,7 +178,6 @@ async function getOrCreateSlackParticipant(
     const human = await db.getParticipantByEmail(install.workspace_id, profile.email);
     if (human) {
       await db.insertUserLink({ teamId: install.team_id, slackUserId, participantId: human.id, kind: "linked" });
-      await db.addChannelMember(link.jungle_channel_id, human.id);
       return human;
     }
   }
@@ -185,7 +194,6 @@ async function getOrCreateSlackParticipant(
     firebaseUid: null,
   });
   await db.insertUserLink({ teamId: install.team_id, slackUserId, participantId: shadow.id, kind: "shadow" });
-  await db.addChannelMember(link.jungle_channel_id, shadow.id);
   return shadow;
 }
 
@@ -321,9 +329,13 @@ async function handleDeliveryError(job: db.OutboxJob, e: unknown): Promise<boole
 async function parkLink(linkId: string, error: string): Promise<void> {
   const row = await db.setLinkError(linkId, error);
   if (row) {
-    broadcastLink(row);
-    // If the error was auth-level, revoke the whole install so ingress + every link stop.
-    if (slack.AUTH_SLACK_ERRORS.has(error)) await db.setInstallStatus(row.workspace_id, "revoked");
+    // Only channel mirrors have a UI to update; an agent's DM binding isn't a "link" a human made.
+    if (!row.dm_agent_id) broadcastLink(row);
+    // If the error was auth-level, revoke the install THIS link belongs to — the mirror app and the
+    // agent app hold separate tokens, so a dead agent token must not revoke channel mirroring.
+    if (slack.AUTH_SLACK_ERRORS.has(error)) {
+      await db.setInstallStatus(row.workspace_id, "revoked", row.install_kind);
+    }
   }
 }
 

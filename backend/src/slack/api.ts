@@ -203,6 +203,29 @@ export interface SlackUserProfile {
   tz: string | null;
 }
 
+// --- Agent app surfaces (the 'agent' install; see migrations/045) ---
+
+// Publish the App Home tab for one user. Used for @jungle's roster of agents and workflows.
+export async function viewsPublish(token: string, userId: string, blocks: unknown[]): Promise<void> {
+  await slackCall("views.publish", token, { user_id: userId, view: { type: "home", blocks } }, true);
+}
+
+// The "…is thinking" line under an agent's DM thread. Slack clears it when the agent posts, so we
+// only ever set it — there is no explicit clear on the happy path. Best-effort by design: a failed
+// status must never hold up the turn, so callers ignore the result.
+export async function setAssistantStatus(
+  token: string,
+  channelId: string,
+  threadTs: string,
+  status: string,
+): Promise<void> {
+  await slackCall("assistant.threads.setStatus", token, {
+    channel_id: channelId,
+    thread_ts: threadTs,
+    status,
+  });
+}
+
 export async function usersInfo(token: string, user: string): Promise<SlackUserProfile> {
   const r = await slackCall("users.info", token, { user });
   const u = r.user as {
