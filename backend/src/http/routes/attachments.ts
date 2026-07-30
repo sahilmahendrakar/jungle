@@ -73,13 +73,23 @@ router.get(
     }
     const row = await db.getAttachment(id);
     if (!row) throw new ApiError(404, "attachment not found");
+    // Open the blob BEFORE touching any header. Setting content-type up front meant a missing
+    // file (or any other throw below it) produced an error JSON still labelled `image/png`,
+    // which browsers render as a broken-image icon with no readable error anywhere.
+    let bytes;
+    try {
+      bytes = await storage.stream(row.storage_key);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") throw new ApiError(404, "attachment bytes are missing");
+      throw e;
+    }
     const inline = att.isInlineImage(row.mime);
     res.setHeader("content-type", inline ? row.mime : "application/octet-stream");
     res.setHeader("content-length", String(row.size_bytes));
-    res.setHeader("content-disposition", `${inline ? "inline" : "attachment"}; filename="${row.filename}"`);
+    res.setHeader("content-disposition", att.contentDisposition(inline ? "inline" : "attachment", row.filename));
     res.setHeader("x-content-type-options", "nosniff");
     res.setHeader("cache-control", "private, max-age=3600");
-    (await storage.stream(row.storage_key)).pipe(res);
+    bytes.pipe(res);
   }),
 );
 

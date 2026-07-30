@@ -23,8 +23,14 @@ export function wrap(
 
 // Terminal error middleware. An ApiError maps to its status; anything else is a 500. The JSON
 // shape ({ error: <message> }) matches what the old per-route catch blocks produced.
-export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction): void {
+export function errorHandler(err: unknown, req: Request, res: Response, _next: NextFunction): void {
   if (res.headersSent) return;
-  const status = err instanceof ApiError ? err.status : 500;
-  res.status(status).json({ error: String((err as Error)?.message ?? err) });
+  const isApi = err instanceof ApiError;
+  // A handler may have set response headers before throwing (the attachment route sets
+  // content-type/length from the DB row). Left in place they'd label this JSON as an image and
+  // give a wrong length, so the browser shows a broken image instead of the error.
+  for (const h of ["content-type", "content-length", "content-disposition"]) res.removeHeader(h);
+  // Unexpected errors carry internals (fs paths, driver messages) — log them, don't ship them.
+  if (!isApi) console.error(`unhandled error on ${req.method} ${req.path}:`, err);
+  res.status(isApi ? err.status : 500).json({ error: isApi ? err.message : "internal error" });
 }
