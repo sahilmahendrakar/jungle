@@ -66,6 +66,8 @@ async function freshWorkspace(name) {
     displayName: "Owner",
   });
   made.push(workspace.id);
+  // @jungle only exists where somebody is on a Claude subscription — see JUNGLE_MODEL's comment.
+  await db.setClaudeOauthToken(participant.id, `sk-ant-oat-test-${sfx}-${made.length}-padpadpadpadpadpadpadpad`);
   return { workspace, owner: participant };
 }
 
@@ -76,9 +78,12 @@ async function main() {
   const agent = await ensureJungleAgent(workspace.id);
   check("agent is marked as the default", agent.jungle_default === true);
   check("handle is @jungle", agent.handle === JUNGLE_HANDLE, `got @${agent.handle}`);
-  check("has no owner (belongs to the workspace)", agent.created_by === null);
   check("is an sdk agent", agent.kind === "agent" && agent.runtime === "sdk");
   check("has a persona", (agent.persona?.length ?? 0) > 0);
+  check("runs on Opus 5", agent.model === "claude-opus-5", `got ${agent.model}`);
+  check("is owned by the subscriber", agent.created_by === owner.id);
+  check("…so its turns bill to their subscription",
+    (await db.getClaudeOauthTokenForAgent(agent.id)) !== null);
 
   const keysOf = async (id) =>
     (await db.listAgentIntegrations(id)).map((r) => r.integration_key).sort();
@@ -201,6 +206,29 @@ async function main() {
   await backfillJungleAgents();
   check("…and the sweep gives it an agent",
     (await db.getJungleAgent(conductorWs.workspace.id)) !== null);
+
+  // --- 9: the subscription gate -----------------------------------------------------------------
+  console.log("\nsubscription gate");
+  const { workspace: bare } = await db.createWorkspaceWithCreator({
+    name: `No subscription ${sfx}`, handle: `nosub-${sfx}`, displayName: "Nosub",
+  });
+  made.push(bare.id);
+  check("no agent where nobody has a subscription", (await ensureJungleAgent(bare.id)) === null);
+  check("…and none was created", (await db.getJungleAgent(bare.id)) === null);
+
+  // Someone sets a token -> it appears on the next sweep.
+  const bareOwner = (await db.listParticipants(bare.id)).find((p) => p.kind === "human");
+  await db.setClaudeOauthToken(bareOwner.id, `sk-ant-oat-test-${sfx}-late-padpadpadpadpadpadpadpad`);
+  const late = await ensureJungleAgent(bare.id);
+  check("appears once someone subscribes", late !== null && late.created_by === bareOwner.id);
+
+  // An agent created before it had an owner gets adopted rather than left billing the org key.
+  await db.setAgentCreatedBy(late.id, null);
+  await db.updateAgentConfig(late.id, { model: "claude-sonnet-5" });
+  await ensureJungleAgent(bare.id);
+  const adopted = await db.getJungleAgent(bare.id);
+  check("an ownerless agent is adopted by the subscriber", adopted.created_by === bareOwner.id);
+  check("…and moved onto Opus 5", adopted.model === "claude-opus-5", `got ${adopted.model}`);
 
   console.log(failures ? `\n${failures} check(s) failed` : "\nall checks passed");
 }

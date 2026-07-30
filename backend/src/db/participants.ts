@@ -357,3 +357,25 @@ export async function listAgentIdsCreatedBy(ownerId: string): Promise<string[]> 
   );
   return rows.map((r) => r.id);
 }
+
+// The human whose Claude subscription backs this workspace's @jungle (services/jungleAgent.ts).
+// The default agent has no natural creator, so it's adopted by a subscriber: that person's token
+// pays for its turns (getClaudeOauthTokenForAgent walks created_by) and their connected accounts
+// back its integrations (integrations/backing.ts rule 4). Admins first, then oldest, so the choice
+// is stable across boots rather than flipping as people join.
+export async function findSubscriptionOwner(workspaceId: string): Promise<Participant | null> {
+  const { rows } = await pool.query<Participant>(
+    `select * from participants
+      where workspace_id = $1 and kind = 'human' and claude_oauth_token is not null
+      order by (role = 'admin') desc, created_at
+      limit 1`,
+    [workspaceId],
+  );
+  return rows[0] ?? null;
+}
+
+// Re-point an agent at its owner (participants.created_by) — used to adopt an @jungle that was
+// created before it had one, or whose owner cleared their subscription.
+export async function setAgentCreatedBy(agentId: string, createdBy: string | null): Promise<void> {
+  await pool.query(`update participants set created_by = $2 where id = $1 and kind = 'agent'`, [agentId, createdBy]);
+}
