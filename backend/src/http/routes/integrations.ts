@@ -5,6 +5,7 @@ import * as db from "../../db";
 import { wrap, ApiError } from "../errors";
 import { requireRequester } from "../guards";
 import { adapterFor } from "../../integrations";
+import { syncJungleIntegrations } from "../../services/jungleAgent";
 import { popupClosePage } from "../oauthPopup";
 
 // Per-USER OAuth connections for the connection-based integrations (Linear/Notion/Granola via their
@@ -155,6 +156,10 @@ router.get("/auth/integrations/callback", async (req, res) => {
         extra: result.extra,
       });
     }
+    // A new account here may be the one @jungle was waiting on (it holds no connection of its own
+    // and skips what it can't bind at creation) — let it pick the integration up now. Fire-and-
+    // forget: connecting must succeed whether or not the default agent wants anything.
+    void syncJungleIntegrations(me.workspace_id).catch((e) => console.error("jungle integration sync:", e));
     if (entry.popup) {
       return res.send(
         popupClosePage({ connection: entry.key, status: "connected", account: result.externalAccount ?? undefined }),

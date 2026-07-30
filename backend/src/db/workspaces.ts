@@ -56,8 +56,11 @@ export async function agentCountAndCap(
     [workspaceId],
   );
   const cap = wsRows[0]?.max_agents ?? DEFAULT_MAX_AGENTS;
+  // The @jungle default agent doesn't count: nobody chose to add it, so it must never be the
+  // reason a member can't create one of their own.
   const { rows: cRows } = await client.query<{ n: string }>(
-    `select count(*)::text as n from participants where workspace_id = $1 and kind = 'agent'`,
+    `select count(*)::text as n from participants
+      where workspace_id = $1 and kind = 'agent' and not jungle_default`,
     [workspaceId],
   );
   return { count: Number(cRows[0]?.n ?? 0), cap };

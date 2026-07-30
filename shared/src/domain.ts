@@ -50,6 +50,9 @@ export interface ParticipantBase {
   // migrations/039 in a workspace with no human to attribute them to). Usage/spend rolls up by
   // this — see shared/src/admin.ts.
   created_by: string | null;
+  // True for the workspace's one @jungle default agent (migrations/044). Clients use it to hide
+  // rename/delete, which the backend refuses anyway (services/agentAdmin.ts).
+  jungle_default?: boolean;
 }
 
 // A participant as sent to clients: the public row plus a live `status` (agents only, computed

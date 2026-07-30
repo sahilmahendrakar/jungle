@@ -500,7 +500,16 @@ export function ParticipantProfilePanel({
                 data-testid="profile-name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
+                // @jungle's name is fixed — everyone reaches it the same way. Everything below
+                // (persona, model, permissions) stays editable.
+                disabled={person.jungle_default}
               />
+              {person.jungle_default && (
+                <p className="text-[11px] leading-tight text-muted-foreground">
+                  This is the workspace's default agent — everyone reaches it at @{person.handle}, so
+                  it can't be renamed or deleted.
+                </p>
+              )}
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="profile-persona">Persona</Label>
@@ -635,8 +644,9 @@ export function ParticipantProfilePanel({
               View activity
             </Button>
             {err && <p className="text-sm text-destructive">{err}</p>}
-            {/* Danger zone: permanently delete this agent. */}
-            {!isSelf && (
+            {/* Danger zone: permanently delete this agent. Hidden for @jungle — the workspace's
+                default agent is part of the product and the backend refuses to delete it. */}
+            {!isSelf && !person.jungle_default && (
               <div className="space-y-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3">
                 {!confirmDelete ? (
                   <Button

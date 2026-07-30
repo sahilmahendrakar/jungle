@@ -32,20 +32,24 @@ export async function createParticipant(p: {
   runnerProvider?: string | null;
   persona?: string | null; // creator-written role/personality, injected into the system prompt
   lianaConductor?: boolean; // true = a persistent per-user Liana conductor (compact@40% + suspend)
+  jungleDefault?: boolean; // true = the workspace's one @jungle default agent (services/jungleAgent.ts)
   createdBy?: string | null; // the human participant creating this agent (usage attribution)
 }, client?: pg.PoolClient): Promise<Participant> {
   const { rows } = await (client ?? pool).query<Participant>(
     `insert into participants
        (kind, workspace_id, handle, display_name, role, repo, firebase_uid, email, avatar_url,
-        model, mode, runtime, runner_token, runner_provider, persona, liana_conductor, created_by)
+        model, mode, runtime, runner_token, runner_provider, persona, liana_conductor,
+        jungle_default, created_by)
      values ($1, $2, $3, $4, coalesce($5, 'member'), $6, $7, $8, $9, $10, coalesce($11, 'default'),
-             coalesce($12, 'sdk'), $13, coalesce($14, 'docker'), $15, coalesce($16, false), $17)
+             coalesce($12, 'sdk'), $13, coalesce($14, 'docker'), $15, coalesce($16, false),
+             coalesce($17, false), $18)
      returning *`,
     [
       p.kind, p.workspaceId, p.handle, p.displayName, p.role ?? null, p.repo ?? null,
       p.firebaseUid ?? null, p.email ?? null, p.avatarUrl ?? null,
       p.model ?? null, p.mode ?? null, p.runtime ?? null, p.runnerToken ?? null,
-      p.runnerProvider ?? null, p.persona ?? null, p.lianaConductor ?? null, p.createdBy ?? null,
+      p.runnerProvider ?? null, p.persona ?? null, p.lianaConductor ?? null,
+      p.jungleDefault ?? null, p.createdBy ?? null,
     ],
   );
   return rows[0];
@@ -188,8 +192,15 @@ export async function getParticipantByFirebaseUid(uid: string): Promise<Particip
   return (await listParticipantsByUid(uid))[0] ?? null;
 }
 
+// Handles nobody may claim, so the well-known @mentions always reach what people expect. "jungle"
+// belongs to the workspace's default agent (services/jungleAgent.ts) — reserved even before that
+// agent exists, since it's created a moment after the workspace's first human. Only new claims are
+// checked: a participant who already holds a reserved handle keeps it.
+const RESERVED_HANDLES = new Set(["jungle"]);
+
 // Is a handle free within a workspace? (case-insensitive; handles are unique per workspace).
 export async function handleAvailable(workspaceId: string, handle: string): Promise<boolean> {
+  if (RESERVED_HANDLES.has(handle.trim().toLowerCase())) return false;
   const { rows } = await pool.query(
     `select 1 from participants where workspace_id = $1 and lower(handle) = lower($2)`,
     [workspaceId, handle],
@@ -274,6 +285,39 @@ export async function getParticipantByHandle(
     [workspaceId, handle],
   );
   return rows[0] ?? null;
+}
+
+// --- @jungle, the default agent (migrations/044) -------------------------------------------------
+// Found by the marker column, never by handle: the handle is only a preference (it can be taken by
+// someone else in an old workspace), while the marker is what makes an agent THE default one.
+
+export async function getJungleAgent(workspaceId: string): Promise<Participant | null> {
+  const { rows } = await pool.query<Participant>(
+    `select * from participants where workspace_id = $1 and jungle_default limit 1`,
+    [workspaceId],
+  );
+  return rows[0] ?? null;
+}
+
+// Workspaces with no default agent yet — the boot backfill's worklist (services/jungleAgent.ts).
+// Liana workspaces are skipped: Liana is a separate Slack-first product whose workspaces are
+// created one-per-user behind the scenes, and nobody there is ever going to type @jungle — giving
+// each one an agent would provision a machine per Liana user for nothing. A workspace is Liana's
+// if it holds a Slack install or a Liana conductor agent (services/liana.ts).
+export async function listWorkspaceIdsMissingJungleAgent(): Promise<string[]> {
+  const { rows } = await pool.query<{ id: string }>(
+    `select w.id from workspaces w
+      where not exists (
+        select 1 from participants p where p.workspace_id = w.id and p.jungle_default
+      )
+      and not exists (
+        select 1 from liana_slack_installs li where li.workspace_id = w.id and li.status = 'active'
+      )
+      and not exists (
+        select 1 from participants lp where lp.workspace_id = w.id and lp.liana_conductor
+      )`,
+  );
+  return rows.map((r) => r.id);
 }
 
 // --- Claude subscription token (migrations/040) -------------------------------------------------

@@ -3,6 +3,7 @@ import { HANDLE_RE } from "@jungle/shared";
 import type { InviteInfo } from "@jungle/shared";
 import * as db from "../../db";
 import * as auth from "../../auth";
+import { ensureJungleAgent } from "../../services/jungleAgent";
 import { wrap, ApiError } from "../errors";
 import { publicParticipant, requireRequester } from "../guards";
 
@@ -45,6 +46,9 @@ router.post(
     const { workspace, participant } = await db.createWorkspaceWithCreator({
       name, handle, displayName, firebaseUid: u.uid, email: u.email, avatarUrl: u.picture,
     });
+    // Every workspace gets its @jungle default agent. Background + best-effort: the workspace is
+    // usable without it, and the boot backfill re-attempts anything that fails here.
+    void ensureJungleAgent(workspace.id).catch((e) => console.error("ensure jungle agent:", e));
     res.status(201).json({ workspace, participant: publicParticipant(participant) });
   }),
 );

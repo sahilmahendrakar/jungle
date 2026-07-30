@@ -21,7 +21,7 @@ import { publicParticipant, accountUid } from "../http/guards";
 // same logic serves the human REST routes and the /mcp server. Validation errors are ApiErrors;
 // the MCP layer renders them as tool errors instead of HTTP statuses.
 
-const RUNNER_PROVIDER_DEFAULT = process.env.RUNNER_PROVIDER === "fly" ? "fly" : "docker";
+export const RUNNER_PROVIDER_DEFAULT = process.env.RUNNER_PROVIDER === "fly" ? "fly" : "docker";
 
 // An agent is a blank chat agent by default: `integrations` (optional) attaches one or more
 // integrations at creation time, e.g. [{key: "github", config: {repo: "owner/name"}}]. Unknown
@@ -62,6 +62,14 @@ export async function resolveIntegrationConfig(
   );
 }
 
+// @jungle is the workspace's default agent (services/jungleAgent.ts): it's part of the product,
+// not something a member added, so it can't be renamed or deleted out from under everyone. Its
+// persona/model/mode stay editable — only identity and existence are fixed.
+const guardDefaultAgent = (agent: db.Participant, what: string): void => {
+  if (!agent.jungle_default) return;
+  throw new ApiError(400, `@${agent.handle} is this workspace's default agent and can't be ${what}`);
+};
+
 const validatedPersona = (raw: unknown): string | null => {
   const persona = String(raw ?? "").trim() || null;
   if (persona && persona.length > PERSONA_MAX_LENGTH) {
@@ -92,6 +100,12 @@ export async function createAgentAs(
 ): Promise<db.Participant> {
   const { handle, displayName } = input;
   if (!handle || !displayName) throw new ApiError(400, "handle, displayName required");
+  // Reserved handles (@jungle) are refused here too, not just on the human sign-up paths: this is
+  // how agents create agents (mcp/tools.ts create_agent), and an agent naming one "jungle" in a
+  // workspace whose default agent doesn't exist yet would take the handle people @-mention.
+  if (!(await db.handleAvailable(actor.workspace_id, handle))) {
+    throw new ApiError(409, `@${handle} is taken in this workspace`);
+  }
   const persona = input.persona !== undefined ? validatedPersona(input.persona) : null;
   const model = input.model ? String(input.model) : null;
   if (model && !isAllowedModel(model)) throw new ApiError(400, `unsupported model: ${model}`);
@@ -195,6 +209,7 @@ export async function updateAgentConfigAs(
   if (input.displayName !== undefined) {
     const dn = String(input.displayName).trim();
     if (!dn) throw new ApiError(400, "display name cannot be empty");
+    if (dn !== agent.display_name) guardDefaultAgent(agent, "renamed");
     patch.displayName = dn;
   }
   if (input.persona !== undefined) {
@@ -285,6 +300,7 @@ export async function detachIntegrationAs(
 // doesn't strand the DB row; the DB delete is the source of truth.
 export async function deleteAgentAs(actor: db.Participant, agentId: string): Promise<void> {
   const agent = await requireAgentInWorkspace(actor, agentId);
+  guardDefaultAgent(agent, "deleted");
   // Stop the runner working and close its socket so it can't reconnect mid-teardown.
   runners.disconnect(agent.id);
   try {

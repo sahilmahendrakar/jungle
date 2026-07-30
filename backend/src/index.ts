@@ -14,6 +14,7 @@ import { startWorkflowSweeper } from "./services/workflows";
 import { startSlackOutbox } from "./services/slackBridge";
 import * as telegram from "./services/telegram";
 import * as liana from "./services/liana";
+import { backfillJungleAgents } from "./services/jungleAgent";
 import { BACKEND_ORIGIN } from "./http/routes/liana";
 import { registerBuiltinIntegrations } from "./integrations";
 
@@ -104,6 +105,9 @@ startWorkflowSweeper();
 // Migrate any already-provisioned Liana conductors onto the current default model (e.g. the switch
 // to Haiku). One-shot, best-effort; new conductors are created on the right model directly.
 void liana.backfillLianaConductorModels().catch((e) => console.error("liana model backfill:", e));
+// Give every workspace that predates the feature its @jungle default agent (Liana's own workspaces
+// excluded). One-shot and best-effort — a workspace that fails is retried at the next boot.
+void backfillJungleAgents().catch((e) => console.error("jungle agent backfill:", e));
 // Drain the Slack mirror outbox (Jungle -> Slack). Enqueued transactionally in persistMessage.
 startSlackOutbox();
 // Register the Liana Telegram bot's webhook (idempotent; no-op when the bot isn't configured).
