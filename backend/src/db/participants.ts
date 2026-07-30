@@ -299,23 +299,19 @@ export async function getJungleAgent(workspaceId: string): Promise<Participant |
   return rows[0] ?? null;
 }
 
-// Every workspace that should have a default agent — the boot sweep's worklist
-// (services/jungleAgent.ts). Returns workspaces that already have one too: ensureJungleAgent is a
-// find-or-create that also heals integrations and member DMs, so the sweep is how an existing
-// @jungle picks up anything it's missing.
+// Every workspace, for the boot sweep (services/jungleAgent.ts). Returns workspaces that already
+// have an agent too: ensureJungleAgent is a find-or-create that also heals integrations and member
+// DMs, so the sweep is how an existing @jungle picks up anything it's missing.
 //
-// Only Liana's own Slack workspaces are excluded. The exclusion used to also skip any workspace
-// containing a liana_conductor agent, which was wrong and silently skipped real workspaces: Liana
-// REUSES a user's existing Jungle workspace when they have one (services/liana.ts
-// resolveWebAccount -> memberships[0]) and creates its conductor inside it, so "has a conductor"
-// says nothing about whether the workspace is Liana's. A Slack install does.
+// There is deliberately no exclusion here. Two earlier attempts to leave Liana's workspaces alone
+// both skipped REAL ones instead: excluding workspaces with a liana_conductor missed that Liana
+// reuses a user's existing Jungle workspace and puts its conductor inside it, and excluding
+// workspaces with an active Liana Slack install missed that a Jungle workspace people work in every
+// day can also have Liana's Slack app installed — that filter skipped the seed workspace itself.
+// A workspace having anything to do with Liana says nothing about whether its members want to type
+// @jungle. Every workspace gets one.
 export async function listWorkspaceIdsForJungleAgent(): Promise<string[]> {
-  const { rows } = await pool.query<{ id: string }>(
-    `select w.id from workspaces w
-      where not exists (
-        select 1 from liana_slack_installs li where li.workspace_id = w.id and li.status = 'active'
-      )`,
-  );
+  const { rows } = await pool.query<{ id: string }>(`select id from workspaces`);
   return rows.map((r) => r.id);
 }
 
