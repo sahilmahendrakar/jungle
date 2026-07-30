@@ -31,6 +31,7 @@ import { navigate } from "./route";
 import { DeleteWorkflowDialog } from "./components/workflow/DeleteWorkflowDialog";
 import { UnconnectedIntegrationsDialog } from "./components/workflow/UnconnectedIntegrationsDialog";
 import { Button } from "@/components/ui/button";
+import { ErrorBanner } from "@/components/ui/error-banner";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Textarea } from "@/components/ui/textarea";
@@ -388,7 +389,11 @@ export function WorkflowBuilder({
         </div>
       </div>
 
-      {error && <p className="mb-3 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</p>}
+      {error && (
+        <ErrorBanner className="mb-3" onDismiss={() => setError("")}>
+          {error}
+        </ErrorBanner>
+      )}
 
       <div className="space-y-6">
         {/* Icon + name */}

@@ -3,6 +3,7 @@ import { useAuth } from "./auth";
 import { checkHandle, createWorkspace, acceptInvite, getInvite, githubConnectUrl, type InviteInfo } from "./api";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
+import { ErrorBanner } from "@/components/ui/error-banner";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { avatarClass, initials } from "@/lib/people";
@@ -345,9 +346,9 @@ export function GithubStep({ onSkip }: { onSkip: () => void }) {
       </div>
 
       {error && (
-        <div className="mt-5 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <ErrorBanner className="mt-5" onDismiss={() => setError("")}>
           {error}
-        </div>
+        </ErrorBanner>
       )}
 
       <div className="mt-6 space-y-2">

@@ -5,6 +5,7 @@ import { STATUS_DOT, STATUS_LABEL } from "../../lib/chat";
 import { ActivityTranscript } from "./ActivityTranscript";
 import { PersonAvatar } from "./panels";
 import { Button } from "@/components/ui/button";
+import { ErrorBanner } from "@/components/ui/error-banner";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
@@ -120,9 +121,9 @@ export function AgentActivityPanel({
       <ActivityTranscript agent={agent} events={events} running={running} focusTurnId={focusTurnId} />
 
       {err && (
-        <div className="mx-3 mb-1 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-xs text-destructive">
+        <ErrorBanner size="xs" className="mx-3 mb-1" onDismiss={() => setErr("")}>
           {err}
-        </div>
+        </ErrorBanner>
       )}
 
       {/* Steer footer — posts to the agent quietly; you stay in your current view. */}

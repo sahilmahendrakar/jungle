@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchAgentEvents, type AgentEvent, type Participant } from "../../api";
 import { Button } from "@/components/ui/button";
+import { ErrorBanner } from "@/components/ui/error-banner";
 import { Activity as ActivityIcon } from "lucide-react";
 import { countVisibleTurns, groupTurns, mergeEvents, turnHasVisibleItems } from "./activity/sdkEvents";
 import { TurnSection } from "./activity/Transcript";
@@ -218,9 +219,9 @@ export function ActivityTranscript({
       </div>
 
       {err && (
-        <div className="mx-4 mb-1 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive">
+        <ErrorBanner className="mx-4 mb-1" onDismiss={() => setErr("")}>
           {err}
-        </div>
+        </ErrorBanner>
       )}
     </div>
   );

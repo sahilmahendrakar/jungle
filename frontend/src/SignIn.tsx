@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { listParticipants, createParticipant, type Participant } from "./api";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
+import { ErrorBanner } from "@/components/ui/error-banner";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { avatarClass, initials } from "@/lib/people";
@@ -88,12 +89,13 @@ export function SignIn() {
         </div>
 
         {error && (
-          <div
+          <ErrorBanner
             data-testid="signin-error"
-            className="mb-4 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+            className="mb-4"
+            onDismiss={() => setError("")}
           >
             {error}
-          </div>
+          </ErrorBanner>
         )}
 
         <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">

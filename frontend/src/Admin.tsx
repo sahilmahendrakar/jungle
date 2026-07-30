@@ -19,6 +19,7 @@ import {
 import { fmtRelative, fmtTokens } from "./lib/chat";
 import { ViewShell } from "./components/chat/ViewShell";
 import { Button } from "@/components/ui/button";
+import { ErrorBanner } from "@/components/ui/error-banner";
 import { cn } from "@/lib/utils";
 
 // The operator view: platform-wide usage and spend, rolled up by account. Reachable from
@@ -488,9 +489,9 @@ export function Admin({
       }
     >
       {error && (
-        <p className="mb-4 rounded-lg border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+        <ErrorBanner className="mb-4" onDismiss={() => setError("")}>
           {error}
-        </p>
+        </ErrorBanner>
       )}
 
       {/* Hero: the number this page exists for. */}

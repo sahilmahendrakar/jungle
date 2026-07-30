@@ -52,6 +52,7 @@ import { Workflows } from "./Workflows";
 import { WorkflowDetail } from "./WorkflowDetail";
 import { WorkflowBuilder } from "./WorkflowBuilder";
 import { Button } from "@/components/ui/button";
+import { ErrorBanner } from "@/components/ui/error-banner";
 import { cn } from "@/lib/utils";
 import { DmActivityView } from "./components/chat/DmActivityView";
 import { AgentActivityPanel } from "./components/chat/AgentActivityPanel";
@@ -406,6 +407,12 @@ export function App({
       return;
     }
     listChannelMembers(selected).then(setMembers).catch(() => setMembers([]));
+  }, [selected]);
+
+  // A notice is about the view you were in — drop it when you navigate away, so a stale error
+  // (e.g. "this workspace has reached its agent limit") doesn't follow you into another channel.
+  useEffect(() => {
+    setNotice("");
   }, [selected]);
 
   // Load the Slack mirror binding for the open channel (powers the header badge + dialog).
@@ -1338,12 +1345,13 @@ export function App({
 
         {/* Notice */}
         {notice && (
-          <div
+          <ErrorBanner
             data-testid="send-notice"
-            className="mx-3 mb-1 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive md:mx-5"
+            className="mx-3 mb-1 md:mx-5"
+            onDismiss={() => setNotice("")}
           >
             {notice}
-          </div>
+          </ErrorBanner>
         )}
 
         {/* Composer — draft persists per channel across navigation (draftKey = channel id) */}
