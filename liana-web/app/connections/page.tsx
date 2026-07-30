@@ -18,6 +18,7 @@ const DESCRIPTIONS: Record<string, string> = {
   granola: "Can read your meeting notes.",
   posthog: "Can query your product analytics. Read-only.",
   mixpanel: "Can query your product analytics. Read-only.",
+  "google-analytics": "Can query your website & app traffic. Read-only.",
 };
 
 // Shown under a *connected* card. These are the providers where "connected" doesn't yet mean
@@ -30,7 +31,7 @@ const REAUTH_HINTS: Record<string, string> = {
 };
 
 // Every key connects via popup OAuth (Google/GitHub identity flows or the adapters' own
-// MCP-OAuth start — PostHog and Mixpanel included).
+// MCP-OAuth / OAuth start — PostHog, Mixpanel and Google Analytics included).
 const OAUTH_CONNECTABLE = new Set([
   "gmail",
   "google-calendar",
@@ -42,6 +43,7 @@ const OAUTH_CONNECTABLE = new Set([
   "granola",
   "posthog",
   "mixpanel",
+  "google-analytics",
 ]);
 
 export default function ConnectionsPage() {

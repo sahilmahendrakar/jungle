@@ -513,7 +513,7 @@ lianaRouter.put("/api/liana/settings", async (req, res) => {
 // The connection keys the web Connections page shows, in display order.
 const LIANA_CONNECTION_KEYS = [
   "gmail", "google-calendar", "google-drive", "github", "x", "linear", "notion", "granola",
-  "posthog", "mixpanel",
+  "posthog", "mixpanel", "google-analytics",
 ];
 
 lianaRouter.get("/api/liana/connections", async (req, res) => {

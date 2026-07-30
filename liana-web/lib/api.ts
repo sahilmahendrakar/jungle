@@ -130,12 +130,13 @@ export const INTEGRATION_LABELS: Record<string, string> = {
   granola: "Granola",
   posthog: "PostHog",
   mixpanel: "Mixpanel",
+  "google-analytics": "Google Analytics",
 };
 
 // Which per-integration settings the workflow editor renders — a deliberate small mirror of the
 // backend's shared descriptor (liana-web is standalone, no @jungle/shared dep). `repo` = show the
 // GitHub repo picker; `approval` = show the "ask me first" toggle with this config key + label.
-// Read-only integrations (granola/x/posthog/mixpanel) are absent → their chips have no popover.
+// Read-only integrations (granola/x/posthog/mixpanel/google-analytics) are absent → their chips have no popover.
 export const INTEGRATION_SETTINGS_UI: Record<
   string,
   { repo?: boolean; approval?: { key: "requireSendApproval" | "requireApproval"; label: string } }

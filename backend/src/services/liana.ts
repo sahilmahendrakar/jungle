@@ -1096,6 +1096,7 @@ const KEY_LABELS: Record<string, string> = {
   granola: "Granola",
   posthog: "PostHog",
   mixpanel: "Mixpanel",
+  "google-analytics": "Google Analytics",
 };
 
 // Returns the text it posted, so the caller can record it in conversation memory.

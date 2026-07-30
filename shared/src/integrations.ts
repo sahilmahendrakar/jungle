@@ -131,6 +131,15 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     settings: [{ kind: "approval", key: "requireApproval", label: "Ask me before it changes my calendar" }],
   },
   {
+    key: "google-analytics",
+    name: "Google Analytics",
+    description: "Query website & app traffic — sessions, users, events & conversions from a connected GA4 property.",
+    connectionKey: "google-analytics",
+    configFields: [],
+    connection: "oauth",
+    readOnly: true,
+  },
+  {
     key: "notion",
     name: "Notion",
     description: "Search, read & write pages and databases in a connected Notion workspace.",

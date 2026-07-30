@@ -170,6 +170,15 @@ export const DRIVE_SCOPES = ["openid", "email", "https://www.googleapis.com/auth
 // ACL management). Like Drive, openid+email are just for the display address.
 export const CALENDAR_SCOPES = ["openid", "email", "https://www.googleapis.com/auth/calendar.events"];
 
+// Read-only access to GA4 property data (Analytics Data API's runReport) and metadata (Analytics
+// Admin API's account/property listing) — no edit/manage.users scopes, so the grant can't touch
+// the property's configuration. Like Drive/Calendar, openid+email are just for the display address.
+export const ANALYTICS_SCOPES = [
+  "openid",
+  "email",
+  "https://www.googleapis.com/auth/analytics.readonly",
+];
+
 // Authorize URL without `state` (the caller appends it) — for the per-agent integration flow.
 export function googleAuthorizeUrl(opts: { scopes: string[]; redirectUri: string }): string {
   const u = new URL(AUTHORIZE);
