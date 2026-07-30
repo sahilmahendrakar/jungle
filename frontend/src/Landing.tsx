@@ -233,6 +233,14 @@ export function Landing() {
                     Blog
                   </a>
                 </li>
+                <li>
+                  <a
+                    href="/privacy"
+                    className="text-[var(--jl-ink-dim)] transition-colors hover:text-[var(--jl-ink)]"
+                  >
+                    Privacy
+                  </a>
+                </li>
               </ul>
             </div>
             <div>
