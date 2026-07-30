@@ -25,6 +25,16 @@ const JUNGLE_DISPLAY_NAME = "Jungle";
 // has connected them (see attachDefaultIntegrations).
 const DEFAULT_INTEGRATIONS = ["jungle-admin", "notion", "granola"] as const;
 
+// @jungle runs on Opus 5, and on a person's Claude subscription rather than the org API key. Both
+// follow from the same thing: the agent is adopted by a subscriber (participants.created_by), whose
+// token pays for its turns (db.getClaudeOauthTokenForAgent walks created_by) and whose connected
+// accounts back its integrations (integrations/backing.ts rule 4 — "the agent's owner").
+//
+// While that's the arrangement, a workspace with no subscriber gets no @jungle at all: an Opus 5
+// agent every workspace can talk to, billed to the org key, is not a bill anyone has agreed to.
+// It appears as soon as someone in the workspace sets a subscription token, on the next boot sweep.
+const JUNGLE_MODEL = "claude-opus-5";
+
 const JUNGLE_PERSONA =
   `You are Jungle — this workspace's default agent and the way people get things done here. ` +
   `Anyone can reach you by saying @jungle. Be a capable generalist: answer questions, do the ` +
@@ -58,10 +68,12 @@ const JUNGLE_PERSONA =
 // half-made agent), @jungle exists whether or not its integrations resolve: a brand-new workspace
 // has no connections at all, and the agent still has to be usable. So a key that can't bind is
 // skipped and retried later — on the next connect (syncJungleIntegrations) or the next boot.
-// The actor is @jungle itself, so integrations/backing.ts resolves the account: with no owner
-// (created_by is null) it lands on rule 5 — the workspace's single connected person. Two people
-// with Notion connected is an ambiguity error by design; we skip rather than guess, and a human
-// picks the account on the agent's page.
+// The actor is @jungle itself, so integrations/backing.ts resolves the account through its owner
+// (rule 4: the subscriber who adopted it). That's why the agent has an owner at all — with
+// created_by null it fell through to rule 5, "the workspace's single connected person", which
+// errors out the moment two people have Notion connected, so Notion silently never attached.
+// If the owner holds several accounts for one integration that's still ambiguous by design: we
+// skip rather than guess, and a human picks the account on the agent's page.
 async function attachDefaultIntegrations(agent: db.Participant): Promise<void> {
   const attached = new Set((await db.listAgentIntegrations(agent.id)).map((row) => row.integration_key));
   for (const key of DEFAULT_INTEGRATIONS) {
@@ -115,11 +127,31 @@ export async function ensureJungleDmFor(person: db.Participant): Promise<void> {
 // Find-or-create a workspace's @jungle. Safe to call repeatedly, and that's the point: on an
 // existing agent it re-runs the integration sync (picking up accounts connected since) and re-opens
 // member DMs (picking up people who joined since), so the boot sweep heals both.
-export async function ensureJungleAgent(workspaceId: string): Promise<db.Participant> {
+export async function ensureJungleAgent(workspaceId: string): Promise<db.Participant | null> {
+  const owner = await db.findSubscriptionOwner(workspaceId);
   const existing = await db.getJungleAgent(workspaceId);
+  if (!owner) {
+    // Nobody here is on a subscription. Leave an existing agent alone rather than deleting it —
+    // its turns just fall back to the org key until someone sets a token again.
+    if (!existing) console.log(`@jungle: no Claude subscription in workspace ${workspaceId} — skipping`);
+    return existing;
+  }
   if (existing) {
+    // Adopt: an @jungle created before this (created_by null), or one whose owner stopped being the
+    // subscriber, re-points at the current one so its turns bill correctly and its integrations
+    // resolve through that person's accounts.
+    if (existing.created_by !== owner.id) {
+      await db.setAgentCreatedBy(existing.id, owner.id);
+      existing.created_by = owner.id;
+      console.log(`@jungle: adopted by @${owner.handle} in workspace ${workspaceId}`);
+    }
+    if (existing.model !== JUNGLE_MODEL) {
+      await db.updateAgentConfig(existing.id, { model: JUNGLE_MODEL });
+      existing.model = JUNGLE_MODEL;
+    }
     await attachDefaultIntegrations(existing);
     await ensureJungleDms(existing);
+    await runners.reconfigure(existing.id).catch(() => {});
     return existing;
   }
   const handle = await availableHandle(workspaceId);
@@ -133,7 +165,7 @@ export async function ensureJungleAgent(workspaceId: string): Promise<db.Partici
     displayName: JUNGLE_DISPLAY_NAME,
     runtime: "sdk",
     runnerToken,
-    model: null,
+    model: JUNGLE_MODEL,
     mode: DEFAULT_AGENT_MODE,
     // The deployment's normal provider, not a hardcoded "fly" like the Architect: @jungle is the
     // one agent every workspace is expected to reach, so it has to run wherever ordinary agents
@@ -141,7 +173,7 @@ export async function ensureJungleAgent(workspaceId: string): Promise<db.Partici
     runnerProvider: RUNNER_PROVIDER_DEFAULT,
     persona: JUNGLE_PERSONA,
     jungleDefault: true,
-    // createdBy stays null: @jungle belongs to the workspace, not to whoever happened to make it.
+    createdBy: owner.id, // the subscriber whose seat pays for it and whose accounts back it
   });
   await attachDefaultIntegrations(participant);
   await ensureJungleDms(participant);
@@ -177,8 +209,9 @@ export async function backfillJungleAgents(): Promise<void> {
   let created = 0;
   for (const workspaceId of workspaceIds) {
     try {
-      if (!(await db.getJungleAgent(workspaceId))) created++;
-      await ensureJungleAgent(workspaceId);
+      const had = await db.getJungleAgent(workspaceId);
+      if (!had && (await ensureJungleAgent(workspaceId))) created++;
+      else if (had) await ensureJungleAgent(workspaceId);
     } catch (e) {
       console.error(`@jungle reconcile failed for workspace ${workspaceId}:`, e);
     }
