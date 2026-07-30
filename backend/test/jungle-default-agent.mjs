@@ -10,6 +10,13 @@
 //   4. The default agent doesn't consume the workspace's agent cap.
 //   5. Members can't rename or delete it.
 //   6. "jungle" is reserved, so nobody else can take the handle the agent is reached at.
+//   7. Every member has an open DM with it, including people who joined before it existed — an
+//      unopened DM isn't in listChannels at all, so the channel has to exist for @jungle to show
+//      up in the sidebar.
+//   8. The boot sweep reconciles workspaces that ALREADY have an agent (heals integrations + DMs),
+//      and only skips Liana's own Slack workspaces. It used to skip any workspace holding a
+//      liana_conductor, which wrongly skipped real workspaces: Liana reuses a user's existing
+//      Jungle workspace and puts its conductor inside it.
 //
 // Runs entirely against the service/db layer (no HTTP, no auth) in throwaway workspaces that are
 // dropped at the end. Provisioning is fired in the background by ensureJungleAgent and is expected
@@ -19,7 +26,13 @@
 // Run:  set -a; . .env; set +a; npx tsx backend/test/jungle-default-agent.mjs
 import * as db from "../src/db/index.ts";
 import { registerBuiltinIntegrations } from "../src/integrations/index.ts";
-import { ensureJungleAgent, syncJungleIntegrations, JUNGLE_HANDLE } from "../src/services/jungleAgent.ts";
+import {
+  ensureJungleAgent,
+  syncJungleIntegrations,
+  ensureJungleDmFor,
+  backfillJungleAgents,
+  JUNGLE_HANDLE,
+} from "../src/services/jungleAgent.ts";
 import { updateAgentConfigAs, deleteAgentAs, createAgentAs } from "../src/services/agentAdmin.ts";
 
 // index.ts does this at boot; without it adapterFor() finds nothing and every attach would store
@@ -132,6 +145,52 @@ async function main() {
     createAgentAs(other.owner, { handle: "jungle", displayName: "Impostor" }),
   );
   check("an agent can't be created on the jungle handle", takeErr !== null, "create unexpectedly succeeded");
+
+  // --- 7: DMs ----------------------------------------------------------------------------------
+  console.log("\nmember DMs");
+  const dmsOf = async (participantId) =>
+    (await db.listChannels(participantId)).filter((c) => c.kind === "dm");
+  const ownerDms = await dmsOf(owner.id);
+  check("the workspace creator has a DM with @jungle", ownerDms.some((c) => c.dm_with === agent.handle),
+    `got ${JSON.stringify(ownerDms.map((c) => c.dm_with))}`);
+
+  // Somebody who joins after @jungle already exists.
+  const latecomer = await db.createParticipant({
+    kind: "human", workspaceId: workspace.id, handle: `late-${sfx}`, displayName: "Latecomer",
+  });
+  await ensureJungleDmFor(latecomer);
+  check("a member who joins later gets one too",
+    (await dmsOf(latecomer.id)).some((c) => c.dm_with === agent.handle));
+
+  // …and somebody who was already there before the sweep runs (the backfill case).
+  const earlier = await db.createParticipant({
+    kind: "human", workspaceId: workspace.id, handle: `early-${sfx}`, displayName: "Earlier",
+  });
+  check("…who has none before the sweep", (await dmsOf(earlier.id)).length === 0);
+  await ensureJungleAgent(workspace.id);
+  check("the sweep opens the missing DM", (await dmsOf(earlier.id)).some((c) => c.dm_with === agent.handle));
+
+  const before = (await dmsOf(owner.id)).length;
+  await ensureJungleAgent(workspace.id);
+  check("re-running doesn't duplicate DMs", (await dmsOf(owner.id)).length === before, `went ${before} -> ${(await dmsOf(owner.id)).length}`);
+
+  // --- 8: the sweep's worklist ------------------------------------------------------------------
+  console.log("\nboot sweep worklist");
+  const eligible = await db.listWorkspaceIdsForJungleAgent();
+  check("includes a workspace that already has an agent", eligible.includes(workspace.id));
+
+  // A liana_conductor in a workspace must NOT exclude it — this is the bug that left real
+  // workspaces without an @jungle.
+  const conductorWs = await freshWorkspace("Has a conductor");
+  await db.createParticipant({
+    kind: "agent", workspaceId: conductorWs.workspace.id, handle: `liana-${sfx}`,
+    displayName: "Liana", runtime: "sdk", lianaConductor: true,
+  });
+  check("a workspace holding a liana_conductor is still eligible",
+    (await db.listWorkspaceIdsForJungleAgent()).includes(conductorWs.workspace.id));
+  await backfillJungleAgents();
+  check("…and the sweep gives it an agent",
+    (await db.getJungleAgent(conductorWs.workspace.id)) !== null);
 
   console.log(failures ? `\n${failures} check(s) failed` : "\nall checks passed");
 }

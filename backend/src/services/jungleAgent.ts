@@ -86,12 +86,40 @@ async function availableHandle(workspaceId: string): Promise<string> {
   return `jungle-${randomBytes(3).toString("hex")}`;
 }
 
-// Find-or-create a workspace's @jungle. Safe to call repeatedly: on an existing agent it just
-// re-runs the integration sync, which picks up accounts connected since it was created.
+// Open @jungle's DM with everyone in the workspace, so it is simply THERE in each member's DM list
+// — empty, but present — instead of appearing only after someone goes looking for it in the people
+// directory. listChannels is membership-scoped (db/channels.ts), so a DM you've never opened isn't
+// in your sidebar at all; the channel row has to exist for @jungle to be visible as the front door.
+// findOrCreateDm dedupes, so this is idempotent and safe to re-run on every boot.
+//
+// The new channel reaches open clients on their next channel-list fetch (page load / reconnect) —
+// creating a DM has never broadcast, and this doesn't add a first broadcast for it.
+async function ensureJungleDms(agent: db.Participant): Promise<void> {
+  const people = (await db.listParticipants(agent.workspace_id)).filter((p) => p.kind !== "agent");
+  for (const person of people) {
+    try {
+      await db.findOrCreateDm(agent.id, person.id);
+    } catch (e) {
+      console.error(`@jungle: could not open a DM with @${person.handle}:`, (e as Error).message);
+    }
+  }
+}
+
+// One member's side of the above — for someone who joins after @jungle already exists.
+export async function ensureJungleDmFor(person: db.Participant): Promise<void> {
+  const agent = await db.getJungleAgent(person.workspace_id);
+  if (!agent) return;
+  await db.findOrCreateDm(agent.id, person.id);
+}
+
+// Find-or-create a workspace's @jungle. Safe to call repeatedly, and that's the point: on an
+// existing agent it re-runs the integration sync (picking up accounts connected since) and re-opens
+// member DMs (picking up people who joined since), so the boot sweep heals both.
 export async function ensureJungleAgent(workspaceId: string): Promise<db.Participant> {
   const existing = await db.getJungleAgent(workspaceId);
   if (existing) {
     await attachDefaultIntegrations(existing);
+    await ensureJungleDms(existing);
     return existing;
   }
   const handle = await availableHandle(workspaceId);
@@ -116,6 +144,7 @@ export async function ensureJungleAgent(workspaceId: string): Promise<db.Partici
     // createdBy stays null: @jungle belongs to the workspace, not to whoever happened to make it.
   });
   await attachDefaultIntegrations(participant);
+  await ensureJungleDms(participant);
   void (async () => {
     try {
       await provisionerFor(participant).create({ id: participant.id, handle, runnerToken });
@@ -136,17 +165,23 @@ export async function syncJungleIntegrations(workspaceId: string): Promise<void>
   await attachDefaultIntegrations(agent);
 }
 
-// Boot backfill: give every workspace that predates this feature its default agent. One-shot and
-// best-effort — a workspace that fails is picked up on the next boot.
+// Boot sweep: make sure every eligible workspace has its default agent, its integrations, and a DM
+// open with each member. Runs over ALL eligible workspaces, not just ones missing an agent, so an
+// existing @jungle heals — that's how workspaces that were wrongly skipped by the old Liana filter,
+// and members who joined before this shipped, get picked up. Idempotent and best-effort; a
+// workspace that fails is retried on the next boot.
 export async function backfillJungleAgents(): Promise<void> {
-  const workspaceIds = await db.listWorkspaceIdsMissingJungleAgent();
+  const workspaceIds = await db.listWorkspaceIdsForJungleAgent();
   if (!workspaceIds.length) return;
-  console.log(`@jungle: backfilling the default agent into ${workspaceIds.length} workspace(s)`);
+  console.log(`@jungle: reconciling the default agent across ${workspaceIds.length} workspace(s)`);
+  let created = 0;
   for (const workspaceId of workspaceIds) {
     try {
+      if (!(await db.getJungleAgent(workspaceId))) created++;
       await ensureJungleAgent(workspaceId);
     } catch (e) {
-      console.error(`@jungle backfill failed for workspace ${workspaceId}:`, e);
+      console.error(`@jungle reconcile failed for workspace ${workspaceId}:`, e);
     }
   }
+  if (created) console.log(`@jungle: created the default agent in ${created} workspace(s)`);
 }
