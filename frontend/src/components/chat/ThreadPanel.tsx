@@ -1,11 +1,17 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, Hash, MessagesSquare, SendHorizonal, X } from "lucide-react";
+import { Check, Hash, MessagesSquare, Paperclip, SendHorizonal, X } from "lucide-react";
 import type { Channel, Message, Participant, UnreadThread } from "../../api";
 import { fmtTime } from "../../lib/chat";
 import { Markdown } from "../../Markdown";
 import { AgentBadge, AttachmentList, EmptyState, PersonAvatar } from "./panels";
 import { useMentionAutocomplete, MentionPopup } from "./mentionAutocomplete";
 import { ComposerInput } from "./ComposerInput";
+import {
+  DropOverlay,
+  PendingAttachmentChips,
+  useFileDrop,
+  usePendingAttachments,
+} from "./attachments";
 import { DeliverableChips } from "./deliverableCards";
 import { MessageTurnChips } from "./TurnChips";
 import type { QueuedTurn, TurnChipData } from "../../ws/useLiveTurns";
@@ -98,6 +104,7 @@ export function ThreadPanel({
   onClose,
   onOpenThreadFromList,
   onSendReply,
+  onNotice,
   rootTurns,
   rootQueued,
   personById,
@@ -117,7 +124,8 @@ export function ThreadPanel({
   onOpenProfile: (id: string) => void;
   onClose: () => void;
   onOpenThreadFromList: (t: UnreadThread) => void;
-  onSendReply: (body: string, alsoToChannel: boolean) => boolean;
+  onSendReply: (body: string, alsoToChannel: boolean, attachmentIds: string[]) => boolean;
+  onNotice: (msg: string) => void;
   // Turn/queued chips anchored to the thread root (every reply that re-triggers the agent
   // anchors here too — see orchestrator.ts), so the same chip shown in the main timeline is
   // visible here without leaving the thread.
@@ -140,6 +148,16 @@ export function ThreadPanel({
   const [alsoToChannel, setAlsoToChannel] = useState(false);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const composerRef = useRef<HTMLDivElement | null>(null);
+
+  const { pending, addFiles, removePending, clearPending, readyIds, uploading } =
+    usePendingAttachments(onNotice);
+  // Two zones rather than one wrapper: the transcript and the reply box are siblings in the
+  // panel's flex column, and wrapping them would change the layout.
+  const overTranscript = useFileDrop(scrollRef, addFiles, !!threadRootId);
+  const overComposer = useFileDrop(composerRef, addFiles, !!threadRootId);
+  const dragging = overTranscript || overComposer;
 
   // Jump-to-reply: runs after replies render; retries harmlessly until the target exists (the
   // jump path seeds the thread's messages before opening, so it's usually immediate).
@@ -156,20 +174,26 @@ export function ThreadPanel({
   const { mention, candidates, index, setIndex, syncMention, acceptMention, clearMention, handleKey } =
     useMentionAutocomplete({ people, members, participantId, draft: threadDraft, setDraft: setThreadDraft, taRef });
 
-  // Reset the per-send toggle + mention state when the open thread changes (the draft itself is
-  // NOT reset — it persists per thread via usePersistentDraft).
+  // Reset the per-send toggle, mention state and staged uploads when the open thread changes (the
+  // draft itself is NOT reset — it persists per thread via usePersistentDraft).
   useEffect(() => {
     setAlsoToChannel(false);
     clearMention();
-  }, [threadRootId, clearMention]);
+    clearPending();
+  }, [threadRootId, clearMention, clearPending]);
 
   function send() {
     const body = threadDraft.trim();
-    if (!body) return;
-    if (!onSendReply(body, alsoToChannel)) return;
+    if (!body && readyIds.length === 0) return;
+    if (uploading) {
+      onNotice("Wait for uploads to finish.");
+      return;
+    }
+    if (!onSendReply(body, alsoToChannel, readyIds)) return;
     setThreadDraft("");
     setAlsoToChannel(false);
     clearMention();
+    clearPending();
   }
 
   return (
@@ -286,8 +310,9 @@ export function ThreadPanel({
           </div>
 
           {/* Thread composer */}
-          <div className="shrink-0 px-3 pb-3 pt-1">
+          <div ref={composerRef} className="shrink-0 px-3 pb-3 pt-1">
             <div className="relative rounded-xl border bg-card p-2 shadow-sm focus-within:border-ring focus-within:ring-[3px] focus-within:ring-ring/20">
+              {dragging && <DropOverlay label="Drop files to attach" />}
               {/* @-mention autocomplete */}
               {mention && candidates.length > 0 && (
                 <MentionPopup
@@ -297,7 +322,30 @@ export function ThreadPanel({
                   onHover={setIndex}
                 />
               )}
+              <PendingAttachmentChips pending={pending} onRemove={removePending} />
               <div className="flex items-end gap-2">
+                <input
+                  ref={fileRef}
+                  data-testid="thread-attach-input"
+                  type="file"
+                  multiple
+                  className="hidden"
+                  onChange={(e) => {
+                    if (e.target.files?.length) addFiles(e.target.files);
+                    e.target.value = ""; // allow re-picking the same file
+                  }}
+                />
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  data-testid="thread-attach-button"
+                  aria-label="Attach files"
+                  title="Attach files"
+                  onClick={() => fileRef.current?.click()}
+                  className="size-8 shrink-0 text-muted-foreground"
+                >
+                  <Paperclip className="size-4" />
+                </Button>
                 <ComposerInput
                   taRef={taRef}
                   people={people}
@@ -307,6 +355,12 @@ export function ThreadPanel({
                   onChange={(e) => {
                     setThreadDraft(e.target.value);
                     syncMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
+                  }}
+                  onPaste={(e) => {
+                    if (e.clipboardData.files.length) {
+                      e.preventDefault();
+                      addFiles(e.clipboardData.files);
+                    }
                   }}
                   onSelect={(e) => {
                     const t = e.target as HTMLTextAreaElement;

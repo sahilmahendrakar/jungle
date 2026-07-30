@@ -1,15 +1,15 @@
-import { useLayoutEffect, useRef, useState } from "react";
-import { FileText, Loader2, Paperclip, SendHorizonal, X } from "lucide-react";
-import { uploadAttachment, type Participant } from "../../api";
-import {
-  MAX_ATTACHMENTS_PER_MESSAGE,
-  MAX_ATTACHMENT_BYTES,
-  newId,
-  type PendingAttachment,
-} from "../../lib/chat";
+import { useLayoutEffect, useRef, type RefObject } from "react";
+import { Paperclip, SendHorizonal } from "lucide-react";
+import { type Participant } from "../../api";
 import { usePersistentDraft } from "../../lib/drafts";
 import { useMentionAutocomplete, MentionPopup } from "./mentionAutocomplete";
 import { ComposerInput } from "./ComposerInput";
+import {
+  DropOverlay,
+  PendingAttachmentChips,
+  useFileDrop,
+  usePendingAttachments,
+} from "./attachments";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -18,10 +18,10 @@ import { cn } from "@/lib/utils";
 // The draft is persisted per channel (see lib/drafts.ts) — navigating to another screen,
 // switching channels, or reloading the page restores it, and it clears on send. Pending
 // attachments stay component-local (in-flight uploads can't survive an unmount). Mention
-// autocomplete lives in the shared useMentionAutocomplete hook (shared with the thread composer).
-// The parent only supplies the data needed for mention candidates and an
-// `onSend(body, attachmentIds)` that performs the actual WS post and returns whether it was
-// accepted (so the composer clears only on success).
+// autocomplete lives in the shared useMentionAutocomplete hook (shared with the thread composer),
+// and attachment staging/drop in ./attachments. The parent only supplies the data needed for
+// mention candidates and an `onSend(body, attachmentIds)` that performs the actual WS post and
+// returns whether it was accepted (so the composer clears only on success).
 export function Composer({
   draftKey,
   headerTitle,
@@ -32,6 +32,7 @@ export function Composer({
   onSend,
   onNotice,
   onOpenProfile,
+  dropTargetRef,
 }: {
   // Persistence key for the draft — the selected channel id (see lib/drafts.ts).
   draftKey: string | null;
@@ -43,11 +44,18 @@ export function Composer({
   onSend: (body: string, attachmentIds: string[]) => boolean;
   onNotice: (msg: string) => void;
   onOpenProfile?: (id: string) => void;
+  // Element that accepts dropped files. Defaults to the composer itself, but the parent passes
+  // the whole message pane so a screenshot can be dropped anywhere in the conversation.
+  dropTargetRef?: RefObject<HTMLElement | null>;
 }) {
   const [draft, setDraft] = usePersistentDraft(draftKey);
-  const [pending, setPending] = useState<PendingAttachment[]>([]);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
+  const { pending, addFiles, removePending, clearPending, readyIds, uploading } =
+    usePendingAttachments(onNotice);
+  const dragging = useFileDrop(dropTargetRef ?? rootRef, addFiles, !!draftKey);
 
   const { mention, candidates, index, setIndex, syncMention, acceptMention, clearMention, handleKey } =
     useMentionAutocomplete({ people, members, participantId, draft, setDraft, taRef });
@@ -61,62 +69,10 @@ export function Composer({
     ta.style.height = `${ta.scrollHeight}px`;
   }, [draft]);
 
-  // Stage files in the composer and start uploading each immediately (upload-first). Shared by the
-  // paperclip picker and paste-into-textarea.
-  function addFiles(files: FileList | File[]) {
-    let slots = MAX_ATTACHMENTS_PER_MESSAGE - pending.length;
-    const chips: PendingAttachment[] = [];
-    for (const file of Array.from(files)) {
-      if (slots <= 0) {
-        onNotice(`Up to ${MAX_ATTACHMENTS_PER_MESSAGE} attachments per message.`);
-        break;
-      }
-      if (file.size > MAX_ATTACHMENT_BYTES) {
-        onNotice(`"${file.name}" is too large (max 25MB per file).`);
-        continue;
-      }
-      slots--;
-      const key = newId();
-      chips.push({
-        key,
-        name: file.name,
-        size: file.size,
-        mime: file.type || "application/octet-stream",
-        status: "uploading",
-        previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined,
-      });
-      uploadAttachment(file)
-        .then((att) =>
-          setPending((ps) =>
-            ps.map((p) => (p.key === key ? { ...p, status: "ready" as const, att } : p)),
-          ),
-        )
-        .catch((e) =>
-          setPending((ps) =>
-            ps.map((p) =>
-              p.key === key
-                ? { ...p, status: "error" as const, error: String((e as Error).message ?? e) }
-                : p,
-            ),
-          ),
-        );
-    }
-    if (chips.length) setPending((ps) => [...ps, ...chips]);
-  }
-
-  function removePending(key: string) {
-    const gone = pending.find((p) => p.key === key);
-    if (gone?.previewUrl) URL.revokeObjectURL(gone.previewUrl);
-    setPending((ps) => ps.filter((p) => p.key !== key));
-  }
-
   function send() {
     const body = draft.trim();
-    const readyIds = pending
-      .filter((p) => p.status === "ready" && p.att)
-      .map((p) => p.att!.id);
     if (!body && readyIds.length === 0) return;
-    if (pending.some((p) => p.status === "uploading")) {
+    if (uploading) {
       onNotice("Wait for uploads to finish.");
       return;
     }
@@ -124,18 +80,17 @@ export function Composer({
     // back. onSend returns false (and surfaces its own notice) if it couldn't send.
     if (!onSend(body, readyIds)) return;
     setDraft("");
-    for (const p of pending) if (p.previewUrl) URL.revokeObjectURL(p.previewUrl);
-    setPending([]);
+    clearPending();
     clearMention();
   }
 
   // Anything ready to send? Drives the send button's enabled/dimmed affordance.
-  const canSend =
-    draft.trim().length > 0 || pending.some((p) => p.status === "ready" && p.att);
+  const canSend = draft.trim().length > 0 || readyIds.length > 0;
 
   return (
-    <div className="px-3 pb-3 pt-1 md:px-5 md:pb-5">
+    <div ref={rootRef} className="px-3 pb-3 pt-1 md:px-5 md:pb-5">
       <div className="relative rounded-2xl border bg-card p-2 shadow-sm transition-shadow focus-within:border-ring focus-within:shadow-md focus-within:ring-[3px] focus-within:ring-ring/20">
+        {dragging && <DropOverlay label="Drop files to attach" />}
         {/* @-mention autocomplete */}
         {mention && candidates.length > 0 && (
           <MentionPopup
@@ -146,50 +101,7 @@ export function Composer({
           />
         )}
         {/* Staged attachments (upload-first): thumbnails for images, a file icon otherwise. */}
-        {pending.length > 0 && (
-          <div className="mb-2 flex flex-wrap gap-2 px-1">
-            {pending.map((p) => (
-              <div
-                key={p.key}
-                data-testid="pending-attachment"
-                data-status={p.status}
-                className={cn(
-                  "flex items-center gap-2 rounded-lg border bg-muted/40 py-1 pl-1.5 pr-1.5 text-sm",
-                  p.status === "error" && "border-destructive/40 bg-destructive/5",
-                )}
-              >
-                {p.previewUrl ? (
-                  <img
-                    src={p.previewUrl}
-                    alt={p.name}
-                    className="size-9 shrink-0 rounded-md border object-cover"
-                  />
-                ) : (
-                  <span className="flex size-9 shrink-0 items-center justify-center rounded-md border bg-background">
-                    <FileText className="size-4 text-muted-foreground" />
-                  </span>
-                )}
-                <span className="max-w-40 truncate">{p.name}</span>
-                {p.status === "uploading" && (
-                  <Loader2 className="size-4 shrink-0 animate-spin text-muted-foreground" />
-                )}
-                {p.status === "error" && (
-                  <span className="shrink-0 text-xs text-destructive" title={p.error}>
-                    failed
-                  </span>
-                )}
-                <button
-                  data-testid="pending-attachment-remove"
-                  onClick={() => removePending(p.key)}
-                  aria-label={`Remove ${p.name}`}
-                  className="flex size-5 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                >
-                  <X className="size-3.5" />
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
+        <PendingAttachmentChips pending={pending} onRemove={removePending} />
         <div className="flex items-end gap-2">
           <input
             ref={fileRef}
