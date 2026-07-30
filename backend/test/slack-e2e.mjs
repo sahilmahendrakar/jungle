@@ -45,7 +45,7 @@ async function seed() {
   await db.query(
     `insert into slack_installs (workspace_id, team_id, team_name, bot_token, bot_user_id, bot_id)
      values ($1,$2,'Test Team','xoxb-test','UBOT','BBOT')
-     on conflict (workspace_id) do update set bot_token=excluded.bot_token`, [WS, TEAM]);
+     on conflict (workspace_id, kind) do update set bot_token=excluded.bot_token`, [WS, TEAM]);
   await db.query(
     `insert into slack_channel_links (workspace_id, jungle_channel_id, slack_team_id, slack_channel_id, slack_channel_name)
      values ($1,$2,$3,$4,'general')

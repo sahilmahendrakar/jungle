@@ -19,6 +19,7 @@ import pushRouter from "./http/routes/push";
 import adminRouter from "./http/routes/admin";
 import llmRouter from "./http/routes/llm";
 import { slackEventsRouter, slackRouter } from "./http/routes/slack";
+import { slackAgentEventsRouter, slackAgentRouter } from "./http/routes/slackAgentApp";
 import { lianaEventsRouter, lianaRouter } from "./http/routes/liana";
 import tokensRouter from "./http/routes/tokens";
 import subscriptionRouter from "./http/routes/subscription";
@@ -34,6 +35,8 @@ export function createApp(): express.Express {
   // The Slack events webhook verifies its signature over the RAW body, so like the LLM proxy it
   // must be mounted BEFORE express.json(). The rest of the Slack routes are ordinary JSON below.
   app.use(slackEventsRouter);
+  // The Slack AGENT app (@jungle's DM) — its own app, its own signing secret, raw body likewise.
+  app.use(slackAgentEventsRouter);
   // Liana's Slack webhooks (its own app + signing secret) — raw body for the same reason.
   app.use(lianaEventsRouter);
   app.use(express.json());
@@ -75,6 +78,7 @@ export function createApp(): express.Express {
   app.use(pushRouter);
   app.use(adminRouter); // operator-only platform usage/spend (see admins.ts)
   app.use(slackRouter);
+  app.use(slackAgentRouter);
   app.use(lianaRouter);
   app.use(tokensRouter);
   app.use(subscriptionRouter);
