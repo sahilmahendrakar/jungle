@@ -19,7 +19,9 @@ const WS = "00000000-0000-0000-0000-0000000000a1";
 const HUMAN = "11111111-1111-1111-1111-1111111111a1";
 const JUNGLE = "22222222-2222-2222-2222-2222222222a1";
 const MIRROR_CHAN = "33333333-3333-3333-3333-3333333333a1";
+const WS2 = "00000000-0000-0000-0000-0000000000a2"; // a workspace with no @jungle
 const TEAM = "TAGENT";
+const TEAM2 = "TAGENT2";
 const IM = "D1"; // the Slack IM between the user and the agent app's bot
 const MIRROR_TOKEN = "xoxb-mirror";
 const AGENT_TOKEN = "xoxb-agent";
@@ -189,6 +191,27 @@ async function run() {
     const home = published.find((p) => p.user === "U9");
     assert(!!home && home.blocks.length > 0, "app_home_opened published a view", JSON.stringify(home ?? null));
     assert(!!home && home.token === AGENT_TOKEN, "App Home published with the agent app's token", `token=${home?.token}`);
+  }
+
+  // I) a workspace with no @jungle at all (nobody on a Claude subscription) gets an explanation in
+  //    the DM, not silence. ensureJungleAgent returns null there.
+  {
+    await db.query(`insert into workspaces (id, name) values ($1,'No Jungle WS') on conflict (id) do nothing`, [WS2]);
+    await db.query(
+      `insert into slack_installs (workspace_id, team_id, team_name, bot_token, bot_user_id, bot_id, kind)
+       values ($1,$2,'No Jungle Team','xoxb-agent2','UAGENT2','BAGENT2','agent')
+       on conflict (workspace_id, kind) do update set bot_token=excluded.bot_token`, [WS2, TEAM2]);
+    const ev = imEvent({ user: "U8", text: "anyone home?", channel: "D2", ts: `${Date.now()}.000600` });
+    ev.team_id = TEAM2;
+    await signedFetch(ev);
+    await sleep(1200);
+    const { posted } = await recorded();
+    const reply = posted.find((p) => p.channel === "D2");
+    assert(!!reply && /subscription/i.test(reply.text), "no-@jungle workspace gets an explanation, not silence",
+      JSON.stringify(reply ?? null));
+    const { rows } = await db.query(
+      `select count(*)::int n from slack_channel_links where slack_team_id=$1`, [TEAM2]);
+    assert(rows[0].n === 0, "no DM binding created when there is no agent", `links=${rows[0].n}`);
   }
 
   console.log(`\n${pass} assertions passed`);

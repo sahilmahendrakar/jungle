@@ -88,7 +88,24 @@ async function handleDirectMessage(
 
   // @jungle is created with the workspace and backfilled at boot, but ensure it here too: this is
   // a front door, and "the agent doesn't exist yet" must never be a dead end.
+  //
+  // It returns null when nobody in the workspace is on a Claude subscription (jungleAgent.ts) —
+  // there is genuinely no agent to talk to. Say so in the DM rather than dropping the message:
+  // someone just typed to us and silence is the one reply we must never give.
   const agent = await ensureJungleAgent(install.workspace_id);
+  if (!agent) {
+    await slack
+      .chatPostMessage(install.bot_token, {
+        channel: ev.channel!,
+        text:
+          "I'm not set up in this workspace yet — someone here needs to connect a Claude " +
+          "subscription in Jungle first (Settings → Subscription). Once that's done, message me " +
+          "again and I'll pick up right here.",
+        threadTs: ev.thread_ts ?? null,
+      })
+      .catch((e) => console.error("slack agent: could not explain missing @jungle", (e as Error).message));
+    return;
+  }
 
   const link = await ensureDmLink(install, teamId, ev.channel!, agent, sender, slackUserId);
   if (!link) return;
