@@ -8,6 +8,7 @@ import { githubAdapter } from "./github";
 import { gmailAdapter } from "./gmail";
 import { googleDriveAdapter } from "./google-drive";
 import { googleCalendarAdapter } from "./google-calendar";
+import { googleAnalyticsAdapter } from "./google-analytics";
 import { xAdapter } from "./x";
 import { linearAdapter, notionAdapter, granolaAdapter } from "./providers";
 import { posthogAdapter, mixpanelAdapter } from "./analytics";
@@ -21,6 +22,7 @@ export function registerBuiltinIntegrations(): void {
   registerAdapter(gmailAdapter);
   registerAdapter(googleDriveAdapter);
   registerAdapter(googleCalendarAdapter);
+  registerAdapter(googleAnalyticsAdapter);
   registerAdapter(xAdapter);
   registerAdapter(linearAdapter);
   registerAdapter(notionAdapter);

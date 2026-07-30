@@ -53,6 +53,7 @@ import { createGmailMcpServer } from "./gmail-tool.js";
 import { createDriveMcpServer } from "./drive-tool.js";
 import { createCalendarMcpServer } from "./calendar-tool.js";
 import { createXMcpServer } from "./x-tool.js";
+import { createAnalyticsMcpServer } from "./analytics-tool.js";
 import { applyGitCredentials, cloneRepoIfNeeded, getGhToken } from "./git.js";
 import { loadState, saveState, stateDir } from "./state.js";
 import { ServiceManager } from "./services.js";
@@ -108,6 +109,8 @@ const SAFE_TOOLS = new Set([
   // X (Twitter) is read-only by design — every x_* tool runs without a confirmation.
   "mcp__x__x_my_recent_tweets", "mcp__x__x_mentions", "mcp__x__x_replies_to_me",
   "mcp__x__x_notifications", "mcp__x__x_search", "mcp__x__x_get_user",
+  // Google Analytics is read-only by design — every analytics_* tool runs without a confirmation.
+  "mcp__ganalytics__analytics_list_properties", "mcp__ganalytics__analytics_run_report",
   // Schedule tools are bounded jungle-app operations with backend-enforced guardrails (caps,
   // min interval, prompt cap) and full human visibility/undo on the Scheduled page — a confirm
   // card would be noise, not safety.
@@ -147,6 +150,9 @@ const X_READ_TOOLS = [
   "mcp__x__x_search",
   "mcp__x__x_get_user",
 ];
+
+// Google Analytics tools are all read-only — auto-allowed in every mode, no write gating.
+const ANALYTICS_READ_TOOLS = ["mcp__ganalytics__analytics_list_properties", "mcp__ganalytics__analytics_run_report"];
 
 // Fallback context reading derived from a `result` SDK message when the
 // getContextUsage() control request is unavailable. The turn's final input
@@ -251,6 +257,10 @@ export class Runner {
   // X integration attached. The x MCP server reads the token live per call, so a refresh applies
   // without rebuilding.
   private xSettings: { account: string } | null = null;
+
+  // Google Analytics integration state (in-process, read-only, like X): settings from `configure`;
+  // the token lives in integrationTokens under key "google-analytics".
+  private analyticsSettings: { email: string } | null = null;
 
   // Remote-MCP integrations (Linear/Notion/Granola/…) from `configure`: the grants (key, url,
   // safeTools, requireApproval). Access tokens for BOTH the remote-MCP integrations and the
@@ -579,6 +589,14 @@ export class Runner {
     } else {
       this.xSettings = null;
     }
+    // Google Analytics (in-process, read-only, like X): hold the account + seed its token under
+    // "google-analytics".
+    if (frame.analytics) {
+      this.integrationTokens.set("google-analytics", frame.analytics.accessToken);
+      this.analyticsSettings = { email: frame.analytics.email };
+    } else {
+      this.analyticsSettings = null;
+    }
     this.configured = true;
     void saveState({ sessionId: this.sessionId, model: this.model });
     this.sendState();
@@ -788,6 +806,9 @@ export class Runner {
     // X: in-process, read-only server. All tools auto-allowed (nothing to approve).
     const xServer = this.xSettings ? this.buildXServer() : null;
     if (xServer) allowedTools.push(...X_READ_TOOLS);
+    // Google Analytics: in-process, read-only server (like X). All tools auto-allowed.
+    const analyticsServer = this.analyticsSettings ? this.buildAnalyticsServer() : null;
+    if (analyticsServer) allowedTools.push(...ANALYTICS_READ_TOOLS);
     // Mount each connected remote-MCP integration as a remote HTTP server with a Bearer header
     // built from the current token. Read-only (safe) tools are auto-allowed; when the agent's
     // approval toggle is off, allow all of that server's tools; otherwise non-safe tools route
@@ -797,6 +818,7 @@ export class Runner {
     if (driveServer) mcpServers.gdrive = driveServer;
     if (calendarServer) mcpServers.gcalendar = calendarServer;
     if (xServer) mcpServers.x = xServer;
+    if (analyticsServer) mcpServers.ganalytics = analyticsServer;
     for (const grant of this.mcpIntegrations) {
       const token = this.integrationTokens.get(grant.key) ?? grant.accessToken;
       mcpServers[grant.key] = { type: "http", url: grant.url, headers: { Authorization: `Bearer ${token}` } };
@@ -1066,6 +1088,11 @@ export class Runner {
     return createXMcpServer(() => this.integrationTokens.get("x") ?? null);
   }
 
+  // The in-process "ganalytics" SDK-MCP server (analytics_*), same live-token pattern as X.
+  private buildAnalyticsServer() {
+    return createAnalyticsMcpServer(() => this.integrationTokens.get("google-analytics") ?? null);
+  }
+
   // Rebuild the CLI's connection to our in-process "jungle" SDK-MCP server after a mid-turn
   // session re-init (see the reconnect comment in runTurn). reconnectMcpServer() rejects for
   // in-process (sdk) servers, so we cycle setMcpServers instead: removing 'jungle' tears down the
@@ -1082,6 +1109,7 @@ export class Runner {
       if (this.driveSettings) servers.gdrive = this.buildDriveServer();
       if (this.calendarSettings) servers.gcalendar = this.buildCalendarServer();
       if (this.xSettings) servers.x = this.buildXServer();
+      if (this.analyticsSettings) servers.ganalytics = this.buildAnalyticsServer();
       // Re-mount remote-MCP integrations too, with the current token per key.
       for (const grant of this.mcpIntegrations) {
         const token = this.integrationTokens.get(grant.key) ?? grant.accessToken;

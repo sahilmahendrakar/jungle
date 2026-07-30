@@ -330,6 +330,10 @@ export interface ConfigureFrame {
   // token for the connected account and its @handle. Read-only in-process MCP server (x_* tools);
   // the token is refreshed mid-session via IntegrationCredentialsFrame keyed "x".
   x?: { accessToken: string; account: string };
+  // The agent's attached Google Analytics integration, if any: a fresh OAuth access token for the
+  // connected account and its address. Read-only in-process MCP server (analytics_* tools); the
+  // token is refreshed mid-session via IntegrationCredentialsFrame keyed "google-analytics".
+  analytics?: { accessToken: string; email: string };
 }
 
 // A file attached to the message that produced an inbox item. `url` is an origin-relative
