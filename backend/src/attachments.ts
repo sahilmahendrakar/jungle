@@ -19,16 +19,47 @@ export function isInlineImage(mime: string): boolean {
 }
 
 // Keep just a safe basename: strip any path, control chars and quotes, cap the length.
+// Non-ASCII is deliberately preserved (accents, CJK, the U+202F macOS screenshots carry) —
+// making it header-safe is contentDisposition's job, so the stored name stays the real one.
 export function sanitizeFilename(raw: string): string {
   const base = raw.replace(/\\/g, "/").split("/").pop() ?? "file";
   const clean = [...base]
     .filter((ch) => {
       const c = ch.charCodeAt(0);
-      return c >= 32 && c !== 127 && ch !== '"';
+      // Drop C0 and C1 control ranges; both are non-printable and neither survives a header.
+      return c >= 32 && c !== 127 && !(c >= 0x80 && c <= 0x9f) && ch !== '"';
     })
     .join("")
     .trim();
   return (clean || "file").slice(0, 200);
+}
+
+// Percent-encode for RFC 5987's ext-value. encodeURIComponent leaves !'()*~ alone, but only
+// !, -, ., _ and ~ are valid attr-chars, so the other four need escaping by hand.
+function encodeExtValue(s: string): string {
+  return encodeURIComponent(s).replace(
+    /['()*]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+}
+
+// Build a Content-Disposition value that Node will actually accept.
+//
+// Header values are Latin-1 only; Node throws ERR_INVALID_CHAR on anything else. macOS names
+// its screenshots with U+202F (narrow no-break space) before AM/PM, so `Screenshot … 9.12.37 AM.png`
+// crashed the response mid-handler and the request came back as a 500 — see PR discussion.
+// RFC 5987/6266 is the fix: an ASCII-only `filename=` for ancient clients plus a UTF-8
+// `filename*=` that every current browser prefers. Doing this at serve time rather than at
+// upload means the rows already in the database heal without a migration.
+export function contentDisposition(type: "inline" | "attachment", filename: string): string {
+  const ascii = [...filename]
+    .map((ch) => {
+      const c = ch.charCodeAt(0);
+      return c < 32 || c > 126 || ch === '"' || ch === "\\" ? "_" : ch;
+    })
+    .join("")
+    .trim();
+  return `${type}; filename="${ascii || "file"}"; filename*=UTF-8''${encodeExtValue(filename)}`;
 }
 
 // --- Signed capability URLs ---
