@@ -3,7 +3,7 @@ import { HANDLE_RE } from "@jungle/shared";
 import type { InviteInfo } from "@jungle/shared";
 import * as db from "../../db";
 import * as auth from "../../auth";
-import { ensureJungleAgent } from "../../services/jungleAgent";
+import { ensureJungleAgent, ensureJungleDmFor } from "../../services/jungleAgent";
 import { wrap, ApiError } from "../errors";
 import { publicParticipant, requireRequester } from "../guards";
 
@@ -132,6 +132,9 @@ router.post(
       kind: "human", workspaceId: invite.workspace_id, handle, displayName,
       firebaseUid: u.uid, email: u.email, avatarUrl: u.picture,
     });
+    // New member → @jungle is waiting in their DMs from the start, same as for the workspace's
+    // creator. Best-effort: joining must not fail because the default agent isn't there yet.
+    void ensureJungleDmFor(participant).catch((e) => console.error("jungle dm for new member:", e));
     res.status(201).json(publicParticipant(participant));
   }),
 );

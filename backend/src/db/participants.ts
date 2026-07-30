@@ -299,22 +299,21 @@ export async function getJungleAgent(workspaceId: string): Promise<Participant |
   return rows[0] ?? null;
 }
 
-// Workspaces with no default agent yet — the boot backfill's worklist (services/jungleAgent.ts).
-// Liana workspaces are skipped: Liana is a separate Slack-first product whose workspaces are
-// created one-per-user behind the scenes, and nobody there is ever going to type @jungle — giving
-// each one an agent would provision a machine per Liana user for nothing. A workspace is Liana's
-// if it holds a Slack install or a Liana conductor agent (services/liana.ts).
-export async function listWorkspaceIdsMissingJungleAgent(): Promise<string[]> {
+// Every workspace that should have a default agent — the boot sweep's worklist
+// (services/jungleAgent.ts). Returns workspaces that already have one too: ensureJungleAgent is a
+// find-or-create that also heals integrations and member DMs, so the sweep is how an existing
+// @jungle picks up anything it's missing.
+//
+// Only Liana's own Slack workspaces are excluded. The exclusion used to also skip any workspace
+// containing a liana_conductor agent, which was wrong and silently skipped real workspaces: Liana
+// REUSES a user's existing Jungle workspace when they have one (services/liana.ts
+// resolveWebAccount -> memberships[0]) and creates its conductor inside it, so "has a conductor"
+// says nothing about whether the workspace is Liana's. A Slack install does.
+export async function listWorkspaceIdsForJungleAgent(): Promise<string[]> {
   const { rows } = await pool.query<{ id: string }>(
     `select w.id from workspaces w
       where not exists (
-        select 1 from participants p where p.workspace_id = w.id and p.jungle_default
-      )
-      and not exists (
         select 1 from liana_slack_installs li where li.workspace_id = w.id and li.status = 'active'
-      )
-      and not exists (
-        select 1 from participants lp where lp.workspace_id = w.id and lp.liana_conductor
       )`,
   );
   return rows.map((r) => r.id);
