@@ -69,6 +69,7 @@ import {
 import { ParticipantProfilePanel, ConfirmCard } from "./components/chat/panels";
 import { AddAgentDialog } from "./components/chat/AddAgentDialog";
 import { Composer } from "./components/chat/Composer";
+import { useWindowDropGuard } from "./components/chat/attachments";
 import { ChannelHeader } from "./components/chat/ChannelHeader";
 import { MessageList } from "./components/chat/MessageList";
 import { Sidebar } from "./components/chat/Sidebar";
@@ -137,6 +138,12 @@ export function App({
   // useMemos below depend on it.
   const { liveTurnsRef, turnChipsRef, queuedRef, liveVersion, ingestLiveEvent, ingestQueued, hydrateChannel } =
     useLiveTurns();
+
+  // The message pane doubles as the channel composer's file drop zone (Slack-style: drop anywhere
+  // in the conversation, not just on the composer bar). useWindowDropGuard stops a missed drop
+  // from navigating the tab to the file.
+  const mainRef = useRef<HTMLElement | null>(null);
+  useWindowDropGuard();
 
   // Threads. The right-side panel is open when a thread is open (threadRootId) or the Threads
   // list is showing (threadsListOpen). Replies + the root are DERIVED from `messages` (the
@@ -659,7 +666,11 @@ export function App({
   // main timeline too.
   // Post a reply into the open thread over WS. Returns false (with a notice) when it can't send,
   // so ThreadPanel keeps the draft. The reply reappears in `messages` and the pane re-derives.
-  function sendThreadReply(body: string, alsoToChannel: boolean): boolean {
+  function sendThreadReply(
+    body: string,
+    alsoToChannel: boolean,
+    attachmentIds: string[],
+  ): boolean {
     if (!threadRootId || !threadRoot) return false;
     if (wsRef.current?.readyState !== WebSocket.OPEN) {
       setNotice("Connecting to the server… try again in a moment.");
@@ -673,6 +684,7 @@ export function App({
         clientMsgId: newId(),
         threadRootId,
         ...(alsoToChannel ? { alsoToChannel: true } : {}),
+        ...(attachmentIds.length ? { attachmentIds } : {}),
       }),
     );
     return true;
@@ -1269,7 +1281,7 @@ export function App({
           onAddAgent={() => setShowAddAgent(true)}
         />
       ) : (
-      <main className="flex min-w-0 flex-1 flex-col bg-background">
+      <main ref={mainRef} className="flex min-w-0 flex-1 flex-col bg-background">
         {/* Channel header */}
         <ChannelHeader
           channel={sel}
@@ -1365,6 +1377,7 @@ export function App({
           onSend={postMessage}
           onNotice={setNotice}
           onOpenProfile={openProfilePanel}
+          dropTargetRef={mainRef}
         />
       </main>
       )}
@@ -1455,6 +1468,7 @@ export function App({
               onClose={closeThreadPanel}
               onOpenThreadFromList={openThreadFromList}
               onSendReply={sendThreadReply}
+              onNotice={setNotice}
               rootTurns={(threadRootId && turnsByMessage.get(threadRootId)) || []}
               rootQueued={(threadRootId && queuedByMessage.get(threadRootId)) || []}
               personById={(id) => peopleById.get(id)}
