@@ -188,6 +188,16 @@ async function main() {
   });
   check("a workspace holding a liana_conductor is still eligible",
     (await db.listWorkspaceIdsForJungleAgent()).includes(conductorWs.workspace.id));
+  // …and so is one with an active Liana Slack install. That filter skipped the seed workspace —
+  // a workspace people work in daily can have Liana's Slack app installed too.
+  const slackWs = await freshWorkspace("Has a slack install");
+  await db.pool.query(
+    `insert into liana_slack_installs (workspace_id, team_id, team_name, bot_token, bot_user_id, status)
+     values ($1, $2, 'Test', 'xoxb-test', 'U-test', 'active')`,
+    [slackWs.workspace.id, `T${sfx}`],
+  );
+  check("a workspace with an active Liana Slack install is still eligible",
+    (await db.listWorkspaceIdsForJungleAgent()).includes(slackWs.workspace.id));
   await backfillJungleAgents();
   check("…and the sweep gives it an agent",
     (await db.getJungleAgent(conductorWs.workspace.id)) !== null);
