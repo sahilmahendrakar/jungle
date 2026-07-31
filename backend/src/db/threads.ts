@@ -10,7 +10,8 @@ import type { ContextPage } from "./messages";
 // as `root`.
 const FOLLOWS_THREAD_SQL = `(
   root.sender_id = $1
-  or exists (select 1 from messages r where r.thread_root_id = root.id and r.sender_id = $1)
+  or exists (select 1 from messages r
+              where r.thread_root_id = root.id and r.sender_id = $1 and r.deleted_at is null)
   or exists (
     select 1 from mentions mn join messages tm on tm.id = mn.message_id
     where mn.participant_id = $1 and (tm.id = root.id or tm.thread_root_id = root.id)
@@ -36,6 +37,7 @@ export async function listUnreadThreads(participantId: string): Promise<UnreadTh
             on reply.thread_root_id = root.id
            and reply.seq > coalesce(tr.last_read_seq, 0)
            and reply.sender_id <> $1
+           and reply.deleted_at is null
      where root.thread_root_id is null
        and root.reply_count > 0
        and ${FOLLOWS_THREAD_SQL}
@@ -81,7 +83,7 @@ export async function agentIdsInThread(rootId: string): Promise<string[]> {
   const { rows } = await pool.query<{ id: string }>(
     `select distinct p.id
      from messages m join participants p on p.id = m.sender_id
-     where p.kind = 'agent' and (m.id = $1 or m.thread_root_id = $1)`,
+     where p.kind = 'agent' and (m.id = $1 or m.thread_root_id = $1) and m.deleted_at is null`,
     [rootId],
   );
   return rows.map((r) => r.id);
@@ -95,7 +97,7 @@ export async function getThreadContext(rootId: string, limit = 40): Promise<stri
             (select array_agg(a.filename order by a.created_at)
              from attachments a where a.message_id = m.id) as att
      from messages m join participants p on p.id = m.sender_id
-     where m.id = $1 or m.thread_root_id = $1
+     where (m.id = $1 or m.thread_root_id = $1) and m.deleted_at is null
      order by m.seq desc limit $2`,
     [rootId, limit],
   );
@@ -115,7 +117,8 @@ export async function getThreadHistoryBefore(
             (select array_agg(a.filename order by a.created_at)
              from attachments a where a.message_id = m.id) as att
      from messages m join participants p on p.id = m.sender_id
-     where (m.id = $1 or m.thread_root_id = $1) ${beforeSeq ? "and m.seq < $3" : ""}
+     where (m.id = $1 or m.thread_root_id = $1) and m.deleted_at is null
+       ${beforeSeq ? "and m.seq < $3" : ""}
      order by m.seq desc limit $2`,
     beforeSeq ? [rootId, limit, beforeSeq] : [rootId, limit],
   );

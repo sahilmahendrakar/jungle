@@ -5,6 +5,7 @@ import * as slack from "../slack/api";
 import { slackToJungleText, jungleToSlackText, mentionedSlackUserIds } from "../slack/format";
 import { announceParticipant, fanOut, broadcastWorkspace, DEFAULT_CASCADE_BUDGET } from "../ws/appSocket";
 import { triggerMentionedAgents } from "./orchestrator";
+import * as messages from "./messages";
 import { ApiError } from "../http/errors";
 
 // The Slack <-> Jungle bridge. Ingress (processSlackEvent): a verified Slack event becomes a Jungle
@@ -37,8 +38,10 @@ function broadcastLink(row: db.SlackChannelLinkRow): void {
 
 // ============================ INGRESS ============================
 
-// Slack subtypes we mirror. Everything else (message_changed, message_deleted, channel_join,
-// bot_message, …) is dropped — Jungle is insert-only and v1 excludes edits/deletes.
+// Slack subtypes we mirror as new messages. Everything else (message_changed, channel_join,
+// bot_message, …) is dropped — Jungle has no edit path. message_deleted is NOT in this set but
+// is handled separately below: the mirror is two-way, so a message deleted on either side
+// disappears on both.
 const MIRRORED_SUBTYPES = new Set([undefined, "file_share", "thread_broadcast"] as (string | undefined)[]);
 
 interface SlackEventEnvelope {
@@ -53,6 +56,7 @@ interface SlackEventEnvelope {
     channel?: string;
     text?: string;
     ts?: string;
+    deleted_ts?: string; // message_deleted: the ts of the message that went away (ts is the event's)
     thread_ts?: string;
     files?: { name?: string; title?: string }[];
   };
@@ -65,6 +69,22 @@ export async function processSlackEvent(payload: SlackEventEnvelope): Promise<vo
   if (payload.type !== "event_callback" || !payload.event_id || !payload.team_id) return;
   const ev = payload.event;
   if (!ev || ev.type !== "message" || !ev.channel || !ev.ts) return;
+
+  // Someone deleted a mirrored message over in Slack — delete our copy. Runs before the
+  // MIRRORED_SUBTYPES gate and before the echo-drop below, because a message_deleted event
+  // carries no `user` (the author lives in previous_message) and would be dropped there.
+  // Our OWN mirror-delete comes back as one of these; it's a no-op because the deleting side
+  // already dropped the link row (services/messages.ts).
+  if (ev.subtype === "message_deleted") {
+    if (!ev.deleted_ts) return;
+    if (!(await db.recordSlackEvent(payload.event_id))) return;
+    const link = await db.getMessageLinkBySlackTs(payload.team_id, ev.channel, ev.deleted_ts);
+    if (!link) return;
+    // No actor: the deleter is a Slack user, not a Jungle participant. Nothing to mirror BACK —
+    // the Slack copy is already gone.
+    await messages.deleteMessage(link.jungle_message_id, null, { mirrorToSlack: false });
+    return;
+  }
   if (!MIRRORED_SUBTYPES.has(ev.subtype)) return;
 
   // Dedupe (Events API is at-least-once). recordSlackEvent returns false if already seen.
@@ -261,6 +281,13 @@ async function tickOutbox(): Promise<void> {
 }
 
 async function deliverJob(job: db.OutboxJob): Promise<boolean> {
+  // The message can be deleted between the claim and the post — mirroring it now would put a
+  // message into Slack that no longer exists here, and (having no link row yet) it would dodge
+  // the mirror-delete entirely. Close the job out so it doesn't sit pending forever.
+  if (await db.isMessageDeleted(job.message_id)) {
+    await db.markOutboxDelivered(job.outbox_id);
+    return true;
+  }
   // Map a Jungle thread reply back to the Slack thread (top-level if the root isn't mirrored).
   let threadTs: string | null = null;
   if (job.thread_root_id) {

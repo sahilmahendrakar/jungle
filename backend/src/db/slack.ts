@@ -266,6 +266,12 @@ export async function getMessageLinkByJungleId(jungleMessageId: string): Promise
   return rows[0] ?? null;
 }
 
+// Forget a message mapping — used after the Slack copy is deleted (services/messages.ts), so a
+// later thread reply can't try to hang off a ts that no longer exists.
+export async function deleteMessageLink(jungleMessageId: string): Promise<void> {
+  await pool.query(`delete from slack_message_links where jungle_message_id = $1`, [jungleMessageId]);
+}
+
 export async function getMessageLinkBySlackTs(
   teamId: string,
   slackChannelId: string,
@@ -342,7 +348,11 @@ export async function claimDueOutbox(client: PoolClient, limit = 50): Promise<Ou
             l.id as link_id, l.slack_channel_id, l.slack_team_id,
             i.bot_token, i.bot_id, i.kind as install_kind, i.workspace_id
      from slack_outbox o
-     join messages m on m.id = o.jungle_message_id
+     -- Deleted messages (soft delete, migration 048) drop out of the drain: a message deleted
+     -- between the post and the mirror must not still show up in Slack. softDeleteMessage also
+     -- removes the pending job outright — this is the belt to that suspenders, and it covers a
+     -- job already claimed by an in-flight ticker.
+     join messages m on m.id = o.jungle_message_id and m.deleted_at is null
      join participants p on p.id = m.sender_id
      join slack_channel_links l on l.id = o.link_id
      -- Match the install that OWNS this link: a workspace can have both the mirror app and the

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Activity, Check, Copy, MessageSquare, MessagesSquare } from "lucide-react";
+import { Activity, Check, Copy, MessageSquare, MessagesSquare, Trash2 } from "lucide-react";
 import type { Message, Participant, ExtractedLink } from "../../api";
 import { extractDeliverableLinks } from "../../api";
 import { fmtTime } from "../../lib/chat";
@@ -78,15 +78,20 @@ function HoverActions({
   m,
   showReply,
   showWork,
+  showDelete,
   onOpenThread,
   onOpenTurn,
+  onDelete,
 }: {
   m: Message;
   showReply: boolean;
   // The sender is an agent and this message is linked to the runner turn that produced it.
   showWork: boolean;
+  // I'm allowed to delete this one (my own message, or any agent's). Mirrors the server rule.
+  showDelete: boolean;
   onOpenThread: (rootId: string) => void;
   onOpenTurn: (m: Message) => void;
+  onDelete: (m: Message) => void;
 }) {
   const [copied, setCopied] = useState(false);
   const copy = useCallback(() => {
@@ -146,8 +151,32 @@ function HoverActions({
             <TooltipContent side="top">View the work behind this</TooltipContent>
           </Tooltip>
         )}
+        {showDelete && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                data-testid="message-delete"
+                onClick={() => onDelete(m)}
+                className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+              >
+                <Trash2 className="size-3.5" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="top">Delete message</TooltipContent>
+          </Tooltip>
+        )}
       </div>
     </div>
+  );
+}
+
+// What a deleted message leaves behind. Only ever rendered for a thread ROOT whose replies are
+// still alive — everything else is gone from the timeline entirely (see migration 048).
+export function DeletedBody() {
+  return (
+    <p data-testid="message-tombstone" className="text-sm italic text-muted-foreground">
+      This message was deleted
+    </p>
   );
 }
 
@@ -167,6 +196,8 @@ function MessageBody({
   anchoredDeliverables,
   personById,
   onOpenLiveTurn,
+  canDelete,
+  onDelete,
 }: {
   m: Message;
   className?: string;
@@ -184,10 +215,13 @@ function MessageBody({
   anchoredDeliverables: ExtractedLink[];
   personById: (id: string) => Participant | undefined;
   onOpenLiveTurn: (turn: TurnChipData) => void;
+  canDelete: (m: Message) => boolean;
+  onDelete: (m: Message) => void;
 }) {
   const isRoot = !m.thread_root_id;
   const hasReplies = isRoot && (replyCounts.get(m.id) ?? 0) > 0;
   const isAgent = personByHandle(m.sender_handle)?.kind === "agent";
+  const deleted = !!m.deleted_at;
   // A root shows everything the thread produced (its own body + all replies, rolled up); an
   // echoed reply row shows just its own body — it's already visible as its own message.
   const deliverableLinks = isRoot
@@ -210,7 +244,8 @@ function MessageBody({
       data-message-id={m.id}
       className={cn("group/msg relative break-words", animate && "animate-msg-in", className)}
     >
-      {m.body && (
+      {deleted && <DeletedBody />}
+      {!deleted && m.body && (
         <Markdown personByHandle={personByHandle} onOpenProfile={onOpenProfile}>
           {m.body}
         </Markdown>
@@ -234,13 +269,18 @@ function MessageBody({
           <DeliverableLinkChips links={deliverableLinks} />
         </div>
       )}
-      <HoverActions
-        m={m}
-        showReply={isRoot && !hasReplies}
-        showWork={isAgent && !!m.turn_id}
-        onOpenThread={onOpenThread}
-        onOpenTurn={onOpenTurn}
-      />
+      {/* A tombstone has nothing left to copy, reply to, or delete — only the thread it heads. */}
+      {!deleted && (
+        <HoverActions
+          m={m}
+          showReply={isRoot && !hasReplies}
+          showWork={isAgent && !!m.turn_id}
+          showDelete={canDelete(m)}
+          onOpenThread={onOpenThread}
+          onOpenTurn={onOpenTurn}
+          onDelete={onDelete}
+        />
+      )}
     </div>
   );
 }
@@ -267,6 +307,8 @@ export function MessageList({
   onOpenLiveTurn,
   jumpToId,
   onJumpDone,
+  canDelete,
+  onDelete,
 }: {
   grouped: { lead: Message; rest: Message[] }[];
   hasChannel: boolean;
@@ -293,6 +335,11 @@ export function MessageList({
   // view with a flash highlight, then report done so the parent clears the target.
   jumpToId: string | null;
   onJumpDone: () => void;
+  // Whether the viewer may delete a given message (their own, or any agent's) and the handler
+  // that opens the confirm dialog. The server enforces the same rule — this only decides whether
+  // the affordance is offered.
+  canDelete: (m: Message) => boolean;
+  onDelete: (m: Message) => void;
 }) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const pinnedRef = useRef(true);
@@ -410,6 +457,8 @@ export function MessageList({
                   anchoredDeliverables={deliverablesByRoot.get(lead.id) ?? []}
                   personById={personById}
                   onOpenLiveTurn={onOpenLiveTurn}
+                  canDelete={canDelete}
+                  onDelete={onDelete}
                 />
                 {rest.map((m) => (
                   <MessageBody
@@ -428,6 +477,8 @@ export function MessageList({
                     anchoredDeliverables={deliverablesByRoot.get(m.id) ?? []}
                     personById={personById}
                     onOpenLiveTurn={onOpenLiveTurn}
+                    canDelete={canDelete}
+                    onDelete={onDelete}
                   />
                 ))}
               </div>

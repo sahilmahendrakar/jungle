@@ -94,6 +94,10 @@ export async function listChannels(participantId?: string): Promise<ChannelListI
               on msg.channel_id = c.id
              and msg.seq > coalesce(cr.last_read_seq, 0)
              and msg.sender_id <> $1
+             -- Deleted messages keep their row and their seq (soft delete, see migration 048),
+             -- so they must be excluded HERE too — otherwise a deleted message leaves a
+             -- permanent unread badge on a channel with nothing in it to read.
+             and msg.deleted_at is null
              -- Thread replies don't count toward the CHANNEL badge (they have their own
              -- per-thread unread state, see listUnreadThreads). Only top-level messages and
              -- replies explicitly echoed to the channel do. This is the same predicate the

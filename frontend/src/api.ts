@@ -774,6 +774,18 @@ export function getMessages(channelId: string): Promise<Message[]> {
   });
 }
 
+// Delete a message. Allowed for your own messages, and for any agent's message in a channel
+// you're in (the server is the authority — see http/routes/messages.ts). Every client learns
+// about it over the WS `message_deleted` frame, including the one that asked.
+export function deleteMessage(messageId: string): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`/api/messages/${messageId}`, {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to delete message",
+  });
+}
+
 export interface TurnChipRow {
   turn_id: string;
   agent_id: string;

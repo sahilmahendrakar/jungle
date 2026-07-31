@@ -189,7 +189,14 @@ alter table messages add column if not exists reply_count int not null default 0
 alter table messages add column if not exists last_reply_at timestamptz;
 -- Agent messages: the runner turn that produced this message (see migrations/017_message_turn.sql).
 alter table messages add column if not exists turn_id text;
+-- Deletion is SOFT (see migrations/048_message_delete.sql): the row and its seq survive, the body
+-- is blanked, and every read path filters `deleted_at is null`. Hard-deleting would cascade a
+-- thread root's replies away and desync the reply_count denorm below.
+alter table messages add column if not exists deleted_at timestamptz;
+alter table messages add column if not exists deleted_by uuid references participants(id) on delete set null;
 create index if not exists messages_channel_seq_idx on messages (channel_id, seq);
+create index if not exists messages_channel_seq_live_idx
+  on messages (channel_id, seq) where deleted_at is null;
 create index if not exists messages_thread_idx on messages (thread_root_id, seq)
   where thread_root_id is not null;
 create unique index if not exists messages_sender_client_msg_idx

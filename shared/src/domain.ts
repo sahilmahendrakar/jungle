@@ -219,6 +219,11 @@ export interface Message {
   also_to_channel: boolean;
   reply_count: number;
   last_reply_at: string | null;
+  // Set only on the ONE kind of deleted message that still reaches a client: a deleted thread
+  // root whose replies are still alive, served as a tombstone so the thread keeps its head. Every
+  // other deleted message is filtered out of history entirely (see migrations/048_message_delete).
+  // Tombstones carry an empty body and no attachments.
+  deleted_at?: string | null;
   mentions: { id: string; handle: string }[];
   attachments: AttachmentMeta[];
 }

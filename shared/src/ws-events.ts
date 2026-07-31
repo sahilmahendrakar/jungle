@@ -34,6 +34,20 @@ export interface MessageEvent {
   message: WireMessage;
 }
 
+// A message was deleted. Fanned out to the channel's members; every client drops it from its
+// timeline (and from any open thread pane) without a refetch. `tombstone` marks the one case
+// where the row stays visible instead: a thread root with live replies, which is re-rendered as
+// "This message was deleted" so the thread it heads doesn't lose its root.
+export interface MessageDeletedEvent {
+  type: "message_deleted";
+  channelId: string;
+  messageId: string;
+  // The deleted message's thread root (null when it WAS a root / a top-level message). Lets a
+  // client refresh the thread's reply count without re-deriving it from the whole channel.
+  threadRootId: string | null;
+  tombstone: boolean;
+}
+
 // An agent's live status changed (working/idle/sleeping/waking).
 export interface AgentStatusChangedEvent {
   type: "agent_status_changed";
@@ -224,6 +238,7 @@ export type ServerEvent =
   | ErrorEvent
   | PongEvent
   | MessageEvent
+  | MessageDeletedEvent
   | AgentStatusChangedEvent
   | DeviceStatusChangedEvent
   | MembersChangedEvent

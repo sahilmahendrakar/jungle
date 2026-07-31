@@ -47,7 +47,8 @@ const THREAD_RELEVANT = `(m.thread_root_id is not null and exists (
     where root.id = m.thread_root_id
       and (root.sender_id = $2
            or exists (select 1 from messages sib
-                      where sib.thread_root_id = root.id and sib.sender_id = $2))))`;
+                      where sib.thread_root_id = root.id and sib.sender_id = $2
+                        and sib.deleted_at is null))))`;
 
 // "to:@h" = mentioned them or in your DM with them. Reused by person: (from OR to).
 function toPredicate(h: string): string {
@@ -62,7 +63,9 @@ export function messageWhere(
   p: SqlParams,
   { defaultScope }: { defaultScope: boolean },
 ): string[] {
-  const where: string[] = [];
+  // Deleted messages are soft-deleted rows with a blanked body (migration 048) — they must never
+  // surface in the feed or in search. Unconditional: this is a visibility rule, not a filter.
+  const where: string[] = [`m.deleted_at is null`];
   if (f.from) where.push(`p.handle = ${p.add(f.from)}`);
   if (f.to) where.push(toPredicate(p.add(f.to)));
   if (f.person) {

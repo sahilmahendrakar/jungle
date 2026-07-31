@@ -120,6 +120,21 @@ export function mergeById(a: Message[], b: Message[]): Message[] {
   return [...map.values()].sort((x, y) => Number(x.seq) - Number(y.seq));
 }
 
+// Reconcile local state against a freshly fetched FULL channel history (the reconnect path).
+// Unlike mergeById this is subtractive: `hist` is the server's complete visible set, so anything
+// we still hold that the server no longer serves was deleted while the socket was down — and its
+// message_deleted frame fanned out to a socket that no longer existed. Without this, a message
+// deleted during a disconnect sits in the timeline until a full reload.
+//
+// Local messages NEWER than the snapshot are kept: a WS frame can land between the fetch leaving
+// and its response arriving, and that message isn't missing, it's just not in this page yet.
+export function reconcileHistory(prev: Message[], hist: Message[]): Message[] {
+  const known = new Set(hist.map((m) => m.id));
+  const maxSeq = hist.reduce((n, m) => Math.max(n, Number(m.seq)), 0);
+  const kept = prev.filter((m) => known.has(m.id) || Number(m.seq) > maxSeq);
+  return mergeById(kept, hist);
+}
+
 // If the caret sits inside an "@…" token (an @ at the start or after whitespace, with no
 // whitespace up to the caret), return where it starts and the text typed so far. Used to
 // drive the @-mention autocomplete. Returns null when there's no active mention token.
