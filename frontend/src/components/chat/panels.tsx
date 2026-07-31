@@ -266,9 +266,12 @@ export function ParticipantProfilePanel({
   onDeleted,
   onOpenConnections,
   onJumpToMessage,
+  roster,
 }: {
   person: Participant;
   isSelf: boolean;
+  // The workspace roster, used to name this agent's owner/creator from their ids (OwnershipCard).
+  roster: Participant[];
   onClose: () => void;
   onSaved: (p: Participant) => void;
   onOpenActivity: () => void;
@@ -630,6 +633,7 @@ export function ParticipantProfilePanel({
               </div>
             )}
             <EnvironmentCard person={person} />
+            <OwnershipCard person={person} roster={roster} />
             <ServicesCard person={person} />
             <MemoryCard person={person} />
             <ContextUsageCard person={person} />
@@ -823,6 +827,53 @@ export function EnvironmentCard({ person }: { person: Participant }) {
       {selfHosted && offline && (
         <p className="text-[11px] leading-tight text-muted-foreground">
           This agent's device is offline — messages queue until it reconnects.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// Who pays for this agent's turns (participants.owner_id). Worth a card of its own because it was
+// invisible and silently wrong: an agent created BY @jungle used to resolve its owner to @jungle,
+// which holds no Claude subscription, so its turns quietly billed the org API key and its spend
+// landed in an account with no name attached to it. Showing the owner makes that class of mistake
+// legible at a glance instead of only in the usage export.
+//
+// Read-only for now: ownership is assigned when the agent is created (inherited from its creator's
+// owner) and re-homed by the backend's boot sweep when an owner leaves. There's no transfer UI yet.
+export function OwnershipCard({ person, roster }: { person: Participant; roster: Participant[] }) {
+  const owner = person.owner_id ? roster.find((p) => p.id === person.owner_id) : null;
+  // Distinguish "nobody owns this" from "the owner isn't in the roster we loaded" — the first is a
+  // real state with real billing consequences, the second is just a gap in what this client knows.
+  const unknown = !!person.owner_id && !owner;
+  const creator = person.created_by ? roster.find((p) => p.id === person.created_by) : null;
+  // Provenance is only interesting when it DIFFERS from ownership — an agent built by another
+  // agent. Showing "created by @sahil, owned by @sahil" on every other agent is just noise.
+  const showCreator = !!creator && creator.id !== person.owner_id;
+  return (
+    <div data-testid="ownership-card" className="space-y-1.5 rounded-lg border bg-muted/30 p-3">
+      <div className="text-xs font-medium text-muted-foreground">Owner</div>
+      <div className="flex items-center gap-2">
+        <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary/10">
+          <UserRound className="size-3.5 text-primary" />
+        </span>
+        <div className="min-w-0">
+          <div className="truncate text-sm font-medium">
+            {owner ? owner.display_name : unknown ? "Someone outside this workspace" : "No owner"}
+          </div>
+          <div className="truncate text-[11px] text-muted-foreground">
+            {owner
+              ? `@${owner.handle} · pays for this agent's turns`
+              : unknown
+                ? "turns bill to their account"
+                : "turns bill to the shared API key"}
+          </div>
+        </div>
+      </div>
+      {showCreator && (
+        <p className="text-[11px] leading-tight text-muted-foreground">
+          Created by @{creator!.handle}
+          {creator!.kind === "agent" ? ", so it inherited that agent's owner" : ""}.
         </p>
       )}
     </div>

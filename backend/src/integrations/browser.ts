@@ -2,7 +2,7 @@ import type { ConfigureFrame } from "@jungle/shared";
 import { browserSite, type BrowserIntegrationConfig } from "@jungle/shared";
 import * as db from "../db";
 import { isBrowserConfigured } from "../services/browser";
-import { ownerOf } from "./backing";
+import { ownerOf } from "../services/ownership";
 import type { IntegrationAdapter } from "./types";
 
 // Browser integration: the agent drives a real, logged-in Chrome in the cloud (Browserbase) for

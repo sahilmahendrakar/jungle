@@ -301,6 +301,14 @@ export class Runner {
   // child.kill()), so it actually tears down a stuck subprocess where interrupt() can't.
   private activeAbortController: AbortController | null = null;
   private static readonly INTERRUPT_GRACE_MS = 2_000;
+
+  // Absolute per-turn deadline (see the watchdog in runTurn). Deliberately far longer than any
+  // real turn — it exists to break a wedge, not to bound useful work. Overridable so a deployment
+  // that legitimately runs longer turns can raise it without a code change.
+  private static readonly MAX_TURN_MS = (() => {
+    const raw = Number(process.env.RUNNER_MAX_TURN_SECONDS ?? 3600);
+    return Number.isFinite(raw) && raw > 0 ? raw * 1000 : 3600_000;
+  })();
   private pendingModel: string | null = null;
   // Provider routing that lands together with pendingModel at the next turn boundary. `undefined`
   // means "no pending model change" (distinct from `null` = pending switch to an Anthropic model).
@@ -320,6 +328,16 @@ export class Runner {
   // yields; deliverFollowupBatch resolves it with items (mid-turn splice) and endTurn()
   // resolves it with null (generator returns → stdin closes → query ends).
   private batchResolver: ((batch: QueueItem[] | null) => void) | null = null;
+
+  // A close that arrived while `batchResolver` was momentarily unset (the generator between its
+  // await and its yield). endTurn() cannot act in that window, and the old code just returned —
+  // relying on "the close rule re-fires at the next result". It doesn't when that result was the
+  // LAST event of the session: nothing ever re-fires, stdin stays open, the CLI subprocess never
+  // exits, `running` never clears, and the agent is stuck "working" until the process is killed.
+  // Observed in prod 2026-07-31 (outreach-agent: result at 18:05:25, then silence, two queued
+  // messages never delivered). So the close INTENT is now sticky — the generator picks it up at
+  // its await point, exactly as it already did for items that raced the same window.
+  private closeRequested = false;
 
   // Close bookkeeping for the ACTIVE query (reset each runTurn): how many user messages the
   // generator has yielded vs how many `result`s the CLI has emitted. Closing the input is
@@ -661,21 +679,32 @@ export class Runner {
     if (!this.activeQuery) return;
     const abortController = this.activeAbortController;
     log.info("interrupting active turn");
+
+    // ARM THE ESCALATION FIRST. interrupt() only asks the CLI to stop between steps — it won't
+    // preempt a blocked tool subprocess (e.g. a long-running bash command), and on a dead stream it
+    // may never settle at all. This used to sit AFTER `await interrupt()`, which made it
+    // unreachable in precisely the case it exists for: prod 2026-07-31, interrupt() hung, the
+    // 2-second escalation never ran, and the stop button did nothing for the 20 minutes until the
+    // machine was restarted by hand. Arming on a timer means a hung interrupt() still gets killed.
+    // Compare by reference so we never abort a later turn's controller if one started meanwhile.
+    const escalation = abortController
+      ? setTimeout(() => {
+          if (this.running && this.activeAbortController === abortController) {
+            log.warn("interrupt did not stop the turn in time; aborting");
+            abortController.abort();
+          }
+        }, Runner.INTERRUPT_GRACE_MS)
+      : null;
+    escalation?.unref?.();
+
     try {
       await this.activeQuery.interrupt();
     } catch (err) {
       log.warn("interrupt failed", { err: String(err) });
     }
-    // interrupt() only asks the CLI to stop between steps — it won't preempt a blocked
-    // tool subprocess (e.g. a long-running bash command). Give it a short grace window to
-    // actually end the turn; if it's still running, escalate to a hard kill. Compare by
-    // reference so we never abort a later turn's controller if one started in the meantime.
-    if (!abortController) return;
-    await new Promise((resolve) => setTimeout(resolve, Runner.INTERRUPT_GRACE_MS));
-    if (this.running && this.activeAbortController === abortController) {
-      log.warn("interrupt did not stop the turn in time; aborting");
-      abortController.abort();
-    }
+    // A clean interrupt ends the turn on its own; only cancel the escalation once we can see that
+    // it did. If it didn't, the timer above is still pending and will do the killing.
+    if (escalation && !this.running) clearTimeout(escalation);
   }
 
   // Compaction request: remember it and run a dedicated `/compact` turn at the
@@ -780,6 +809,7 @@ export class Runner {
     const turnId = randomUUID();
     this.turnYields = 0;
     this.turnResults = 0;
+    this.closeRequested = false;
 
     const inboxIds = firstBatch.map((i) => i.inboxId);
     this.conn.send({ type: "turn_started", turnId, inboxIds });
@@ -926,6 +956,33 @@ export class Runner {
     });
     this.activeQuery = q;
 
+    // Absolute deadline for the whole turn — the one LEVEL-triggered check in the runner.
+    //
+    // Every other way a turn can end is edge-triggered off an event: the close rule fires on a
+    // `result`, the quiescence window is armed by one, an interrupt is a frame from the backend.
+    // All of them are silent when the SDK stream simply stops producing, which is exactly what a
+    // wedged CLI subprocess does. Something has to notice the ABSENCE of events, and nothing did:
+    // prod 2026-07-31, an orphaned Task subagent outlived its parent turn, the stream went quiet,
+    // and the runner sat "working" with a growing inbox until it was restarted by hand.
+    //
+    // Generous on purpose — this is a last resort, not a turn-length policy. A legitimately long
+    // turn (a big migration, a slow test suite) must never trip it, so the bound is well beyond any
+    // real turn. Aborting surfaces as a failed turn the backend can report, which is strictly
+    // better than an agent that looks busy forever.
+    const watchdog = setTimeout(() => {
+      if (this.running && this.activeAbortController === abortController) {
+        log.error("turn exceeded the maximum duration; aborting", {
+          turnId,
+          maxMs: Runner.MAX_TURN_MS,
+          yields: this.turnYields,
+          results: this.turnResults,
+          queueDepth: this.queue.length,
+        });
+        abortController.abort();
+      }
+    }, Runner.MAX_TURN_MS);
+    watchdog.unref?.();
+
     let ok = true;
     let error: string | undefined;
     // A mid-turn session re-init leaves the CLI's client connection to our in-process
@@ -1022,9 +1079,11 @@ export class Runner {
       error = err instanceof Error ? err.message : String(err);
       log.error("turn errored", { turnId, err: error });
     } finally {
+      clearTimeout(watchdog);
       this.activeQuery = null;
       this.activeAbortController = null;
       this.batchResolver = null;
+      this.closeRequested = false;
       this.running = false;
       if (this.quiesceTimer) {
         clearTimeout(this.quiesceTimer);
@@ -1257,12 +1316,20 @@ export class Runner {
     while (true) {
       // If a model change is pending, end the query so it can restart with the new model.
       if (this.pendingModel !== null) return;
+      // A close that landed while we were yielding. Checked BEFORE the queue: once the close rule
+      // has fired, the CLI is done with this turn, and anything queued belongs to the next one
+      // (maybeStartTurn picks it up at runTurn's tail) rather than being spliced into a turn that
+      // has already ended.
+      if (this.closeRequested) return;
 
       const batch = await new Promise<QueueItem[] | null>((resolve) => {
         this.batchResolver = resolve;
-        // Items that arrived while we were yielding (batchResolver momentarily unset) —
-        // deliver them now.
-        if (this.queue.length > 0 && this.pendingModel === null) {
+        // A close or items that arrived while we were yielding (batchResolver momentarily unset) —
+        // act on them now rather than waiting for an event that may never come.
+        if (this.closeRequested) {
+          this.batchResolver = null;
+          resolve(null);
+        } else if (this.queue.length > 0 && this.pendingModel === null) {
           this.batchResolver = null;
           const items = this.queue;
           this.queue = [];
@@ -1285,6 +1352,9 @@ export class Runner {
   // window), never directly on enqueue. No-op while the generator is mid-yield (batchResolver
   // unset); the close rule re-fires at the next result.
   private endTurn(): void {
+    // Remember the intent even when we can't act on it now — makeInputGenerator re-checks this at
+    // its await point and returns immediately, so a close can no longer be silently dropped.
+    this.closeRequested = true;
     if (!this.batchResolver) return;
     if (this.quiesceTimer) {
       clearTimeout(this.quiesceTimer);

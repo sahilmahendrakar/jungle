@@ -4,6 +4,7 @@ import * as db from "../db";
 import * as runners from "../runners";
 import { provisionerFor } from "../provisioner";
 import { attachIntegrationAs, RUNNER_PROVIDER_DEFAULT } from "./agentAdmin";
+import * as ownership from "./ownership";
 import { announceParticipant } from "../ws/appSocket";
 
 // @jungle — the workspace's default agent, and the front door to the product: you talk to it to
@@ -153,13 +154,22 @@ export async function ensureJungleAgent(workspaceId: string): Promise<db.Partici
     return existing;
   }
   if (existing) {
-    // Adopt: an @jungle created before this (created_by null), or one whose owner stopped being the
+    // Adopt: an @jungle created before this (no owner), or one whose owner stopped being the
     // subscriber, re-points at the current one so its turns bill correctly and its integrations
-    // resolve through that person's accounts.
-    if (existing.created_by !== owner.id) {
-      await db.setAgentCreatedBy(existing.id, owner.id);
-      existing.created_by = owner.id;
-      console.log(`@jungle: adopted by @${owner.handle} in workspace ${workspaceId}`);
+    // resolve through that person's accounts. This writes owner_id, NOT created_by — adoption is a
+    // statement about who pays, and overwriting provenance to express it is what made an
+    // agent-created agent unattributable in the first place (migrations/046).
+    //
+    // Adoption cascades: agents @jungle itself created inherit their owner from it at create time,
+    // so re-homing @jungle does not retroactively move them. That's deliberate — an agent keeps the
+    // owner it was made under until someone transfers it explicitly.
+    if (existing.owner_id !== owner.id) {
+      if (await db.setAgentOwner(existing.id, owner.id)) {
+        existing.owner_id = owner.id;
+        console.log(`@jungle: adopted by @${owner.handle} in workspace ${workspaceId}`);
+      } else {
+        console.warn(`@jungle: could not adopt to @${owner.handle} in workspace ${workspaceId}`);
+      }
     }
     if (existing.model !== JUNGLE_MODEL) {
       await db.updateAgentConfig(existing.id, { model: JUNGLE_MODEL });
@@ -229,6 +239,10 @@ export async function backfillJungleAgents(): Promise<void> {
       const had = await db.getJungleAgent(workspaceId);
       if (!had && (await ensureJungleAgent(workspaceId))) created++;
       else if (had) await ensureJungleAgent(workspaceId);
+      // Same sweep, same idempotence: adopt any agent left without a valid owner (migrations/046).
+      // After ensureJungleAgent, so an @jungle adopted just above is already eligible to be the
+      // chain-walk answer for the agents it created.
+      await ownership.healOwnerlessAgents(workspaceId);
     } catch (e) {
       console.error(`@jungle reconcile failed for workspace ${workspaceId}:`, e);
     }

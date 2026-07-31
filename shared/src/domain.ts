@@ -46,10 +46,14 @@ export interface ParticipantBase {
   // The agent's MEMORY.md mirror is NOT here — it can be large, so clients fetch it on demand
   // via GET /api/agents/:id/memory.
   persona: string | null;
-  // The human participant who created this agent (null for humans, and for agents that predate
-  // migrations/039 in a workspace with no human to attribute them to). Usage/spend rolls up by
-  // this — see shared/src/admin.ts.
+  // PROVENANCE: the participant that created this agent — possibly another AGENT, since @jungle
+  // can create agents. Never rewritten, and never used to decide who pays: that's owner_id.
   created_by: string | null;
+  // OWNERSHIP: the human whose Claude subscription backs this agent's turns, whose daily spend cap
+  // it counts against, and whose connected accounts back its integrations (migrations/046). Always
+  // a human in the same workspace, or null — a null owner (or one with no subscription token) bills
+  // to the org API key. Usage/spend rolls up by this; see shared/src/admin.ts.
+  owner_id: string | null;
   // True for the workspace's one @jungle default agent (migrations/044). Clients use it to hide
   // rename/delete, which the backend refuses anyway (services/agentAdmin.ts).
   jungle_default?: boolean;

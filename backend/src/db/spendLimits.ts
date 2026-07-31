@@ -18,21 +18,19 @@ function num(v: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-// The account an agent's spend lands on. Same resolution as usage.ts's write path: the recorded
-// creator, else the workspace's admin (earliest human) — so the cap reads the account that the
-// usage rows were (and will be) written against.
+// The account an agent's spend lands on. Same resolution as usage.ts's write path — both read
+// participants.owner_id (migrations/046) — so the cap reads the account that the usage rows were
+// (and will be) written against.
+//
+// Before 046 this re-derived the owner from created_by in a lateral copied three ways, and an agent
+// created by another agent resolved to that agent: its spend got its own 'participant:<agent-id>'
+// account with a private $5/day cap nobody could see in /admin or edit. Reading the stored owner
+// removes the derivation, and with it the possibility of the three copies disagreeing.
 export async function accountKeyForAgent(agentId: string): Promise<string | null> {
   const { rows } = await pool.query<{ account_key: string }>(
     `select coalesce(lower(o.email), 'participant:' || o.id::text, 'unattributed') as account_key
        from participants a
-       left join lateral (
-         select h.id, h.email
-           from participants h
-          where h.id = a.created_by
-             or (a.created_by is null and h.workspace_id = a.workspace_id and h.kind = 'human')
-          order by (h.id = a.created_by) desc, (h.role = 'admin') desc, h.created_at asc
-          limit 1
-       ) o on true
+       left join participants o on o.id = a.owner_id and o.kind = 'human'
       where a.id = $1`,
     [agentId],
   );

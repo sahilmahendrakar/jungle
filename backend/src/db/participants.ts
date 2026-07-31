@@ -33,23 +33,25 @@ export async function createParticipant(p: {
   persona?: string | null; // creator-written role/personality, injected into the system prompt
   lianaConductor?: boolean; // true = a persistent per-user Liana conductor (compact@40% + suspend)
   jungleDefault?: boolean; // true = the workspace's one @jungle default agent (services/jungleAgent.ts)
-  createdBy?: string | null; // the human participant creating this agent (usage attribution)
+  createdBy?: string | null; // PROVENANCE: the participant that created this agent — may be an agent
+  ownerId?: string | null; // OWNERSHIP: the human who pays for it (migrations/046). Resolve via
+                           // services/ownership.ownerForNewAgent, never by assuming createdBy.
 }, client?: pg.PoolClient): Promise<Participant> {
   const { rows } = await (client ?? pool).query<Participant>(
     `insert into participants
        (kind, workspace_id, handle, display_name, role, repo, firebase_uid, email, avatar_url,
         model, mode, runtime, runner_token, runner_provider, persona, liana_conductor,
-        jungle_default, created_by)
+        jungle_default, created_by, owner_id)
      values ($1, $2, $3, $4, coalesce($5, 'member'), $6, $7, $8, $9, $10, coalesce($11, 'default'),
              coalesce($12, 'sdk'), $13, coalesce($14, 'docker'), $15, coalesce($16, false),
-             coalesce($17, false), $18)
+             coalesce($17, false), $18, $19)
      returning *`,
     [
       p.kind, p.workspaceId, p.handle, p.displayName, p.role ?? null, p.repo ?? null,
       p.firebaseUid ?? null, p.email ?? null, p.avatarUrl ?? null,
       p.model ?? null, p.mode ?? null, p.runtime ?? null, p.runnerToken ?? null,
       p.runnerProvider ?? null, p.persona ?? null, p.lianaConductor ?? null,
-      p.jungleDefault ?? null, p.createdBy ?? null,
+      p.jungleDefault ?? null, p.createdBy ?? null, p.ownerId ?? null,
     ],
   );
   return rows[0];
@@ -334,25 +336,32 @@ export async function hasClaudeOauthToken(participantId: string): Promise<boolea
   return rows[0]?.present ?? false;
 }
 
-// The subscription token that applies to an agent: the one stored by the operator who CREATED it
-// (participants.created_by). Scoping to the creator rather than the workspace keeps a personal,
-// per-seat credential from being spent by a workspace co-member's agents. Read by buildConfigure;
-// null means bill turns to the org API key as usual.
+// The subscription token that applies to an agent: the one stored by its OWNER
+// (participants.owner_id, migrations/046). Scoping to the owner rather than the workspace keeps a
+// personal, per-seat credential from being spent by a workspace co-member's agents. Read by
+// buildConfigure; null means bill turns to the org API key as usual.
+//
+// This used to join on created_by, which meant an agent created by @jungle resolved to an AGENT —
+// never a token holder — and silently billed the org key. Ownership is now its own column,
+// assigned through services/ownership.ts, so the creator being an agent is irrelevant here.
+// The kind guard is belt-and-braces: owner_id is maintained as a human, and if that ever slips we
+// want the org-key fallback, not a null token read off an agent row.
 export async function getClaudeOauthTokenForAgent(agentId: string): Promise<string | null> {
   const { rows } = await pool.query<{ claude_oauth_token: string }>(
     `select owner.claude_oauth_token
        from participants agent
-       join participants owner on owner.id = agent.created_by
-      where agent.id = $1 and owner.claude_oauth_token is not null`,
+       join participants owner on owner.id = agent.owner_id
+      where agent.id = $1 and owner.kind = 'human' and owner.claude_oauth_token is not null`,
     [agentId],
   );
   return rows[0]?.claude_oauth_token ?? null;
 }
 
-// Agents created by this operator, for re-pushing `configure` after the token changes.
-export async function listAgentIdsCreatedBy(ownerId: string): Promise<string[]> {
+// Agents this operator OWNS, for re-pushing `configure` after their token changes — so setting or
+// clearing a subscription takes effect at each owned agent's next turn boundary.
+export async function listAgentIdsOwnedBy(ownerId: string): Promise<string[]> {
   const { rows } = await pool.query<{ id: string }>(
-    `select id from participants where kind = 'agent' and created_by = $1`,
+    `select id from participants where kind = 'agent' and owner_id = $1`,
     [ownerId],
   );
   return rows.map((r) => r.id);
@@ -360,9 +369,9 @@ export async function listAgentIdsCreatedBy(ownerId: string): Promise<string[]> 
 
 // The human whose Claude subscription backs this workspace's @jungle (services/jungleAgent.ts).
 // The default agent has no natural creator, so it's adopted by a subscriber: that person's token
-// pays for its turns (getClaudeOauthTokenForAgent walks created_by) and their connected accounts
-// back its integrations (integrations/backing.ts rule 4). Admins first, then oldest, so the choice
-// is stable across boots rather than flipping as people join.
+// pays for its turns (via owner_id) and their connected accounts back its integrations
+// (integrations/backing.ts rule 4). Admins first, then oldest, so the choice is stable across boots
+// rather than flipping as people join.
 export async function findSubscriptionOwner(workspaceId: string): Promise<Participant | null> {
   const { rows } = await pool.query<Participant>(
     `select * from participants
@@ -374,8 +383,53 @@ export async function findSubscriptionOwner(workspaceId: string): Promise<Partic
   return rows[0] ?? null;
 }
 
-// Re-point an agent at its owner (participants.created_by) — used to adopt an @jungle that was
-// created before it had one, or whose owner cleared their subscription.
-export async function setAgentCreatedBy(agentId: string, createdBy: string | null): Promise<void> {
-  await pool.query(`update participants set created_by = $2 where id = $1 and kind = 'agent'`, [agentId, createdBy]);
+// Re-point an agent at its owner (participants.owner_id) — used to adopt an @jungle that was
+// created before it had one, to transfer ownership, and to re-home an agent whose owner cleared
+// their subscription or left.
+//
+// The SQL upholds migrations/046's invariant rather than trusting the caller: the target must be a
+// human in the AGENT'S OWN workspace, so a cross-workspace id can't leak a subscription across
+// tenants even if a future call site forgets to check. A non-qualifying id updates nothing; the
+// boolean says whether it landed, so callers can log rather than silently believing it worked.
+export async function setAgentOwner(agentId: string, ownerId: string | null): Promise<boolean> {
+  const { rowCount } = await pool.query(
+    `update participants a
+        set owner_id = $2
+      where a.id = $1 and a.kind = 'agent'
+        and ($2::uuid is null or exists (
+          select 1 from participants o
+           where o.id = $2 and o.kind = 'human' and o.workspace_id = a.workspace_id))`,
+    [agentId, ownerId],
+  );
+  return (rowCount ?? 0) > 0;
+}
+
+// The human to fall back to when an agent's ownership can't be recovered from its created_by chain:
+// the workspace's admin, else its earliest human. Same rule migration 040 used to backfill
+// created_by and that usage.ts/spendLimits.ts used as their IS NULL fallback, so healing an orphan
+// lands it on the account its usage rows were already being written against.
+export async function findWorkspaceOwnerFallback(workspaceId: string): Promise<Participant | null> {
+  const { rows } = await pool.query<Participant>(
+    `select * from participants
+      where workspace_id = $1 and kind = 'human'
+      order by (role = 'admin') desc, created_at asc
+      limit 1`,
+    [workspaceId],
+  );
+  return rows[0] ?? null;
+}
+
+// Every agent in a workspace whose owner_id is unset or no longer valid (owner deleted, or no
+// longer a human in this workspace). Drives the boot-time self-heal in services/ownership so a row
+// that predates 046 — or one orphaned by a departure — gets an owner without manual intervention.
+export async function listAgentsNeedingOwner(workspaceId: string): Promise<Participant[]> {
+  const { rows } = await pool.query<Participant>(
+    `select a.* from participants a
+      where a.kind = 'agent' and a.workspace_id = $1
+        and not exists (
+          select 1 from participants o
+           where o.id = a.owner_id and o.kind = 'human' and o.workspace_id = a.workspace_id)`,
+    [workspaceId],
+  );
+  return rows;
 }
