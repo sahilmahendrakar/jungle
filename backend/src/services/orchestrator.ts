@@ -42,6 +42,20 @@ async function resolveDispatchContext(agentId: string): Promise<db.DispatchConte
   return db.latestConsumedContext(agentId);
 }
 
+// True for a turn nobody is watching: a schedule-fired plain agent turn (scheduleId set) or a
+// workflow run whose cron trigger kicked it off (workflowRunId resolves to trigger "schedule").
+// Manual workflow kickoffs and channel-message triggers still gate on a human, since someone is
+// actually present when those fire.
+async function isUnattendedTrigger(ctx: db.DispatchContext | null): Promise<boolean> {
+  if (!ctx) return false;
+  if (ctx.scheduleId) return true;
+  if (ctx.workflowRunId) {
+    const run = await db.getWorkflowRun(ctx.workflowRunId);
+    if (run?.trigger === "schedule") return true;
+  }
+  return false;
+}
+
 // Only the last few messages are inlined into the turn prompt — enough to orient the agent
 // without ballooning prompt size as a channel/thread grows. The read_history tool pulls
 // further back on demand.
@@ -573,7 +587,14 @@ export function buildRunnerHooks(): runners.RunnerHooks {
     // A runner's confirm_request -> surface a confirmation card in the channel that triggered this
     // agent. Resolving the card resolves this promise; runners.ts relays it as confirm_result.
     requestConfirm: async (agent, confirm) => {
-      const channelId = (await resolveDispatchContext(agent.id))?.channelId;
+      const ctx = await resolveDispatchContext(agent.id);
+      // A schedule fire (a plain scheduled turn, or a workflow's cron trigger) runs with nobody
+      // watching the channel — a confirmation card just sits until CONFIRM_TIMEOUT_MS auto-denies
+      // it, so the "scheduled run" reads as a failure even though nothing was ever wrong. Let
+      // these unattended turns run without a human gate; interactive chat and manual workflow
+      // kickoffs (someone is right there) still go through the card.
+      if (await isUnattendedTrigger(ctx)) return { result: "allow" as const };
+      const channelId = ctx?.channelId;
       if (!channelId) {
         // No known channel to place the card — deny rather than hang the turn.
         return { result: "deny" as const, denyMessage: "no channel context for confirmation" };
