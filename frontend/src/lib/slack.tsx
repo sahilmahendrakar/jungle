@@ -4,7 +4,37 @@
 // (http/oauthPopup.ts posts { source: "jungle-oauth", connection: "slack", status }).
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { SlackStatus } from "@/api";
-import { getSlackStatus, slackInstallUrl, disconnectSlack } from "@/api";
+import {
+  getSlackStatus,
+  slackInstallUrl,
+  disconnectSlack,
+  getSlackAgentStatus,
+  slackAgentInstallUrl,
+  disconnectSlackAgent,
+} from "@/api";
+
+// Which Slack app: the channel mirror, or the agent app that backs @jungle's Slack DM. They are
+// separate Slack apps with separate installs (features.agent_view is an irreversible per-app
+// switch), so the whole flow is parameterized rather than duplicated. The popup protocol keys off
+// `connection`, which differs per app — that's what routes a completion message to the right hook.
+export type SlackAppKind = "mirror" | "agent";
+
+const APPS = {
+  mirror: {
+    connection: "slack",
+    popupName: "jungle-connect-slack",
+    status: getSlackStatus,
+    installUrl: slackInstallUrl,
+    disconnect: disconnectSlack,
+  },
+  agent: {
+    connection: "slack-agent",
+    popupName: "jungle-connect-slack-agent",
+    status: getSlackAgentStatus,
+    installUrl: slackAgentInstallUrl,
+    disconnect: disconnectSlackAgent,
+  },
+} as const;
 
 export interface SlackApi {
   status: SlackStatus;
@@ -19,11 +49,14 @@ export interface SlackApi {
 // Run the Slack install in a popup, resolving when it finishes. Completion is detected via the
 // callback's postMessage, with a status poll as the ground-truth fallback (same belt-and-braces
 // approach as lib/connections.tsx runPopupFlow).
-async function runInstallPopup(isInstalled: () => Promise<boolean>): Promise<boolean> {
-  const { url } = await slackInstallUrl({ popup: true });
-  const popup = window.open(url, "jungle-connect-slack", "width=560,height=720");
+async function runInstallPopup(
+  app: (typeof APPS)[SlackAppKind],
+  isInstalled: () => Promise<boolean>,
+): Promise<boolean> {
+  const { url } = await app.installUrl({ popup: true });
+  const popup = window.open(url, app.popupName, "width=560,height=720");
   if (!popup) {
-    const { url: redirectUrl } = await slackInstallUrl({ popup: false });
+    const { url: redirectUrl } = await app.installUrl({ popup: false });
     window.location.href = redirectUrl;
     return false;
   }
@@ -46,7 +79,7 @@ async function runInstallPopup(isInstalled: () => Promise<boolean>): Promise<boo
     };
     const onMessage = (e: MessageEvent) => {
       const d = e.data as { source?: string; connection?: string; status?: string } | null;
-      if (d && d.source === "jungle-oauth" && d.connection === "slack") finish(d.status === "connected");
+      if (d && d.source === "jungle-oauth" && d.connection === app.connection) finish(d.status === "connected");
     };
     window.addEventListener("message", onMessage);
     let closedPolls = 0;
@@ -72,7 +105,8 @@ async function runInstallPopup(isInstalled: () => Promise<boolean>): Promise<boo
   });
 }
 
-export function useSlack(enabled = true): SlackApi {
+export function useSlack(enabled = true, kind: SlackAppKind = "mirror"): SlackApi {
+  const app = APPS[kind];
   const [status, setStatus] = useState<SlackStatus>({ installed: false });
   const [loading, setLoading] = useState(enabled);
   const [connecting, setConnecting] = useState(false);
@@ -86,29 +120,30 @@ export function useSlack(enabled = true): SlackApi {
   }, []);
 
   const refresh = useCallback(async () => {
-    const s = await getSlackStatus().catch(() => ({ installed: false }) as SlackStatus);
+    const s = await app.status().catch(() => ({ installed: false }) as SlackStatus);
     if (alive.current) setStatus(s);
-  }, []);
+  }, [app]);
 
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false;
     setLoading(true);
-    getSlackStatus()
+    app
+      .status()
       .then((s) => !cancelled && setStatus(s))
       .catch(() => !cancelled && setStatus({ installed: false }))
       .finally(() => !cancelled && setLoading(false));
     return () => {
       cancelled = true;
     };
-  }, [enabled]);
+  }, [enabled, app]);
 
   const connect = useCallback(async () => {
     setError("");
     setConnecting(true);
     try {
-      const ok = await runInstallPopup(async () => {
-        const s = await getSlackStatus();
+      const ok = await runInstallPopup(app, async () => {
+        const s = await app.status();
         if (alive.current) setStatus(s);
         return s.installed && s.status !== "revoked";
       });
@@ -120,17 +155,17 @@ export function useSlack(enabled = true): SlackApi {
     } finally {
       if (alive.current) setConnecting(false);
     }
-  }, [refresh]);
+  }, [refresh, app]);
 
   const disconnect = useCallback(async () => {
     setError("");
     try {
-      await disconnectSlack();
+      await app.disconnect();
     } catch (e) {
       if (alive.current) setError(String((e as Error).message ?? e));
     }
     await refresh();
-  }, [refresh]);
+  }, [refresh, app]);
 
   return { status, loading, connecting, error, refresh, connect, disconnect };
 }

@@ -584,7 +584,54 @@ function SlackWorkspaceSection({ isAdmin }: { isAdmin: boolean }) {
         <p className="text-xs text-muted-foreground">Only a workspace admin can connect Slack.</p>
       )}
       {slack.error && <p className="text-sm text-destructive">{slack.error}</p>}
+      <SlackAgentAppCard isAdmin={isAdmin} />
     </section>
+  );
+}
+
+// The second Slack app: @jungle answering in a Slack DM. Separate from the mirror above because
+// Slack's agent experience is an irreversible per-app switch, so it needs its own app and install.
+// Sits under the same "Slack" heading — from a user's point of view these are two things one
+// product does in Slack, not two integrations.
+function SlackAgentAppCard({ isAdmin }: { isAdmin: boolean }) {
+  const agent = useSlack(true, "agent");
+  const installed = agent.status.installed && agent.status.status !== "revoked";
+  const revoked = agent.status.installed && agent.status.status === "revoked";
+  return (
+    <>
+      <div className="flex items-center gap-3 rounded-xl border bg-card p-4">
+        <BrandTile brand="slack" />
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm font-semibold">
+            {installed ? "@jungle in Slack" : "Talk to @jungle in Slack"}
+          </div>
+          <div className="truncate text-xs text-muted-foreground">
+            {installed
+              ? "Connected — DM the Jungle app in Slack to build agents and workflows."
+              : revoked
+                ? "Reconnect needed — the Slack token was revoked."
+                : "DM @jungle in Slack. Same conversation as here, same memory."}
+          </div>
+        </div>
+        {installed ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={!isAdmin}
+            onClick={() => void agent.disconnect()}
+            className="gap-1.5 text-destructive hover:bg-destructive/10 hover:text-destructive"
+          >
+            <Unlink className="size-3.5" />
+            Disconnect
+          </Button>
+        ) : (
+          <Button size="sm" disabled={!isAdmin || agent.connecting} onClick={() => void agent.connect()}>
+            {agent.connecting ? <Loader2 className="size-3.5 animate-spin" /> : revoked ? "Reconnect" : "Connect"}
+          </Button>
+        )}
+      </div>
+      {agent.error && <p className="text-sm text-destructive">{agent.error}</p>}
+    </>
   );
 }
 
