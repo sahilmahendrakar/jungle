@@ -17,6 +17,7 @@ import * as liana from "./services/liana";
 import { backfillJungleAgents } from "./services/jungleAgent";
 import { BACKEND_ORIGIN } from "./http/routes/liana";
 import { registerBuiltinIntegrations } from "./integrations";
+import { sweepStaleSignins } from "./services/browser";
 
 // Entry point / boot: wire the HTTP app, both WebSocket subsystems (app + runner), background
 // jobs, and start listening. The request handlers live in http/routes/*, the realtime plumbing
@@ -70,6 +71,12 @@ hostcontrol.init(server, {
 // Hourly attachment GC: abandoned composer uploads (never linked to a message) and blobs whose
 // rows were removed by FK cascades (deleted messages/channels/agents).
 setInterval(() => void att.gcOrphans().catch((e) => console.error("attachment gc:", e)), 60 * 60 * 1000).unref();
+
+// Browser sign-in sweep. The per-sign-in watcher lives in-process, so a restart mid-handshake
+// leaves the row 'pending' forever and its Browserbase session billing to its own timeout. Runs
+// once at boot (to clean up whatever the last restart orphaned) and every minute after.
+void sweepStaleSignins().catch((e) => console.error("browser signin sweep:", e));
+setInterval(() => void sweepStaleSignins().catch((e) => console.error("browser signin sweep:", e)), 60_000).unref();
 
 // Boot reconciliation: seed each sdk agent's at-rest machine state (so the status dot doesn't
 // default to "idle" for a machine the sweeper stopped before the last restart) and recreate any

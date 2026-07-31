@@ -126,6 +126,31 @@ async function sessionFor(connectionId: string, contextId: string): Promise<Pool
   return pooled;
 }
 
+// Close out sign-in handshakes whose deadline passed with nobody watching them.
+//
+// The watcher in watchForSignin lives in THIS process, so a backend restart mid-sign-in orphans
+// it: the row stays 'pending' forever (the page polls it and never learns it died) and the
+// Browserbase session keeps billing until its own timeout. Deploys restart the backend and a
+// sign-in window is ~14 minutes, so this is routine, not exotic.
+export async function sweepStaleSignins(): Promise<void> {
+  const closed = await db.expireStaleBrowserSigninRequests();
+  for (const row of closed) {
+    if (row.session_id) {
+      // Release rather than let it time out — on the free tier a handful of abandoned sessions is
+      // the entire monthly allowance.
+      await bb()
+        .sessions.update(row.session_id, { status: "REQUEST_RELEASE" })
+        .catch(() => {
+          /* already gone; nothing to reclaim */
+        });
+    }
+    const participant = await db.getParticipant(row.participant_id).catch(() => null);
+    const site = browserSite(row.site);
+    if (participant && site) announce(participant, { ...row, status: "expired" }, site);
+  }
+  if (closed.length) console.log(`browser: swept ${closed.length} stale sign-in request(s)`);
+}
+
 // Release everything (process shutdown). Best-effort and parallel — we're on the way out.
 export async function shutdownBrowserSessions(): Promise<void> {
   const all = [...pool.values()];
