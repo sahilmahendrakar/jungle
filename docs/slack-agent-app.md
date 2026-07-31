@@ -66,6 +66,11 @@ Until step 4 the feature is inert: the webhook rejects unsigned events (401) and
   },
   "features": {
     "bot_user": { "display_name": "Jungle", "always_online": true },
+    "app_home": {
+      "home_tab_enabled": true,
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    },
     "agent_view": {
       "agent_description": "I build agents and workflows that do real work.",
       "suggested_prompts": [
