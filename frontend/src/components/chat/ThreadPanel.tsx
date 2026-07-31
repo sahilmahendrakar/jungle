@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, Hash, MessagesSquare, Paperclip, SendHorizonal, X } from "lucide-react";
 import type { Channel, Message, Participant, UnreadThread } from "../../api";
 import { fmtTime } from "../../lib/chat";
@@ -150,6 +150,7 @@ export function ThreadPanel({
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const composerRef = useRef<HTMLDivElement | null>(null);
+  const pinnedRef = useRef(true);
 
   const { pending, addFiles, removePending, clearPending, readyIds, uploading } =
     usePendingAttachments(onNotice);
@@ -165,11 +166,34 @@ export function ThreadPanel({
     if (!jumpToId || !threadRootId) return;
     const el = scrollRef.current?.querySelector(`[data-message-id="${jumpToId}"]`);
     if (!el) return;
+    pinnedRef.current = false; // don't yank back to the bottom on the next content change
     el.scrollIntoView({ block: "center" });
     el.classList.add("animate-msg-flash");
     setTimeout(() => el.classList.remove("animate-msg-flash"), 2000);
     onJumpDone?.();
   }, [jumpToId, threadRootId, threadReplies, onJumpDone]);
+
+  // Track whether the user is at (near) the bottom, so new replies only auto-scroll when
+  // they were already reading the newest ones.
+  const onScroll = useCallback(() => {
+    const vp = scrollRef.current;
+    if (!vp) return;
+    pinnedRef.current = vp.scrollHeight - vp.scrollTop - vp.clientHeight < 60;
+  }, []);
+
+  // Thread switch: always jump to the newest reply and reset the pin.
+  useEffect(() => {
+    pinnedRef.current = true;
+    const vp = scrollRef.current;
+    if (vp) vp.scrollTop = vp.scrollHeight;
+  }, [threadRootId]);
+
+  // New content (including the reply I just sent): keep pinned to the bottom only while I'm
+  // already there.
+  useEffect(() => {
+    const vp = scrollRef.current;
+    if (vp && pinnedRef.current) vp.scrollTop = vp.scrollHeight;
+  }, [threadReplies]);
 
   const { mention, candidates, index, setIndex, syncMention, acceptMention, clearMention, handleKey } =
     useMentionAutocomplete({ people, members, participantId, draft: threadDraft, setDraft: setThreadDraft, taRef });
@@ -260,7 +284,7 @@ export function ThreadPanel({
       {/* Open-thread mode */}
       {threadRootId && (
         <>
-          <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+          <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
             {threadRoot ? (
               <div className="flex flex-col gap-4">
                 <ThreadMessageRow
