@@ -4,6 +4,7 @@ import * as db from "../db";
 import * as runners from "../runners";
 import { provisionerFor } from "../provisioner";
 import { attachIntegrationAs, RUNNER_PROVIDER_DEFAULT } from "./agentAdmin";
+import { announceParticipant } from "../ws/appSocket";
 
 // @jungle — the workspace's default agent, and the front door to the product: you talk to it to
 // get anything done, and it can reshape the workspace itself (channels, agents, workflows,
@@ -192,6 +193,7 @@ export async function ensureJungleAgent(workspaceId: string): Promise<db.Partici
   });
   await attachDefaultIntegrations(participant);
   await ensureJungleDms(participant);
+  announceParticipant(participant);
   void (async () => {
     try {
       await provisionerFor(participant).create({ id: participant.id, handle, runnerToken });

@@ -351,9 +351,12 @@ export function App({
     }
   }
 
-  // Channels this participant belongs to + everyone (for the member picker), plus the pending
-  // approvals and the deliverables feed's first page.
-  useEffect(() => {
+  // Everything that is otherwise only kept current by live WS frames. Run at load AND on every
+  // (re)connect: a frame that fanned out while this tab was disconnected is gone for good, so a
+  // socket that comes back without re-fetching leaves a sidebar with stale unread counts, a
+  // roster missing agents created in the gap, and approvals that already expired. reloadChannels
+  // keeps the current selection if it still exists.
+  const resyncAll = useCallback(() => {
     if (!participantId) return;
     reloadChannels();
     listParticipants().then(setPeople).catch(() => {});
@@ -361,7 +364,11 @@ export function App({
     refreshConfirms();
     reloadDeliverables();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [participantId]);
+  }, [participantId, refreshConfirms]);
+
+  useEffect(() => {
+    resyncAll();
+  }, [resyncAll]);
 
   // Load history when the selected channel changes, and mark it read (Slack: opening a
   // channel clears its unread state).
@@ -493,8 +500,12 @@ export function App({
     (m: Message, isOpen: boolean) => {
       if (isOpen && focusedRef.current) return;
       const ch = channelsRef.current.find((c) => c.id === m.channel_id);
-      const isDm = ch?.kind === "dm";
       const mentionsMe = (m.mentions ?? []).some((x) => x.id === participantId);
+      // An unknown channel is a conversation that didn't exist when this tab loaded — almost
+      // always a DM someone just opened with me, occasionally a channel I was just added to.
+      // Both are worth a ping, and treating it as "not a DM" is what used to make the very first
+      // message from an agent arrive in total silence. `tag` keeps it to one per conversation.
+      const isDm = ch ? ch.kind === "dm" : true;
       if (!isDm && !mentionsMe) return;
       notify({
         title: isDm ? `@${m.sender_handle}` : `@${m.sender_handle} in #${ch?.name ?? "channel"}`,
@@ -531,6 +542,7 @@ export function App({
     selectedRef,
     focusedRef,
     activityIdRef,
+    channelsRef,
     setChannels,
     setPeople,
     setMessages,
@@ -549,7 +561,7 @@ export function App({
     onNotifiableMessage,
     onAnyActivity: useCallback(() => setLiveTick((t) => t + 1), []),
     onConfirmRequested,
-    onConnected: refreshConfirms,
+    onConnected: resyncAll,
   });
 
   // Post the composer's message over WS. No optimistic echo — the message appears when it

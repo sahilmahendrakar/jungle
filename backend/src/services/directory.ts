@@ -71,7 +71,17 @@ export async function createChannelAs(
   if (!name) throw new ApiError(400, "name required");
   const handles = (input.memberHandles ?? []).map((h) => String(h).replace(/^@/, ""));
   if (!handles.includes(actor.handle)) handles.push(actor.handle);
-  return db.createChannel({ workspaceId: actor.workspace_id, name, kind: "channel", memberHandles: handles });
+  const channel = await db.createChannel({
+    workspaceId: actor.workspace_id,
+    name,
+    kind: "channel",
+    memberHandles: handles,
+  });
+  // Tell the members it was created WITH (the actor included) to refetch their channel list —
+  // otherwise a channel someone else made, or one an agent made with create_channel, sits
+  // invisible in their sidebar until they reload. Same coarse contract as members_changed.
+  await fanOut(channel.id, { type: "channel_created", channelId: channel.id });
+  return channel;
 }
 
 // Guard: the actor is a member of channel `id` (and it's in their workspace). Mirrors

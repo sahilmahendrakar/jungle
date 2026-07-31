@@ -12,6 +12,20 @@ import {
 } from "../api";
 import { mergeById, type ToolConfirm } from "../lib/chat";
 
+// How often the client probes the server, and how long without hearing anything before it gives
+// up on the socket and redials. The gap is deliberately wide: a backgrounded tab has its timers
+// throttled to roughly once a minute, and a throttled-but-healthy socket must not trip the
+// watchdog.
+const HEARTBEAT_MS = 25_000;
+const STALE_AFTER_MS = 90_000;
+// Reconnect backoff. Every reconnect now costs a full re-sync (see onConnected), so a socket that
+// can't stay up — an expired token the server keeps rejecting, a backend that's down — must not
+// retry at a fixed 1.5s and turn one broken tab into a steady stream of requests. A connection
+// that survives HEALTHY_AFTER_MS is treated as good and resets the delay.
+const RETRY_MIN_MS = 1_500;
+const RETRY_MAX_MS = 30_000;
+const HEALTHY_AFTER_MS = 30_000;
+
 // Owns the single app WebSocket: connect, auto-reconnect, and the full ServerEvent dispatch that
 // fans each frame into the relevant piece of chat state. The handler reads live values (open
 // channel, tab focus, open Activity view) through refs so it never has to re-subscribe. Returns
@@ -24,10 +38,12 @@ export function useChatSocket(opts: {
   participantId: string | null;
   getWsToken?: () => Promise<string | null>;
   workspaceId?: string; // Firebase mode: scopes the socket to the active workspace (&workspaceId=)
-  // Live reads (no re-subscribe): the open channel, tab focus/visibility, the open Activity agent.
+  // Live reads (no re-subscribe): the open channel, tab focus/visibility, the open Activity agent,
+  // and the loaded channel list (to spot a message for a channel this client doesn't know yet).
   selectedRef: RefObject<string | null>;
   focusedRef: RefObject<boolean>;
   activityIdRef: RefObject<string | null>;
+  channelsRef: RefObject<Channel[]>;
   // State setters.
   setChannels: Dispatch<SetStateAction<Channel[]>>;
   setPeople: Dispatch<SetStateAction<Participant[]>>;
@@ -62,8 +78,10 @@ export function useChatSocket(opts: {
   // feeds the Activity page's "new activity" nudge. Keep it cheap (a counter bump).
   onAnyActivity?: () => void;
   onConfirmRequested: (c: ToolConfirm) => void;
-  // Fired on every (re)connect, after the message backfill kicks off — used to re-sync state
-  // that only fans out live (pending confirmations).
+  // Fired on every (re)connect, after the message backfill kicks off. Everything that only ever
+  // arrives live — the channel list and its unread counts, the roster, threads, approvals,
+  // deliverables — has to be re-fetched here: whatever happened during the gap fanned out to a
+  // socket that no longer existed, and no amount of reconnecting brings those frames back.
   onConnected?: () => void;
 }): RefObject<WebSocket | null> {
   const {
@@ -73,6 +91,7 @@ export function useChatSocket(opts: {
     selectedRef,
     focusedRef,
     activityIdRef,
+    channelsRef,
     setChannels,
     setPeople,
     setMessages,
@@ -94,25 +113,74 @@ export function useChatSocket(opts: {
     onConnected,
   } = opts;
   const wsRef = useRef<WebSocket | null>(null);
+  // Channels we've already refetched for after a message arrived naming a channel we didn't know.
+  const unknownChannelsRef = useRef<Set<string>>(new Set());
 
-  // One auto-reconnecting WebSocket. On (re)connect, backfill history for the open channel so
-  // anything that arrived while disconnected isn't missed (cross-device).
+  // One auto-reconnecting WebSocket. On (re)connect, backfill history for the open channel and
+  // re-sync everything else (onConnected) so anything that changed while disconnected isn't
+  // missed (cross-device) — a socket that comes back to a stale sidebar is barely better than one
+  // that never came back.
   useEffect(() => {
     if (!participantId) return;
     let stopped = false;
-    let ws: WebSocket;
+    let ws: WebSocket | null = null;
     let retry: ReturnType<typeof setTimeout> | undefined;
-    const connect = async () => {
-      // Firebase mode: authenticate the socket with a fresh ID token + the active workspace. Dev
-      // mode: ?participantId= (which already names a workspace).
-      const qs = getWsToken
-        ? `token=${encodeURIComponent((await getWsToken()) ?? "")}` +
-          (workspaceId ? `&workspaceId=${encodeURIComponent(workspaceId)}` : "")
-        : `participantId=${encodeURIComponent(participantId)}`;
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    let connecting = false;
+    // When we last heard ANYTHING from the server (frames or pong replies) — the watchdog's clock.
+    let lastFrameAt = Date.now();
+    let openedAt = 0;
+    let retryDelay = RETRY_MIN_MS;
+
+    const clearTimers = () => {
+      if (retry) clearTimeout(retry);
+      if (heartbeat) clearInterval(heartbeat);
+      retry = heartbeat = undefined;
+    };
+
+    // Abandon the current socket and dial again immediately. Used when the watchdog decides the
+    // connection is dead: close() alone isn't enough, because a half-open socket may sit in
+    // CLOSING for a long time before the browser gives up and fires `close`. Detaching the
+    // handlers first makes the old socket inert, so its eventual `close` can't schedule a second
+    // reconnect on top of this one.
+    const reconnectNow = () => {
       if (stopped) return;
-      ws = new WebSocket(`${WS_BASE}/?${qs}`);
-      wsRef.current = ws;
-      ws.onopen = () => {
+      clearTimers();
+      const dead = ws;
+      ws = null;
+      if (dead) {
+        dead.onopen = dead.onmessage = dead.onclose = dead.onerror = null;
+        try {
+          dead.close();
+        } catch {
+          /* already gone */
+        }
+      }
+      void connect();
+    };
+
+    const connect = async () => {
+      // Guard the async token fetch below: a wake-up event landing mid-fetch would otherwise
+      // open a second socket and leave the first one orphaned.
+      if (stopped || connecting) return;
+      connecting = true;
+      let socket: WebSocket;
+      try {
+        // Firebase mode: authenticate the socket with a fresh ID token + the active workspace. Dev
+        // mode: ?participantId= (which already names a workspace).
+        const qs = getWsToken
+          ? `token=${encodeURIComponent((await getWsToken()) ?? "")}` +
+            (workspaceId ? `&workspaceId=${encodeURIComponent(workspaceId)}` : "")
+          : `participantId=${encodeURIComponent(participantId)}`;
+        if (stopped) return;
+        socket = new WebSocket(`${WS_BASE}/?${qs}`);
+        ws = socket;
+        wsRef.current = socket;
+      } finally {
+        connecting = false;
+      }
+      socket.onopen = () => {
+        lastFrameAt = openedAt = Date.now();
         setNotice("");
         const ch = selectedRef.current;
         if (ch)
@@ -120,11 +188,34 @@ export function useChatSocket(opts: {
             setMessages((prev) => mergeById(prev, hist)),
           );
         onConnected?.();
+        // Probe liveness on a timer. The browser answers protocol-level pings itself and never
+        // tells JS, so an application ping/pong is the only way this side can tell a live socket
+        // from one whose TCP connection died without a FIN (sleep, wifi switch, an idle NAT
+        // reaping the flow) — that socket reports OPEN forever and silently swallows sends.
+        heartbeat = setInterval(() => {
+          if (stopped || socket !== ws) return;
+          if (socket.readyState !== WebSocket.OPEN) {
+            reconnectNow();
+            return;
+          }
+          if (Date.now() - lastFrameAt > STALE_AFTER_MS) {
+            reconnectNow();
+            return;
+          }
+          try {
+            socket.send(JSON.stringify({ type: "ping" }));
+          } catch {
+            reconnectNow();
+          }
+        }, HEARTBEAT_MS);
       };
-      ws.onmessage = (e) => {
+      socket.onmessage = (e) => {
+        // Any frame proves the socket is alive, `pong` included — that's all a pong is for.
+        lastFrameAt = Date.now();
         // Typed against the shared ServerEvent union (same contract the backend emits), so each
         // branch below is checked against the real frame shape instead of an untyped any.
         const evt = JSON.parse(e.data) as ServerEvent;
+        if (evt.type === "pong") return;
         if (evt.type === "agent_status_changed") {
           setPeople((ps) => ps.map((p) => (p.id === evt.agentId ? { ...p, status: evt.status } : p)));
           return;
@@ -141,6 +232,18 @@ export function useChatSocket(opts: {
           // Refresh the sidebar list so a channel I was just added to/removed from shows up
           // correctly even when it's not the one currently open.
           reloadChannels();
+          return;
+        }
+        if (evt.type === "channel_created") {
+          // Someone (or some agent) made a channel with me already in it. Coarse like
+          // members_changed: refetch rather than splice a row in with guessed ordering/unreads.
+          reloadChannels();
+          return;
+        }
+        if (evt.type === "participant_created") {
+          setPeople((ps) =>
+            ps.some((p) => p.id === evt.participant.id) ? ps : [...ps, evt.participant],
+          );
           return;
         }
         if (evt.type === "channel_deleted") {
@@ -292,6 +395,19 @@ export function useChatSocket(opts: {
         // refresh the Threads badge/list regardless of which channel is open. (When the thread
         // is open, the reply also flows into `messages` below and the pane re-derives from it.)
         if (m.thread_root_id && !isMine) refreshThreads();
+        // A message for a channel this client has never loaded: an agent or teammate opening a DM
+        // with me, or a channel I was added to. There's no sidebar row to bump, so the frame used
+        // to just vanish — no entry, no unread, nothing until a reload. Refetch instead. This is
+        // also what makes new DMs work without announcing every findOrCreateDm: the first message
+        // is what should make a DM appear anyway. Once per channel — a burst shouldn't refetch
+        // once per message.
+        if (!channelsRef.current?.some((c) => c.id === m.channel_id)) {
+          if (!unknownChannelsRef.current.has(m.channel_id)) {
+            unknownChannelsRef.current.add(m.channel_id);
+            reloadChannels();
+          }
+          return;
+        }
         if (isOpen && focusedRef.current) {
           // Looking right at this channel — render it and keep the read marker current so it
           // never shows as unread.
@@ -322,14 +438,47 @@ export function useChatSocket(opts: {
           ),
         );
       };
-      ws.onclose = () => {
-        if (!stopped) retry = setTimeout(connect, 1500);
+      socket.onclose = () => {
+        if (stopped || socket !== ws) return; // superseded by reconnectNow — don't dial twice
+        clearTimers();
+        // A connection that lasted a while was fine; whatever just dropped it is fresh trouble,
+        // so start over from the short delay. One that died immediately is the failing case.
+        if (openedAt && Date.now() - openedAt >= HEALTHY_AFTER_MS) retryDelay = RETRY_MIN_MS;
+        const delay = retryDelay;
+        retryDelay = Math.min(retryDelay * 2, RETRY_MAX_MS);
+        retry = setTimeout(() => void connect(), delay);
       };
     };
-    connect();
+
+    // Coming back from a background tab, a sleeping laptop or an offline network is exactly when
+    // the socket is most likely to be quietly dead, and it's the moment the user is about to look
+    // at the screen. Check then instead of waiting up to a full heartbeat.
+    const wake = () => {
+      if (stopped || connecting) return;
+      if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        // The user just came back / the network just returned — retry now rather than sitting out
+        // whatever backoff the previous failures accumulated.
+        retryDelay = RETRY_MIN_MS;
+        clearTimers();
+        void connect();
+        return;
+      }
+      if (ws.readyState === WebSocket.OPEN && Date.now() - lastFrameAt > STALE_AFTER_MS) reconnectNow();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") wake();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("online", wake);
+    window.addEventListener("focus", wake);
+
+    void connect();
     return () => {
       stopped = true;
-      if (retry) clearTimeout(retry);
+      clearTimers();
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("online", wake);
+      window.removeEventListener("focus", wake);
       ws?.close();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

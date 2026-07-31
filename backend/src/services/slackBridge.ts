@@ -3,7 +3,7 @@ import * as db from "../db";
 import * as att from "../attachments";
 import * as slack from "../slack/api";
 import { slackToJungleText, jungleToSlackText, mentionedSlackUserIds } from "../slack/format";
-import { fanOut, broadcastWorkspace, DEFAULT_CASCADE_BUDGET } from "../ws/appSocket";
+import { announceParticipant, fanOut, broadcastWorkspace, DEFAULT_CASCADE_BUDGET } from "../ws/appSocket";
 import { triggerMentionedAgents } from "./orchestrator";
 import { ApiError } from "../http/errors";
 
@@ -194,6 +194,7 @@ export async function resolveSlackParticipant(
     firebaseUid: null,
   });
   await db.insertUserLink({ teamId: install.team_id, slackUserId, participantId: shadow.id, kind: "shadow" });
+  announceParticipant(shadow);
   return shadow;
 }
 

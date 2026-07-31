@@ -6,6 +6,7 @@ import * as auth from "../../auth";
 import { wrap, ApiError } from "../errors";
 import { publicParticipant } from "../guards";
 import { isAdminEmail } from "../../admins";
+import { announceParticipant } from "../../ws/appSocket";
 
 const router = Router();
 
@@ -89,6 +90,7 @@ router.post(
       kind: "human", workspaceId: db.DEFAULT_WORKSPACE_ID, handle, displayName,
       firebaseUid: u.uid, email: u.email, avatarUrl: u.picture,
     });
+    announceParticipant(p);
     res.status(201).json(p);
   }),
 );

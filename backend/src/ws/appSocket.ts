@@ -5,6 +5,7 @@ import type { PersistedMessage } from "../db";
 import * as auth from "../auth";
 import * as att from "../attachments";
 import * as push from "../services/push";
+import { publicParticipant } from "../http/guards";
 
 // The app (human/device) WebSocket: realtime message delivery to browsers. Distinct from the
 // runner subsystem (runners.ts), which owns the /api/runner upgrade path. This module owns the
@@ -16,8 +17,16 @@ export const DEFAULT_CASCADE_BUDGET = 3;
 
 // A socket tags itself mobile via ?client=mobile at connect (the phone apps); web/other clients
 // leave it unset. Used to decide push suppression: only the phone being connected suppresses a
-// phone push — desktop presence should not.
-type WsWithMeta = WebSocket & { __mobile?: boolean };
+// phone push — desktop presence should not. `__alive` is the heartbeat's liveness flag (below).
+type WsWithMeta = WebSocket & { __mobile?: boolean; __alive?: boolean };
+
+// Heartbeat. Without one, a socket whose TCP connection died without a FIN — laptop sleep, wifi
+// switch, an idle NAT/proxy reaping the flow — stays in `wss.clients` at readyState OPEN forever:
+// the server holds a dead registry entry and keeps "delivering" to it, and the browser on the
+// other end never fires `close`, so it never reconnects and goes silent until a manual reload.
+// Every interval we terminate anything that missed the previous ping and re-probe the rest. The
+// traffic doubles as a keepalive, which stops the idle-reap case from happening at all.
+const HEARTBEAT_MS = 25_000;
 
 // participantId -> open sockets (a participant may be connected from several devices).
 const sockets = new Map<string, Set<WebSocket>>();
@@ -155,6 +164,15 @@ export function broadcastWorkspace(workspaceId: string, payload: unknown): void 
   for (const ws of set) if (ws.readyState === WebSocket.OPEN) ws.send(data);
 }
 
+// Announce a participant who just joined a workspace (an agent someone created, a human who
+// accepted an invite, a Slack shadow user) so every open client adds them to its roster without a
+// reload. One helper rather than an inline broadcast per creation site, because the important part
+// is easy to forget: publicParticipant strips runner_token, and a participant row that reaches a
+// browser with its runner token attached hands out control of that agent's runner socket.
+export function announceParticipant(p: db.Participant): void {
+  broadcastWorkspace(p.workspace_id, { type: "participant_created", participant: publicParticipant(p) });
+}
+
 // Broadcast to every connected socket of ONE account (all workspaces), keyed by Firebase uid. For
 // account-scoped events — self-hosted device status — that don't belong to any single workspace.
 export function broadcastUid(uid: string, payload: unknown): void {
@@ -174,6 +192,23 @@ export interface AppSocketHooks {
 // runner subsystem (its own upgrade listener), everything else here.
 export function initAppSocket(server: Server, hooks: AppSocketHooks): void {
   const wss = new WebSocketServer({ noServer: true });
+
+  // See HEARTBEAT_MS. A socket that hasn't answered the last ping is presumed dead and dropped
+  // (terminate, not close: there's nobody left to complete a closing handshake with). `close`
+  // fires either way, so the registry cleanup below still runs.
+  const heartbeat = setInterval(() => {
+    for (const client of wss.clients) {
+      const ws = client as WsWithMeta;
+      if (ws.__alive === false) {
+        ws.terminate();
+        continue;
+      }
+      ws.__alive = false;
+      ws.ping();
+    }
+  }, HEARTBEAT_MS);
+  heartbeat.unref();
+  wss.on("close", () => clearInterval(heartbeat));
   server.on("upgrade", (req, socket, head) => {
     let pathname = "/";
     try {
@@ -196,6 +231,12 @@ export function initAppSocket(server: Server, hooks: AppSocketHooks): void {
       early.push(raw);
     };
     ws.on("message", buffer);
+    // Mark alive up front — the sweep runs on its own clock and must not reap a socket that is
+    // merely still authenticating — and keep the flag fresh on every pong.
+    (ws as WsWithMeta).__alive = true;
+    ws.on("pong", () => {
+      (ws as WsWithMeta).__alive = true;
+    });
     // Real auth: a Firebase ID token (?token=) is verified and mapped to the user's participant in
     // the active workspace (&workspaceId=, with a single-membership fallback during rollout).
     // Dev/test: when DEV_BYPASS is on, fall back to a trusted ?participantId=.
@@ -240,6 +281,13 @@ export function initAppSocket(server: Server, hooks: AppSocketHooks): void {
       try {
         evt = JSON.parse(raw.toString());
       } catch {
+        return;
+      }
+      // Application-level liveness probe. The client can't see protocol pongs (the browser
+      // answers those itself, invisibly to JS), so it probes with this and reconnects when the
+      // replies stop. Answer before anything else — it must stay cheap and never touch the DB.
+      if (evt.type === "ping") {
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "pong" }));
         return;
       }
       // The one routing rule (human-only for now): persist -> fan out. A post needs a body

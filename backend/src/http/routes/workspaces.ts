@@ -6,6 +6,7 @@ import * as auth from "../../auth";
 import { ensureJungleAgent, ensureJungleDmFor } from "../../services/jungleAgent";
 import { wrap, ApiError } from "../errors";
 import { publicParticipant, requireRequester } from "../guards";
+import { announceParticipant } from "../../ws/appSocket";
 
 const router = Router();
 
@@ -135,6 +136,7 @@ router.post(
     // New member → @jungle is waiting in their DMs from the start, same as for the workspace's
     // creator. Best-effort: joining must not fail because the default agent isn't there yet.
     void ensureJungleDmFor(participant).catch((e) => console.error("jungle dm for new member:", e));
+    announceParticipant(participant);
     res.status(201).json(publicParticipant(participant));
   }),
 );

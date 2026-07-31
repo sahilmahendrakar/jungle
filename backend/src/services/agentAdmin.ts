@@ -11,7 +11,7 @@ import { providerConfigured } from "../providers";
 import * as db from "../db";
 import * as runners from "../runners";
 import { provisionerFor } from "../provisioner";
-import { broadcastWorkspace } from "../ws/appSocket";
+import { announceParticipant, broadcastWorkspace } from "../ws/appSocket";
 import { adapterFor } from "../integrations";
 import { syncRosterIntegration } from "./workflows";
 import { ApiError } from "../http/errors";
@@ -159,6 +159,9 @@ export async function createAgentAs(
     throw e;
   }
   if (hostId) participant.runner_meta = { hostId };
+  // Put the new agent in everyone's roster now (Team page, member pickers, @-autocomplete) —
+  // the mirror of the participant_deleted broadcast below.
+  announceParticipant(participant);
   // Provision + start in the background. Best-effort: if the provisioner isn't available the
   // agent row still exists and a runner can be started later; just log the failure. For
   // self-hosted, start() sends a run command to the device (no-op if it's offline — the agent

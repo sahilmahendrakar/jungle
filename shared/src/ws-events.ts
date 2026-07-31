@@ -19,6 +19,15 @@ export interface ErrorEvent {
   error: string;
 }
 
+// The reply to a client `ping`. This is the client's ONLY way to prove the socket is still alive:
+// the browser WebSocket API answers protocol-level pings itself and never surfaces them to JS, so
+// liveness has to ride at the application level. Without it a half-open socket (laptop sleep, wifi
+// switch, an idle NAT dropping the flow) sits at readyState OPEN forever, fires no `close`, and
+// the tab goes quiet until the user reloads.
+export interface PongEvent {
+  type: "pong";
+}
+
 // A new (or thread-reply) message in a channel the recipient belongs to.
 export interface MessageEvent {
   type: "message";
@@ -54,9 +63,29 @@ export interface ChannelDeletedEvent {
   channelId: string;
 }
 
+// A channel was created with the recipient already a member (fanned out to those members).
+// Coarse by design, like members_changed: clients refetch their channel list rather than trying
+// to splice a row in with the right unread/ordering state. DMs are NOT announced this way — an
+// empty DM isn't worth a sidebar row, and the first message in one is what makes it appear (the
+// client refetches when a message arrives for a channel it doesn't know).
+export interface ChannelCreatedEvent {
+  type: "channel_created";
+  channelId: string;
+}
+
 // A participant's editable fields changed (profile save). Carries the public participant.
 export interface ParticipantUpdatedEvent {
   type: "participant_updated";
+  participant: Participant;
+}
+
+// A participant joined the workspace — an agent someone (or some agent) just created, a human who
+// accepted an invite, a Slack shadow user. Broadcast workspace-wide so every open client adds them
+// to the roster: the Team page, member pickers, @-autocomplete. The counterpart of
+// participant_deleted; without it a brand-new agent is invisible (and un-mentionable) to everyone
+// who didn't create it until they refresh. Carries the PUBLIC row (no runner_token).
+export interface ParticipantCreatedEvent {
+  type: "participant_created";
   participant: Participant;
 }
 
@@ -191,12 +220,15 @@ export interface SlackLinkChangedEvent {
 export type ServerEvent =
   | ConnectedEvent
   | ErrorEvent
+  | PongEvent
   | MessageEvent
   | AgentStatusChangedEvent
   | DeviceStatusChangedEvent
   | MembersChangedEvent
   | ChannelDeletedEvent
+  | ChannelCreatedEvent
   | ParticipantUpdatedEvent
+  | ParticipantCreatedEvent
   | ParticipantDeletedEvent
   | AgentTurnEvent
   | AgentEventEvent
@@ -227,4 +259,10 @@ export interface ClientPostFrame {
   alsoToChannel?: boolean;
 }
 
-export type ClientFrame = ClientPostFrame;
+// Application-level liveness probe; the server answers with a `pong`. Sent on a timer by the web
+// client, which reconnects if the replies stop coming (see PongEvent).
+export interface ClientPingFrame {
+  type: "ping";
+}
+
+export type ClientFrame = ClientPostFrame | ClientPingFrame;

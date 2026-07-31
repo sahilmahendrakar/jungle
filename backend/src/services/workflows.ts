@@ -14,7 +14,7 @@ import * as db from "../db";
 import * as att from "../attachments";
 import * as runners from "../runners";
 import { provisionerFor } from "../provisioner";
-import { broadcastWorkspace, fanOut, DEFAULT_CASCADE_BUDGET } from "../ws/appSocket";
+import { announceParticipant, broadcastWorkspace, fanOut, DEFAULT_CASCADE_BUDGET } from "../ws/appSocket";
 import { ApiError } from "../http/errors";
 import { isValidTimeZone, computeNextRun } from "./scheduler";
 
@@ -270,6 +270,7 @@ async function createSeatAgent(
     );
   });
   await tryAttachIntegrations(actor, participant.id, seat.integrations, seatSettingsMap(seat));
+  announceParticipant(participant);
   return participant;
 }
 
@@ -774,6 +775,7 @@ export async function ensureArchitect(workspaceId: string): Promise<db.Participa
       client,
     );
   });
+  announceParticipant(participant);
   void (async () => {
     try {
       await provisionerFor(participant).create({ id: participant.id, handle: ARCHITECT_HANDLE, runnerToken });
