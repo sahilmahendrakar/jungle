@@ -303,6 +303,23 @@ async function runAgentReply(
   }
 }
 
+// Resolve a "#name" destination for send_message/read_history. Every DM channel is created with
+// the literal name "dm" (findOrCreateDm) — for an agent in more than one DM (e.g. a Liana agent
+// DMing several people), a name lookup for "#dm" is ambiguous and nondeterministically picks
+// whichever DM channel is oldest. "#dm" can only sensibly mean "the DM this turn was dispatched
+// from", so resolve it off the dispatch context directly instead of the ambiguous name lookup.
+async function resolveHashChannel(
+  name: string,
+  agentId: string,
+  dispatchChannelId: string | undefined,
+): Promise<{ id: string } | null> {
+  if (name === "dm" && dispatchChannelId) {
+    const ch = await db.getChannel(dispatchChannelId);
+    if (ch?.kind === "dm") return ch;
+  }
+  return db.getChannelByNameForMember(name, agentId);
+}
+
 // Execute one send_message tool call from an agent: resolve the destination (#channel or @handle),
 // post via the routing rule (persist + fan out + cascade), and report back.
 async function deliverAgentMessage(
@@ -323,7 +340,7 @@ async function deliverAgentMessage(
 
   let channelId: string;
   if (to.startsWith("#")) {
-    const ch = await db.getChannelByNameForMember(to.slice(1), agent.id);
+    const ch = await resolveHashChannel(to.slice(1), agent.id, dispatch.channelId);
     if (!ch) return { ok: false, error: `you are not a member of channel ${to} (or it doesn't exist)` };
     channelId = ch.id;
   } else if (to.startsWith("@")) {
@@ -376,7 +393,8 @@ export async function readAgentHistory(
   const to = String(toolInput.to ?? "").trim();
   let channelId: string;
   if (to.startsWith("#")) {
-    const ch = await db.getChannelByNameForMember(to.slice(1), agent.id);
+    const dispatchChannelId = (await resolveDispatchContext(agent.id))?.channelId;
+    const ch = await resolveHashChannel(to.slice(1), agent.id, dispatchChannelId);
     if (!ch) return { ok: false, error: `you are not a member of channel ${to} (or it doesn't exist)` };
     channelId = ch.id;
   } else if (to.startsWith("@")) {
