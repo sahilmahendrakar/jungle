@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { BROWSER_SITES, browserSite } from "@jungle/shared";
+import { BROWSER_SITES, browserSite, type BrowserSigninView } from "@jungle/shared";
 import * as db from "../../db";
 import { wrap, ApiError } from "../errors";
 import { requireRequester } from "../guards";
@@ -91,7 +91,11 @@ router.get(
     if (!view) throw new ApiError(404, "sign-in request is not open");
     // Belt and braces: keep this out of any shared cache, since the body is a live capability.
     res.setHeader("Cache-Control", "no-store");
-    res.json({ requestId: String(req.params.id), ...view });
+    // Annotated with the shared wire type on purpose: res.json() accepts anything, so without this
+    // a renamed field silently reaches the client as undefined (which is exactly how the sign-in
+    // page ended up stuck on "Connecting…").
+    const body: BrowserSigninView = { requestId: String(req.params.id), ...view };
+    res.json(body);
   }),
 );
 

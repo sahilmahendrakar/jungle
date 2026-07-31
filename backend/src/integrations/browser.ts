@@ -1,5 +1,5 @@
 import type { ConfigureFrame } from "@jungle/shared";
-import { browserSite, type BrowserIntegrationConfig } from "@jungle/shared";
+import { approvalIsOn, browserSite, type BrowserIntegrationConfig } from "@jungle/shared";
 import * as db from "../db";
 import { isBrowserConfigured } from "../services/browser";
 import { ownerOf } from "../services/ownership";
@@ -69,8 +69,13 @@ export const browserAdapter: IntegrationAdapter = {
   // stored: it resolves from the owner's live connections at grant time, so a profile disconnected
   // in Settings stops being reachable on the agent's very next turn rather than lingering in a
   // stale config.
+  // rawConfig comes straight from the editor, whose config is Record<string, string> — the
+  // approval checkbox writes the STRING "false", not the boolean. Comparing against `false` alone
+  // meant unchecking the box stored `true`, so it silently re-checked itself on every save.
+  // approvalIsOn() is the shared predicate for exactly this and handles both forms; what we store
+  // is a real boolean, which is why parseConfig below can compare against `false` directly.
   async resolveConfig(_ctx, rawConfig): Promise<Record<string, unknown>> {
-    return { requireApproval: rawConfig.requireApproval !== false };
+    return { requireApproval: approvalIsOn(rawConfig.requireApproval) };
   },
 
   async buildGrant(frame: ConfigureFrame, agent, config): Promise<string | null> {

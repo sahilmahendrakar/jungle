@@ -332,14 +332,22 @@ async function persistProfile(
 // The brokered live view. Called only by the route, only after it has checked that the viewer IS
 // the participant who must sign in. Minting here (rather than storing the URL) keeps the
 // capability out of the database and out of every list payload.
-export async function liveViewFor(requestId: string, viewerId: string): Promise<{ url: string; siteLabel: string; expiresAt: string } | null> {
+// The field is `liveViewUrl`, matching the shared BrowserSigninView the client decodes. It was
+// `url` at first, which typechecked fine on both sides — res.json() is untyped and the client's
+// request<T>() asserts its shape rather than verifying it — and surfaced as a sign-in page stuck
+// on "Connecting…" forever, because the client read undefined and had no error to report. The
+// route now annotates its response with the shared type so the two can't drift again.
+export async function liveViewFor(
+  requestId: string,
+  viewerId: string,
+): Promise<{ liveViewUrl: string; siteLabel: string; expiresAt: string } | null> {
   const row = await db.getBrowserSigninRequest(requestId);
   if (!row || row.participant_id !== viewerId || row.status !== "pending" || !row.session_id) return null;
   if (new Date(row.expires_at).getTime() <= Date.now()) return null;
   const site = browserSite(row.site);
   const { debuggerFullscreenUrl } = await bb().sessions.debug(row.session_id);
   return {
-    url: debuggerFullscreenUrl,
+    liveViewUrl: debuggerFullscreenUrl,
     siteLabel: site?.label ?? row.site,
     expiresAt: row.expires_at,
   };

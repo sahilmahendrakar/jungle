@@ -50,6 +50,10 @@ export function BrowserSignin({
       // design, so a mere status check never mints one.
       if (!liveViewUrl) {
         const v = await getBrowserSigninView(requestId);
+        // Treat a missing URL as a failure rather than rendering an endless spinner. A field-name
+        // mismatch between this and the route once produced exactly that: a page that looked like
+        // it was still connecting, forever, with nothing to report.
+        if (!v.liveViewUrl) throw new Error("the browser session didn't return a view — try a new sign-in link");
         setLiveViewUrl(v.liveViewUrl);
       }
     } catch (e) {
@@ -141,6 +145,18 @@ export function BrowserSignin({
         )}
         <p className="text-xs text-muted-foreground">
           This window is private to you and expires shortly. Don't share this page's link.
+          {liveViewUrl && (
+            <>
+              {" "}
+              If the browser above doesn't load,{" "}
+              {/* Escape hatch: the embed is a third-party app in an iframe, and "it just spins" is
+                  the failure mode with no other recourse. Opening it directly still works. */}
+              <a href={liveViewUrl} target="_blank" rel="noreferrer" className="underline">
+                open it in a new tab
+              </a>
+              .
+            </>
+          )}
         </p>
       </div>
     );
