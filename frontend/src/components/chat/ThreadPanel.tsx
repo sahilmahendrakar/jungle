@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, Hash, MessagesSquare, Paperclip, SendHorizonal, X } from "lucide-react";
+import { Check, Hash, MessagesSquare, Paperclip, SendHorizonal, Trash2, X } from "lucide-react";
 import type { Channel, Message, Participant, UnreadThread } from "../../api";
 import { fmtTime } from "../../lib/chat";
 import { Markdown } from "../../Markdown";
@@ -14,6 +14,7 @@ import {
 } from "./attachments";
 import { DeliverableChips } from "./deliverableCards";
 import { MessageTurnChips } from "./TurnChips";
+import { DeletedBody } from "./MessageList";
 import type { QueuedTurn, TurnChipData } from "../../ws/useLiveTurns";
 import { usePersistentDraft } from "../../lib/drafts";
 import { Button } from "@/components/ui/button";
@@ -32,6 +33,8 @@ function ThreadMessageRow({
   queued,
   personById,
   onOpenTurn,
+  canDelete,
+  onDelete,
 }: {
   m: Message;
   personByHandle: (h?: string | null) => Participant | undefined;
@@ -40,12 +43,18 @@ function ThreadMessageRow({
   queued?: QueuedTurn[];
   personById?: (id: string) => Participant | undefined;
   onOpenTurn?: (turn: TurnChipData) => void;
+  // Same rule as the main timeline (see MessageList): own messages and any agent's. A deleted
+  // root renders as a tombstone here — it's the one place a deleted message stays visible.
+  canDelete?: (m: Message) => boolean;
+  onDelete?: (m: Message) => void;
 }) {
   const sender = personByHandle(m.sender_handle);
   const isAgent = sender?.kind === "agent";
   const hasChips = (turns?.length ?? 0) > 0 || (queued?.length ?? 0) > 0;
+  const deleted = !!m.deleted_at;
+  const showDelete = !deleted && !!onDelete && !!canDelete?.(m);
   return (
-    <div data-message-id={m.id} className="flex gap-2.5 rounded-md">
+    <div data-message-id={m.id} className="group/tmsg relative flex gap-2.5 rounded-md">
       <button
         onClick={() => sender && onOpenProfile(sender.id)}
         disabled={!sender}
@@ -66,7 +75,8 @@ function ThreadMessageRow({
           <span className="text-xs text-muted-foreground">{fmtTime(m.created_at)}</span>
         </div>
         <div className="break-words text-sm">
-          {m.body && (
+          {deleted && <DeletedBody />}
+          {!deleted && m.body && (
             <Markdown personByHandle={personByHandle} onOpenProfile={onOpenProfile}>
               {m.body}
             </Markdown>
@@ -84,6 +94,16 @@ function ThreadMessageRow({
           </div>
         )}
       </div>
+      {showDelete && (
+        <button
+          data-testid="thread-message-delete"
+          title="Delete message"
+          onClick={() => onDelete!(m)}
+          className="absolute right-0 top-0 flex size-6 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive focus-visible:opacity-100 group-hover/tmsg:opacity-100"
+        >
+          <Trash2 className="size-3.5" />
+        </button>
+      )}
     </div>
   );
 }
@@ -114,6 +134,8 @@ export function ThreadPanel({
   participantId,
   jumpToId,
   onJumpDone,
+  canDelete,
+  onDelete,
 }: {
   threadRootId: string | null;
   threadRoot: Message | null;
@@ -141,6 +163,9 @@ export function ThreadPanel({
   // scroll it into view with a flash highlight, then report done so the parent clears it.
   jumpToId?: string | null;
   onJumpDone?: () => void;
+  // Delete affordance for rows in this pane; same predicate the main timeline uses.
+  canDelete: (m: Message) => boolean;
+  onDelete: (m: Message) => void;
 }) {
   const [threadDraft, setThreadDraft] = usePersistentDraft(
     threadRootId ? `thread:${threadRootId}` : null,
@@ -295,6 +320,8 @@ export function ThreadPanel({
                   queued={rootQueued}
                   personById={personById}
                   onOpenTurn={onOpenTurn}
+                  canDelete={canDelete}
+                  onDelete={onDelete}
                 />
                 {threadReplies.length > 0 && (
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -310,6 +337,8 @@ export function ThreadPanel({
                     m={m}
                     personByHandle={personByHandle}
                     onOpenProfile={onOpenProfile}
+                    canDelete={canDelete}
+                    onDelete={onDelete}
                   />
                 ))}
               </div>

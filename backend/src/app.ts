@@ -8,6 +8,7 @@ import agentsRouter from "./http/routes/agents";
 import attachmentsRouter from "./http/routes/attachments";
 import channelsRouter from "./http/routes/channels";
 import threadsRouter from "./http/routes/threads";
+import messagesRouter from "./http/routes/messages";
 import githubRouter from "./http/routes/github";
 import googleRouter from "./http/routes/google";
 import integrationsRouter from "./http/routes/integrations";
@@ -69,6 +70,7 @@ export function createApp(): express.Express {
   app.use(attachmentsRouter);
   app.use(channelsRouter);
   app.use(threadsRouter);
+  app.use(messagesRouter);
   app.use(githubRouter);
   app.use(googleRouter);
   app.use(integrationsRouter);

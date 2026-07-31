@@ -153,6 +153,61 @@ async function run() {
     assert(ml.length === 1, "egress recorded a jungle-origin message_link", `rows=${ml.length}`);
   }
 
+  // G) deletion mirrors BOTH ways.
+  {
+    // G1: deleting in Jungle deletes our bot's copy in Slack (and forgets the mapping).
+    const { rows: ins } = await db.query(
+      `insert into messages (channel_id, sender_id, body, cascade_budget) values ($1,$2,'delete me over there',0) returning id`,
+      [CHAN, HUMAN]);
+    const mid = ins[0].id;
+    const { rows: link } = await db.query(`select id from slack_channel_links where jungle_channel_id=$1`, [CHAN]);
+    await db.query(`insert into slack_outbox (link_id, jungle_message_id) values ($1,$2)`, [link[0].id, mid]);
+    let ts = null;
+    for (let i = 0; i < 12; i++) {
+      await sleep(600);
+      const { rows } = await db.query(`select slack_ts from slack_message_links where jungle_message_id=$1`, [mid]);
+      if (rows[0]) { ts = rows[0].slack_ts; break; }
+    }
+    assert(!!ts, "mirrored message reached Slack first", "never got a slack_ts");
+    const r = await fetch(`${BASE}/api/messages/${mid}?participantId=${HUMAN}`, { method: "DELETE" });
+    assert(r.status === 200, "DELETE /api/messages accepted", `got ${r.status}`);
+    await sleep(600);
+    const rec = await (await fetch(`http://localhost:3056/__recorded`)).json();
+    assert((rec.deleted ?? []).some((d) => d.ts === ts),
+      "the Slack copy was deleted via chat.delete", JSON.stringify(rec.deleted));
+    const { rows: gone } = await db.query(`select * from slack_message_links where jungle_message_id=$1`, [mid]);
+    assert(gone.length === 0, "the message link was forgotten", `rows=${gone.length}`);
+
+    // G2: an un-drained mirror job for a message deleted before it ships never reaches Slack.
+    const { rows: ins2 } = await db.query(
+      `insert into messages (channel_id, sender_id, body, cascade_budget) values ($1,$2,'never mirrored',0) returning id`,
+      [CHAN, HUMAN]);
+    const mid2 = ins2[0].id;
+    await db.query(`insert into slack_outbox (link_id, jungle_message_id) values ($1,$2)`, [link[0].id, mid2]);
+    await fetch(`${BASE}/api/messages/${mid2}?participantId=${HUMAN}`, { method: "DELETE" });
+    await sleep(2500);
+    const rec2 = await (await fetch(`http://localhost:3056/__recorded`)).json();
+    assert(!(rec2.posted ?? []).some((p2) => p2.text?.includes("never mirrored")),
+      "a message deleted before its mirror job drained is never posted to Slack");
+
+    // G3: deleting over in Slack deletes our copy here.
+    const { rows: mine } = await db.query(
+      `select m.id, l.slack_ts from messages m join slack_message_links l on l.jungle_message_id = m.id
+        where m.channel_id=$1 and m.body='from jungle'`, [CHAN]);
+    assert(mine.length === 1, "found the earlier mirrored message", `rows=${mine.length}`);
+    await signedFetch({
+      type: "event_callback",
+      event_id: `Ev-del-${Date.now()}`,
+      team_id: TEAM,
+      event: { type: "message", subtype: "message_deleted", channel: SLACK_CHAN,
+               ts: `${Date.now()}.000900`, deleted_ts: mine[0].slack_ts },
+    });
+    await sleep(800);
+    const { rows: after } = await db.query(`select deleted_at, body from messages where id=$1`, [mine[0].id]);
+    assert(!!after[0].deleted_at && after[0].body === "",
+      "a Slack-side delete removes the Jungle copy", JSON.stringify(after[0]));
+  }
+
   console.log(`\n${pass} assertions passed`);
   await db.end();
 }

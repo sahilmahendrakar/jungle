@@ -10,7 +10,7 @@ import {
   type Message,
   type Participant,
 } from "../api";
-import { mergeById, type ToolConfirm } from "../lib/chat";
+import { reconcileHistory, type ToolConfirm } from "../lib/chat";
 
 // How often the client probes the server, and how long without hearing anything before it gives
 // up on the socket and redials. The gap is deliberately wide: a backgrounded tab has its timers
@@ -184,8 +184,10 @@ export function useChatSocket(opts: {
         setNotice("");
         const ch = selectedRef.current;
         if (ch)
+          // Reconcile, not merge: whatever was deleted while we were disconnected has to leave
+          // local state too (its message_deleted frame went to a socket that no longer existed).
           getMessages(ch).then((hist) =>
-            setMessages((prev) => mergeById(prev, hist)),
+            setMessages((prev) => reconcileHistory(prev, hist)),
           );
         onConnected?.();
         // Probe liveness on a timer. The browser answers protocol-level pings itself and never
@@ -382,6 +384,24 @@ export function useChatSocket(opts: {
           const d = evt.deliverable;
           setDeliverables((ds) => (ds.some((x) => x.id === d.id) ? ds : [d, ...ds]));
           onAnyActivity?.();
+          return;
+        }
+        if (evt.type === "message_deleted") {
+          // Drop it from the timeline (and from any open thread pane — replies/roots both come
+          // out of `messages`). A thread ROOT with live replies is kept as a tombstone instead,
+          // so the thread doesn't lose its head; the server decides which case this is.
+          setMessages((prev) =>
+            evt.tombstone
+              ? prev.map((x) =>
+                  x.id === evt.messageId
+                    ? { ...x, body: "", attachments: [], deleted_at: new Date().toISOString() }
+                    : x,
+                )
+              : prev.filter((x) => x.id !== evt.messageId),
+          );
+          // A deleted reply can clear the last unread reply on a thread I follow, and a deleted
+          // root can retire the entry entirely — both change the Threads badge.
+          if (evt.threadRootId) refreshThreads();
           return;
         }
         if (evt.type !== "message") return;

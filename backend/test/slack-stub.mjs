@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 
 const PORT = Number(process.argv[2] ?? 3056);
 export const posted = [];
+export const deleted = []; // chat.delete calls (mirror-delete path)
 export const published = []; // views.publish (App Home)
 export const statuses = []; // assistant.threads.setStatus
 let tsCounter = 1000;
@@ -13,7 +14,7 @@ const server = createServer((req, res) => {
   // (which channel, which bot token, which blocks) rather than only what the DB believes.
   if (req.method === "GET" && req.url.startsWith("/__recorded")) {
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ posted, published, statuses }));
+    res.end(JSON.stringify({ posted, published, statuses, deleted }));
     return;
   }
   const chunks = [];
@@ -53,6 +54,11 @@ const server = createServer((req, res) => {
       posted.push({ channel: body.channel, text: body.text, username: body.username, thread_ts: body.thread_ts, ts, token });
       console.log(`STUB chat.postMessage -> #${body.channel} as "${body.username}" [${token}]: ${JSON.stringify(body.text)}${body.thread_ts ? ` (thread ${body.thread_ts})` : ""}`);
       return json({ ok: true, ts });
+    }
+    if (method === "chat.delete") {
+      deleted.push({ channel: body.channel, ts: body.ts, token });
+      console.log(`STUB chat.delete -> #${body.channel} ts=${body.ts} [${token}]`);
+      return json({ ok: true, ts: body.ts });
     }
     if (method === "conversations.join") return json({ ok: true });
     if (method === "conversations.info") return json({ ok: true, channel: { id: body.channel, name: "stub-channel" } });

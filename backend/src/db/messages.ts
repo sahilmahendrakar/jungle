@@ -18,16 +18,38 @@ async function resolveThreadRoot(
   channelId: string,
   threadRootId: string,
 ): Promise<string> {
-  const { rows } = await client.query<{ id: string; channel_id: string; thread_root_id: string | null }>(
-    `select id, channel_id, thread_root_id from messages where id = $1`,
-    [threadRootId],
-  );
+  const { rows } = await client.query<{
+    id: string;
+    channel_id: string;
+    thread_root_id: string | null;
+  }>(`select id, channel_id, thread_root_id from messages where id = $1`, [threadRootId]);
   const target = rows[0];
   if (!target) throw new Error("thread root message not found");
   if (target.channel_id !== channelId) throw new Error("thread root is in a different channel");
   // Flatten: if the target is itself a reply, use its root so threads stay one level deep.
-  return target.thread_root_id ?? target.id;
+  const rootId = target.thread_root_id ?? target.id;
+  // A DELETED root still accepts replies as long as it's showing as a tombstone (it has live
+  // replies, so the thread is open in front of someone). Once its last reply is gone the root
+  // is invisible everywhere, and replying would resurrect it — refuse that.
+  const { rows: rootRows } = await client.query<{ deleted_at: string | null; reply_count: number }>(
+    `select deleted_at, reply_count from messages where id = $1`,
+    [rootId],
+  );
+  const root = rootRows[0];
+  if (root?.deleted_at && root.reply_count === 0) throw new Error("thread root message not found");
+  return rootId;
 }
+
+// Deletion is soft (see migrations/048_message_delete.sql). These two predicates are the whole
+// visibility rule and every read path uses one of them:
+//   LIVE  — plain "not deleted", for anything that reads message CONTENT (agent context, search,
+//           the activity feed, unread counts).
+//   VISIBLE — LIVE, plus deleted thread roots that still have live replies. Those come back as
+//           tombstones ("This message was deleted") so an open thread keeps its head instead of
+//           losing its root. Once a tombstoned root's last reply is deleted its reply_count hits
+//           0 and it drops out of here too, so tombstones are self-cleaning.
+const LIVE = `m.deleted_at is null`;
+const VISIBLE = `(m.deleted_at is null or (m.thread_root_id is null and m.reply_count > 0))`;
 
 // Row -> PersistedMessage. `mentions` defaults to [] (history render doesn't need them — they're
 // only carried on live WS frames, matching the pre-threads behavior); persistMessage passes the
@@ -47,6 +69,7 @@ function rowToMessage(
     reply_count?: number | null;
     last_reply_at?: string | null;
     turn_id?: string | null;
+    deleted_at?: string | null;
   },
   attachments: AttachmentMeta[],
   mentions: { id: string; handle: string }[] = [],
@@ -65,6 +88,7 @@ function rowToMessage(
     also_to_channel: r.also_to_channel ?? false,
     reply_count: r.reply_count ?? 0,
     last_reply_at: r.last_reply_at ?? null,
+    deleted_at: r.deleted_at ?? null,
     mentions,
     attachments,
   };
@@ -111,8 +135,9 @@ export async function persistMessage(args: {
     let row = ins.rows[0];
     let attachments: AttachmentMeta[] = [];
     if (row) {
-      // Bump the root's denormed thread summary in the same txn (O(1), no drift — there's no
-      // single-message delete anywhere in the app).
+      // Bump the root's denormed thread summary in the same txn (O(1)). The counterweight is
+      // softDeleteMessage, which RECOMPUTES it over live replies — this increment is the only
+      // place that assumes the count never goes down, so the two must stay in step.
       if (rootId) {
         await client.query(
           `update messages
@@ -168,7 +193,7 @@ export async function getMessages(channelId: string, afterSeq = 0): Promise<Pers
   const { rows } = await pool.query(
     `select m.*, p.handle as sender_handle
      from messages m join participants p on p.id = m.sender_id
-     where m.channel_id = $1 and m.seq > $2
+     where m.channel_id = $1 and m.seq > $2 and ${VISIBLE}
      order by m.seq`,
     [channelId, afterSeq],
   );
@@ -182,7 +207,7 @@ export async function getThreadMessages(rootId: string): Promise<PersistedMessag
   const { rows } = await pool.query(
     `select m.*, p.handle as sender_handle
      from messages m join participants p on p.id = m.sender_id
-     where m.id = $1 or m.thread_root_id = $1
+     where (m.id = $1 or m.thread_root_id = $1) and ${VISIBLE}
      order by m.seq`,
     [rootId],
   );
@@ -199,7 +224,7 @@ export async function getRecentContext(channelId: string, limit = 20): Promise<s
             (select array_agg(a.filename order by a.created_at)
              from attachments a where a.message_id = m.id) as att
      from messages m join participants p on p.id = m.sender_id
-     where m.channel_id = $1 order by m.seq desc limit $2`,
+     where m.channel_id = $1 and ${LIVE} order by m.seq desc limit $2`,
     [channelId, limit],
   );
   return formatContextLines(rows);
@@ -224,7 +249,7 @@ export async function getChannelHistoryBefore(
             (select array_agg(a.filename order by a.created_at)
              from attachments a where a.message_id = m.id) as att
      from messages m join participants p on p.id = m.sender_id
-     where m.channel_id = $1 ${beforeSeq ? "and m.seq < $3" : ""}
+     where m.channel_id = $1 and ${LIVE} ${beforeSeq ? "and m.seq < $3" : ""}
      order by m.seq desc limit $2`,
     beforeSeq ? [channelId, limit, beforeSeq] : [channelId, limit],
   );
@@ -265,6 +290,148 @@ export async function searchMessages(
     p.values,
   );
   return rows;
+}
+
+// --- Deletion ---
+
+// The bits the delete endpoint needs to authorize: which channel the message lives in, who sent
+// it, and whether the sender is an agent (agent messages can be deleted by any human member;
+// a human's message only by its author). Null when the id doesn't exist.
+export interface DeletableMessage {
+  id: string;
+  channel_id: string;
+  sender_id: string;
+  sender_kind: "human" | "agent";
+  deleted_at: string | null;
+}
+
+// Has this message been deleted? Cheap re-check for paths that read a message id they captured
+// earlier (the Slack egress drain re-checks between claiming a job and posting it).
+export async function isMessageDeleted(messageId: string): Promise<boolean> {
+  const { rows } = await pool.query<{ deleted_at: string | null }>(
+    `select deleted_at from messages where id = $1`,
+    [messageId],
+  );
+  return !rows[0] || rows[0].deleted_at != null;
+}
+
+export async function getDeletableMessage(messageId: string): Promise<DeletableMessage | null> {
+  const { rows } = await pool.query<DeletableMessage>(
+    `select m.id, m.channel_id, m.sender_id, p.kind as sender_kind, m.deleted_at
+     from messages m join participants p on p.id = m.sender_id
+     where m.id = $1`,
+    [messageId],
+  );
+  return rows[0] ?? null;
+}
+
+export interface DeletedMessage {
+  channelId: string;
+  threadRootId: string | null;
+  // The row stays visible as "This message was deleted" (a thread root with live replies).
+  tombstone: boolean;
+  // Blobs to drop from the Storage seam — done by the caller AFTER the txn commits, since
+  // deleting a file isn't transactional (the attachment GC sweeps any that fail).
+  storageKeys: string[];
+  // The delete was a no-op because the message was already deleted (double-click, or our own
+  // Slack mirror-delete echoing back in as a message_deleted event).
+  alreadyDeleted: boolean;
+}
+
+// Soft-delete a message: stamp deleted_at, destroy the content, and clean up everything that
+// pointed at it. Authorization is the caller's job (see http/routes/messages.ts).
+//
+// "Delete" here really does destroy: the body is blanked and the attachments/mentions/extracted
+// deliverables are removed. What survives is the ROW — its id and its seq — because the channel's
+// read markers, the thread tree and the reply_count denorm are all keyed off it (see the
+// migration). Two things are also CANCELLED rather than cleaned up: an undelivered agent dispatch
+// this message triggered (deleting a message you just @mentioned an agent in should call the
+// agent off, not leave it working on text nobody can read) and an unsent Slack mirror job.
+export async function softDeleteMessage(
+  messageId: string,
+  actorId: string | null,
+): Promise<DeletedMessage | null> {
+  return withTransaction(async (client) => {
+    // Lock the row first: two clients deleting the same message must not both run the cleanup
+    // (and the reply_count recompute below has to see a stable set of replies).
+    const { rows } = await client.query<{
+      id: string;
+      channel_id: string;
+      thread_root_id: string | null;
+      deleted_at: string | null;
+      reply_count: number;
+    }>(
+      `select id, channel_id, thread_root_id, deleted_at, reply_count
+       from messages where id = $1 for update`,
+      [messageId],
+    );
+    const msg = rows[0];
+    if (!msg) return null;
+    const liveReplies = async () =>
+      Number(
+        (
+          await client.query<{ n: string }>(
+            `select count(*) as n from messages where thread_root_id = $1 and deleted_at is null`,
+            [msg.id],
+          )
+        ).rows[0].n,
+      );
+    if (msg.deleted_at) {
+      return {
+        channelId: msg.channel_id,
+        threadRootId: msg.thread_root_id,
+        tombstone: !msg.thread_root_id && (await liveReplies()) > 0,
+        storageKeys: [],
+        alreadyDeleted: true,
+      };
+    }
+
+    await client.query(
+      `update messages set deleted_at = now(), deleted_by = $2, body = '' where id = $1`,
+      [messageId, actorId],
+    );
+    const { rows: blobs } = await client.query<{ storage_key: string }>(
+      `delete from attachments where message_id = $1 returning storage_key`,
+      [messageId],
+    );
+    // Mentions go too, or the deleted message keeps flagging its channel with a mention badge
+    // that resolves to nothing (listChannels joins mentions to compute has_mention).
+    await client.query(`delete from mentions where message_id = $1`, [messageId]);
+    // Deliverables were extracted FROM this body; with the body gone the chip has no source.
+    await client.query(`delete from deliverables where message_id = $1`, [messageId]);
+    // Undelivered dispatch this message triggered — call the agent off.
+    await client.query(
+      `delete from agent_inbox where delivered_at is null and context->>'messageId' = $1`,
+      [messageId],
+    );
+    // Un-drained Slack mirror job: don't post a message that no longer exists here.
+    await client.query(
+      `delete from slack_outbox where jungle_message_id = $1 and status = 'pending'`,
+      [messageId],
+    );
+
+    // Thread bookkeeping. Deleting a REPLY lowers its root's denormed summary (persistMessage
+    // only ever raises it); deleting a ROOT leaves its replies alone — they stay in the thread,
+    // headed by the tombstone.
+    if (msg.thread_root_id) {
+      await client.query(
+        `update messages r
+            set reply_count   = (select count(*) from messages m
+                                  where m.thread_root_id = r.id and m.deleted_at is null),
+                last_reply_at = (select max(m.created_at) from messages m
+                                  where m.thread_root_id = r.id and m.deleted_at is null)
+          where r.id = $1`,
+        [msg.thread_root_id],
+      );
+    }
+    return {
+      channelId: msg.channel_id,
+      threadRootId: msg.thread_root_id,
+      tombstone: !msg.thread_root_id && (await liveReplies()) > 0,
+      storageKeys: blobs.map((b) => b.storage_key),
+      alreadyDeleted: false,
+    };
+  });
 }
 
 // The channel a message belongs to (for membership checks on thread endpoints). Null if gone.

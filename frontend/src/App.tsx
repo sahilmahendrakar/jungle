@@ -9,6 +9,7 @@ import {
   addChannelMember,
   removeChannelMember,
   deleteChannel,
+  deleteMessage,
   confirmToolCall,
   listPendingConfirms,
   listDeliverables,
@@ -80,6 +81,7 @@ import { BrowseChannelsDialog } from "./components/chat/BrowseChannelsDialog";
 import { MembersDialog } from "./components/chat/MembersDialog";
 import { SlackLinkDialog } from "./components/chat/SlackLinkDialog";
 import { DeleteChannelDialog } from "./components/chat/DeleteChannelDialog";
+import { DeleteMessageDialog } from "./components/chat/DeleteMessageDialog";
 import { InviteDialog } from "./components/chat/InviteDialog";
 import { useChatSocket } from "./ws/useChatSocket";
 import { useLiveTurns, type TurnChipData, type QueuedTurn } from "./ws/useLiveTurns";
@@ -167,6 +169,8 @@ export function App({
   const [slackLink, setSlackLink] = useState<SlackChannelLink | null>(null);
   const [showSlackLink, setShowSlackLink] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  // Message pending deletion (the confirm dialog's subject); null = dialog closed.
+  const [pendingDelete, setPendingDelete] = useState<Message | null>(null);
   // Channel agent roster (right-panel view; the header 🤖 button toggles it).
   const [rosterOpen, setRosterOpen] = useState(false);
   // Collapsible sidebar (persisted, desktop) + profile dialog (participant id being viewed)
@@ -355,6 +359,20 @@ export function App({
       reloadChannels();
     } catch (e) {
       setNotice(String((e as Error).message ?? e));
+    }
+  }
+
+  async function confirmDeleteMessage() {
+    const m = pendingDelete;
+    if (!m) return;
+    try {
+      await deleteMessage(m.id);
+      // No local mutation here: the server fans a message_deleted frame back to every socket
+      // including this one, and that single path is what removes it (or leaves a tombstone).
+      setPendingDelete(null);
+    } catch (e) {
+      setNotice(String((e as Error).message ?? e));
+      setPendingDelete(null);
     }
   }
 
@@ -940,6 +958,11 @@ export function App({
     [people],
   );
   const peopleById = new Map(people.map((p) => [p.id, p]));
+  // Who may delete what, mirroring the server rule (http/routes/messages.ts): your own messages,
+  // and ANY agent's message in a channel you're in — an agent's output belongs to the workspace.
+  // Someone else's human message is never deletable, admin or not.
+  const canDeleteMessage = (m: Message) =>
+    m.sender_id === participantId || personByHandle(m.sender_handle)?.kind === "agent";
   // Agents working/waking in the currently-open channel (drives the header banner). Read status
   // from the live `people` map rather than the `members` roster snapshot so it stays current.
   const busyMembers = members
@@ -1354,6 +1377,8 @@ export function App({
             onOpenLiveTurn={openLiveTurn}
             jumpToId={jumpToId}
             onJumpDone={() => setJumpToId(null)}
+            canDelete={canDeleteMessage}
+            onDelete={setPendingDelete}
           />
         )}
 
@@ -1505,6 +1530,8 @@ export function App({
               participantId={participantId}
               jumpToId={threadJumpToId}
               onJumpDone={() => setThreadJumpToId(null)}
+              canDelete={canDeleteMessage}
+              onDelete={setPendingDelete}
             />
           )}
 
@@ -1575,6 +1602,14 @@ export function App({
         onOpenChange={setShowDeleteConfirm}
         channelName={sel?.name}
         onConfirm={confirmDeleteChannel}
+      />
+
+      {/* ---------- Delete message confirm ---------- */}
+      <DeleteMessageDialog
+        open={!!pendingDelete}
+        onOpenChange={(v) => !v && setPendingDelete(null)}
+        isAgent={personByHandle(pendingDelete?.sender_handle)?.kind === "agent"}
+        onConfirm={confirmDeleteMessage}
       />
 
       {/* ---------- Add agent dialog ---------- */}
