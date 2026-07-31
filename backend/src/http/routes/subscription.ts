@@ -60,11 +60,15 @@ router.delete(
   }),
 );
 
-// Re-push `configure` to each connected agent this operator created. reconfigure() no-ops for
-// agents whose runner isn't connected — they pick the new credential up from the `configure` they
-// get on their next `hello`, so nothing is missed.
+// Re-push `configure` to each connected agent this operator OWNS. reconfigure() no-ops for agents
+// whose runner isn't connected — they pick the new credential up from the `configure` they get on
+// their next `hello`, so nothing is missed.
+//
+// Keyed on ownership, not creation: an agent that @jungle built on this operator's behalf is theirs
+// to pay for, so setting or clearing a token has to reach it too. Under the old created_by lookup
+// those agents were invisible here — and, separately, were never billed to the subscription at all.
 async function reconfigureOwnedAgents(ownerId: string): Promise<void> {
-  for (const agentId of await db.listAgentIdsCreatedBy(ownerId)) {
+  for (const agentId of await db.listAgentIdsOwnedBy(ownerId)) {
     await runners.reconfigure(agentId);
   }
 }

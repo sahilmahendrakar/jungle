@@ -40,17 +40,15 @@ const ACCOUNT_KEY = `coalesce(lower(u.owner_email), 'participant:' || u.owner_id
 const TURNS = `count(distinct coalesce(u.turn_id, 'evt:' || u.id::text))`;
 const ACTIVE_AGENTS = `count(distinct coalesce(u.agent_id::text, 'h:' || u.agent_handle))`;
 // Resolve a LIVE agent row (aliased `a`) to its owning human, as `o`. Mirrors the write path in
-// recordTurnUsage: the recorded creator, else the workspace's admin / earliest human — so an
-// agent created by the Architect (no creator) lands on the same account its usage rows did.
+// recordTurnUsage — both now read participants.owner_id (migrations/046), the one stored answer.
+//
+// This was a lateral that re-derived the owner from created_by, duplicated here, in recordTurnUsage
+// and in db/spendLimits. All three took a single hop and fell back to the workspace admin only when
+// created_by IS NULL — so an agent created BY AN AGENT (non-null, not human) matched neither branch
+// and landed in its own 'participant:<agent-id>' bucket: an account with no email, invisible in the
+// admin view, holding its own uneditable copy of the daily cap. One join, one meaning, no drift.
 const AGENT_OWNER_LATERAL = `
-  left join lateral (
-    select h.id, h.email, h.display_name
-      from participants h
-     where h.id = a.created_by
-        or (a.created_by is null and h.workspace_id = a.workspace_id and h.kind = 'human')
-     order by (h.id = a.created_by) desc, (h.role = 'admin') desc, h.created_at asc
-     limit 1
-  ) o on true`;
+  left join participants o on o.id = a.owner_id and o.kind = 'human'`;
 // The account key for that resolved owner. Must agree with ACCOUNT_KEY above.
 const OWNER_KEY = `coalesce(lower(o.email), 'participant:' || o.id::text, 'unattributed')`;
 const TOKEN_SUMS = `
@@ -128,21 +126,15 @@ export async function recordTurnUsage(
     owner_name: string | null;
     subscription: boolean;
   }>(
-    // Owner = the recorded creator, else the workspace's admin (earliest human): agents created
-    // by a workflow's Architect or by an internal path have no creator, and their spend still has
-    // to land on somebody. Same rule the 040 backfill used.
+    // Owner = participants.owner_id (migrations/046), assigned via services/ownership. An agent
+    // with no owner — nobody eligible in the workspace — records null owner columns and rolls up
+    // under 'unattributed', the same place a deleted creator already landed. Must stay in step
+    // with AGENT_OWNER_LATERAL above and db/spendLimits: they answer the same question.
     `select a.handle, a.workspace_id, o.id as owner_id, o.email as owner_email,
             o.display_name as owner_name,
             o.claude_oauth_token is not null as subscription
        from participants a
-       left join lateral (
-         select h.id, h.email, h.display_name, h.claude_oauth_token
-           from participants h
-          where h.id = a.created_by
-             or (a.created_by is null and h.workspace_id = a.workspace_id and h.kind = 'human')
-          order by (h.id = a.created_by) desc, (h.role = 'admin') desc, h.created_at asc
-          limit 1
-       ) o on true
+       left join participants o on o.id = a.owner_id and o.kind = 'human'
       where a.id = $1`,
     [agentId],
   );

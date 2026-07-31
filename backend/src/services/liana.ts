@@ -148,7 +148,7 @@ export async function ensureLianaAgent(owner: db.Participant): Promise<db.Partic
     runnerProvider: "fly",
     persona: LIANA_PERSONA,
     lianaConductor: true,
-    createdBy: owner.id, // per-user agent — its spend is the owner's
+    createdBy: owner.id, ownerId: owner.id, // per-user agent — its spend is the owner's
   });
   await db.setLianaAgentId(owner.id, participant.id);
 

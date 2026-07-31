@@ -234,6 +234,13 @@ interface RunnerConn {
   // Latest context-window occupancy (%) reported via context_usage, or null if none yet. The
   // sweeper reads this to fire idle-gated auto-compaction.
   contextPercent: number | null;
+  // When this socket last sent ANY protocol frame (see enqueueFrame). Distinct from the WS
+  // heartbeat, which only proves the socket is alive: this measures whether the TURN is making
+  // progress, so the sweeper can spot a runner wedged mid-turn behind a healthy socket.
+  lastFrameAt: number;
+  // Set once we've escalated a stuck turn on this socket, so the sweeper doesn't restart the same
+  // machine every pass while it comes back up. Cleared whenever the runner speaks again.
+  stuckEscalatedAt: number | null;
 }
 
 // agentId -> the single live runner connection (a new connect replaces the old).
@@ -644,6 +651,65 @@ const IDLE_STOP_MS = (() => {
 const SWEEP_INTERVAL_MS = 15_000;
 let sweeping = false;
 
+// How long a runner may claim to be running, with queued work, without sending a single frame,
+// before we treat the turn as wedged. Must clear the longest plausible gap BETWEEN events in a
+// healthy turn — not the longest turn — since any tool result, token, or task_progress frame
+// resets it. A slow test suite or a long clone still emits nothing for minutes, hence the margin.
+const STUCK_TURN_MS = (() => {
+  const raw = Number(process.env.RUNNER_STUCK_TURN_SECONDS ?? 900);
+  return Number.isFinite(raw) && raw > 0 ? raw * 1000 : 0;
+})();
+// Don't re-escalate the same wedge while the machine is coming back up.
+const STUCK_RESTART_COOLDOWN_MS = 5 * 60_000;
+
+// Break a wedged turn: interrupt first, and if the runner is still silent on the next pass, restart
+// the machine out from under it. Returns true when this agent was handled (skip the rest of the
+// sweep for it this pass).
+//
+// Ordered gently-to-harshly on purpose. An interrupt is cheap and lets the runner end the turn
+// itself, preserving the session; a restart loses in-flight work but is the only thing that helps
+// when the runner's own paths are all dead — which is what actually happened. Requires PENDING WORK
+// to fire: an agent quietly running a long turn with an empty inbox is nobody's emergency, and
+// tying recovery to visible user impact keeps this from second-guessing legitimate long turns.
+async function maybeRecoverStuckTurn(agent: db.AgentRow, conn: RunnerConn): Promise<boolean> {
+  if (STUCK_TURN_MS === 0) return false;
+  if (conn.state !== "running") {
+    conn.stuckEscalatedAt = null;
+    return false;
+  }
+  const silentFor = Date.now() - conn.lastFrameAt;
+  if (silentFor < STUCK_TURN_MS) return false;
+  if ((await db.pendingInbox(agent.id)).length === 0) return false;
+
+  if (conn.stuckEscalatedAt == null) {
+    console.error(
+      `runner[${agent.id}] (@${agent.handle}) stuck: running, silent for ${Math.round(silentFor / 1000)}s ` +
+        `with queued work — interrupting`,
+    );
+    conn.stuckEscalatedAt = Date.now();
+    send(conn, { type: "interrupt" });
+    return true;
+  }
+  if (Date.now() - conn.stuckEscalatedAt < STUCK_RESTART_COOLDOWN_MS) return true;
+  // The interrupt didn't land either. Restart the machine; the queued rows are still pending in the
+  // DB (nothing marks them consumed until the runner says so), so they drain on the next `hello`.
+  console.error(
+    `runner[${agent.id}] (@${agent.handle}) still stuck after an interrupt — restarting its runner`,
+  );
+  conn.stuckEscalatedAt = Date.now();
+  try {
+    // Same stop→start as the fatal-restart path below, including its status bookkeeping so the
+    // agent reads "sleeping" then "waking" rather than flickering through a bogus state.
+    await provisionerFor(agent).stop(agent.id);
+    noteProvisionerStop(agent.id);
+    await provisionerFor(agent).start(agent.id);
+    noteProvisionerStart(agent.id);
+  } catch (e) {
+    console.error(`runner[${agent.id}] stuck-turn restart failed:`, e);
+  }
+  return true;
+}
+
 // One sweep pass over every sdk agent: stop machines that have been idle too long with
 // nothing queued, and (reverse direction) start machines for a disconnected agent that has
 // pending inbox work — this heals the enqueue-vs-stop race and crashed runners with queued
@@ -669,6 +735,18 @@ async function sweepOnce(): Promise<void> {
             spendNotified.delete(agent.id);
             await drain(agent.id);
           }
+          // Stuck-turn detection, BEFORE the idle gate below — a wedged runner is never idle, so
+          // everything past that line is blind to it. This is the backstop of last resort: it makes
+          // no assumption about WHY the turn stopped, only that a runner claiming to be running,
+          // with work waiting, has gone silent far longer than any real turn's event gap.
+          //
+          // The runner has its own watchdog now, and the stop button escalates properly, so this
+          // should never fire. It exists because 2026-07-31 proved the runner can lose every one of
+          // its own end-turn paths at once (all three were gated on the same precondition), and the
+          // backend had nothing that could notice. Two independent processes must be able to break
+          // a wedge, or a single missed edge strands an agent until a human intervenes.
+          if (await maybeRecoverStuckTurn(agent, conn)) continue;
+
           // Self-hosted: keep the runner child alive while the device is online (no idle-stop) —
           // it's cheap when idle on the user's own machine, and killing/respawning it would add
           // session-resume latency to every message. The child stops when the device disconnects.
@@ -975,6 +1053,8 @@ async function accept(ws: WebSocket, token: string): Promise<void> {
     currentTurnContext: null,
     frameTail: Promise.resolve(),
     contextPercent: null,
+    lastFrameAt: Date.now(),
+    stuckEscalatedAt: null,
   };
   conns.set(agent.id, conn);
   console.log(`runner[${agent.id}] (@${agent.handle}) connected`);
@@ -999,6 +1079,12 @@ async function accept(ws: WebSocket, token: string): Promise<void> {
 // by the events that follow) is never overtaken by a later frame. A thrown handler doesn't stall
 // the queue.
 function enqueueFrame(conn: RunnerConn, raw: string): void {
+  // Liveness of the TURN, not of the socket. The WS heartbeat already proves the socket is up, but
+  // a runner can hold a live, ping-answering socket while its turn loop is wedged — that's exactly
+  // what prod 2026-07-31 looked like. Stamping every inbound frame gives the sweeper a way to see
+  // "claims to be running, but has said nothing for minutes". Excludes pongs, which the heartbeat
+  // handles separately and which say nothing about turn progress.
+  conn.lastFrameAt = Date.now();
   conn.frameTail = conn.frameTail.then(() => handleFrame(conn, raw)).catch((e) =>
     console.error(`runner[${conn.agentId}] frame handler:`, e),
   );

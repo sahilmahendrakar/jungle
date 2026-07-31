@@ -1,5 +1,6 @@
 import * as db from "../db";
 import { ApiError } from "../http/errors";
+import * as ownership from "../services/ownership";
 import type { ResolveConfigCtx } from "./types";
 
 // WHOSE connected account an integration attach binds to.
@@ -21,25 +22,20 @@ import type { ResolveConfigCtx } from "./types";
 //   2. `onBehalfOf` — a person named by the caller.
 //   3. The acting agent's OWN binding for the same integration: a human already sanctioned that
 //      account for this agent, so reusing it for an agent it builds grants nothing new.
-//   4. The agent's owner — participants.created_by, walked up to the first human (an agent built by
-//      an agent is still ultimately somebody's).
+//   4. The agent's owner — participants.owner_id (an agent built by an agent is still ultimately
+//      somebody's).
 //   5. The one person in the workspace who has connected it.
 // Ambiguity is never resolved silently: two candidates produce an error naming them and how to
 // choose. Bindings stay workspace-scoped and are visible on the agent's profile and in the
 // Connections panel, where any member can detach them.
 
-// Rule 4: the human an agent ultimately belongs to. created_by can point at another agent (an agent
-// that creates agents), so walk up; `seen` guards a cycle from a bad backfill.
-async function ownerOf(agent: db.Participant): Promise<db.Participant | null> {
-  const seen = new Set<string>([agent.id]);
-  let at: db.Participant | null = agent;
-  while (at?.created_by && !seen.has(at.created_by)) {
-    seen.add(at.created_by);
-    at = await db.getParticipant(at.created_by);
-    if (at && at.kind !== "agent") return at.workspace_id === agent.workspace_id ? at : null;
-  }
-  return null;
-}
+// Rule 4: the human an agent ultimately belongs to. This module used to own the only correct
+// implementation of that walk — the subscription-token and spend-cap paths each had their own,
+// single-hop and wrong, so the same agent could resolve its integrations through its owner while
+// billing its turns to the org key. The walk now lives in services/ownership as the one definition
+// and is backed by the stored participants.owner_id (migrations/046); this stays as a thin alias so
+// the numbered rules above still read in order.
+const ownerOf = ownership.ownerOf;
 
 // Humans in the actor's workspace, newest last (db.listParticipants order).
 const peopleIn = async (workspaceId: string): Promise<db.Participant[]> =>

@@ -623,10 +623,18 @@ create index if not exists agent_usage_account_provider_idx
   )
   where subscription = false;
 
--- Who created an agent (usage attribution). Null for humans, and for agents created by an
--- internal path (the Architect) — those resolve to the workspace admin at read time.
+-- PROVENANCE: who created an agent. May itself be an AGENT (@jungle can create agents). Never
+-- rewritten, and never used to decide who pays — see owner_id below.
 alter table participants add column if not exists created_by uuid references participants(id) on delete set null;
 create index if not exists participants_created_by_idx on participants (created_by);
+
+-- OWNERSHIP: the human whose Claude subscription backs this agent's turns, whose daily spend cap it
+-- counts against, and whose connected accounts back its integrations. Always a human in the agent's
+-- own workspace, or null (null → org API key). Split out of created_by in migrations/046, which
+-- conflated the two: an agent created BY an agent resolved its owner to that agent, so it silently
+-- billed the org key and got its own invisible spend account. Assigned via services/ownership.ts.
+alter table participants add column if not exists owner_id uuid references participants(id) on delete set null;
+create index if not exists participants_owner_id_idx on participants (owner_id);
 
 -- Daily spend caps, per ACCOUNT (lower(email), or 'participant:<id>') per provider. A missing row
 -- means "use the platform default" (shared/src/spend.ts); limit_usd null means explicitly

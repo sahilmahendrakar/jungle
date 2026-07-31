@@ -14,6 +14,7 @@ import { provisionerFor } from "../provisioner";
 import { announceParticipant, broadcastWorkspace } from "../ws/appSocket";
 import { adapterFor } from "../integrations";
 import { syncRosterIntegration } from "./workflows";
+import * as ownership from "./ownership";
 import { ApiError } from "../http/errors";
 import { publicParticipant, accountUid } from "../http/guards";
 
@@ -130,6 +131,12 @@ export async function createAgentAs(
       throw new ApiError(403, "you don't have access to run agents on that device");
     }
   }
+  // Who pays for this agent. The actor is the CREATOR (provenance) but not necessarily the OWNER:
+  // when @jungle creates an agent the actor is an agent, and ownership passes down to the human
+  // behind it, so the new agent runs on that person's subscription rather than the org API key.
+  // Resolved before the transaction — it may read participant rows, and holding the workspace lock
+  // across those reads would serialize creates for no benefit.
+  const ownerId = await ownership.ownerForNewAgent(actor, actor.workspace_id);
   // The agent joins the actor's workspace, subject to the workspace's agent cap. The cap check
   // + insert run in one transaction (FOR UPDATE on the workspace row) so concurrent creates can't
   // both slip past the limit.
@@ -138,7 +145,7 @@ export async function createAgentAs(
     if (count >= cap) throw new ApiError(409, `this workspace has reached its agent limit (${cap})`);
     return db.createParticipant({
       kind: "agent", workspaceId: actor.workspace_id, handle, displayName, runtime: "sdk", runnerToken,
-      model, mode, runnerProvider, persona, createdBy: actor.id,
+      model, mode, runnerProvider, persona, createdBy: actor.id, ownerId,
     }, client);
   });
   // Bind the agent to its device before provisioning reads runner_meta.hostId.
