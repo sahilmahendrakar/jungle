@@ -233,14 +233,13 @@ export const CONNECTION_TYPES: ConnectionType[] = [
     description: "Agents read, search & send email from this Gmail account.",
     kind: "google",
   },
-  {
-    key: "browser",
-    name: "Browser",
-    description: "Sign into a site once in a cloud browser; agents reuse that logged-in session.",
-    // Listed explicitly rather than derived from the oauth filter below — the browser connection
-    // is established by a human logging in inside a live view, not by an OAuth consent screen.
-    kind: "browser",
-  },
+  // NOTE: "browser" is deliberately ABSENT. Every card in Settings → Connections drives an OAuth
+  // connect-url, and a browser profile isn't created that way — a human logs into the real site
+  // inside a live view, reached from a link the agent sends. Listing it here rendered a Connect
+  // button that called /api/integrations/browser/connect-url, which 400s because the adapter has
+  // no `connection`. Attaching the integration to an agent still works (connectionRequired() is
+  // false for it), and profiles are managed via /api/browser/profiles. A proper Browser card with
+  // a site picker is the follow-up.
   ...INTEGRATION_TYPES.filter((t) => t.connection === "oauth" && !t.comingSoon).map(
     (t): ConnectionType => ({ key: t.key, name: t.name, description: t.description, kind: "integration" }),
   ),
