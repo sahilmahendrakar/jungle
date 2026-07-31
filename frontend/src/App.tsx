@@ -1459,6 +1459,7 @@ export function App({
               }}
               onOpenConnections={() => openSettingsPanel({ focusConnections: true })}
               onJumpToMessage={jumpToMessage}
+              roster={people}
             />
           )}
 
