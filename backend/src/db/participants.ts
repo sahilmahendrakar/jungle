@@ -1,5 +1,5 @@
 import type pg from "pg";
-import type { ParticipantBase, Kind, AgentServiceInfo } from "@jungle/shared";
+import type { ParticipantBase, Kind, AgentServiceInfo, AgentSelfStatus } from "@jungle/shared";
 import { pool } from "./pool";
 
 // A participant row as stored: the public shape (in @jungle/shared) plus the server-only runner
@@ -9,6 +9,10 @@ export interface Participant extends ParticipantBase {
   // Operator-supplied Claude subscription OAuth token (migrations/040). Present on the row because
   // participant reads are `select *`; stripped by publicParticipant so it never reaches clients.
   claude_oauth_token: string | null;
+  // When the self-set status auto-clears (migrations/046), or null for "stands until changed".
+  // Server-only: publicParticipant applies it and drops the column, so clients only ever see a
+  // status that is still current.
+  status_expires_at: string | null;
 }
 
 // The default workspace (migrations/009_workspaces.sql) — holds all pre-multi-tenancy rows and is
@@ -91,6 +95,56 @@ export async function updateAgentConfig(
   const { rows } = await pool.query<Participant>(
     `update participants set ${sets.join(", ")} where id = $${vals.length} and kind = 'agent' returning *`,
     vals,
+  );
+  return rows[0] ?? null;
+}
+
+// True when a self-set status's auto-clear time has passed. The single definition of "expired",
+// shared by the two places that need it: the client serializer (http/guards.ts publicParticipant)
+// and the runner-facing view (selfStatusOf). Absent expiry = stands until changed.
+export function selfStatusExpired(expiresAt: Date | string | null | undefined): boolean {
+  return !!expiresAt && new Date(expiresAt).getTime() <= Date.now();
+}
+
+// A participant row's self-set status in wire form, or null when there is none (or it expired).
+// This is what the runner is handed on `configure` so the agent can be shown what it last told
+// everyone it was doing.
+export function selfStatusOf(p: {
+  status_text?: string | null;
+  status_emoji?: string | null;
+  status_updated_at?: string | Date | null;
+  status_expires_at?: string | Date | null;
+}): AgentSelfStatus | null {
+  if (!p.status_text || selfStatusExpired(p.status_expires_at)) return null;
+  return {
+    text: p.status_text,
+    emoji: p.status_emoji ?? null,
+    updatedAt: new Date(p.status_updated_at ?? Date.now()).toISOString(),
+  };
+}
+
+// Write an agent's self-set status (the set_status tool, or a human clearing it from the profile).
+// `text: null` clears — and clears the emoji and both timestamps with it, so a cleared status can
+// never leave a stray emoji or a misleading "set 3h ago" behind. Returns the updated row (null if
+// the id isn't an agent) so callers can broadcast the participant without a re-read.
+//
+// status_updated_at is set from now() on EVERY write, including one that repeats the same text:
+// re-asserting a status is the agent saying "still on it", and the age shown in the UI should
+// reflect that.
+export async function setAgentStatus(
+  id: string,
+  status: { text: string | null; emoji?: string | null; expiresAt?: Date | null },
+): Promise<Participant | null> {
+  const cleared = status.text === null;
+  const { rows } = await pool.query<Participant>(
+    `update participants
+        set status_text       = $1,
+            status_emoji      = $2,
+            status_updated_at = case when $1::text is null then null else now() end,
+            status_expires_at = $3
+      where id = $4 and kind = 'agent'
+      returning *`,
+    [status.text, cleared ? null : (status.emoji ?? null), cleared ? null : (status.expiresAt ?? null), id],
   );
   return rows[0] ?? null;
 }

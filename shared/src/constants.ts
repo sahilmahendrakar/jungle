@@ -118,3 +118,19 @@ export const MIN_SCHEDULE_INTERVAL_MINUTES = 15;
 export const SCHEDULE_MAX_CONSECUTIVE_FAILURES = 3;
 // The standing instruction must be self-contained but bounded (it's inlined into turn prompts).
 export const SCHEDULE_PROMPT_MAX_LENGTH = 4000;
+
+// --- Agent status (the Slack-style, agent-authored "what I'm working on" line) ---
+//
+// NOT to be confused with AgentStatus in domain.ts, which is live PRESENCE (working/idle/sleeping/
+// …) derived from the runner connection. This is the short human-readable line the agent sets for
+// itself with the set_status tool; it persists across turns and sleep until the agent changes it.
+
+// The length bounds (STATUS_TEXT_MAX_LENGTH / STATUS_EMOJI_MAX_LENGTH) are NOT here — they live in
+// runner-protocol.ts, the only shared file the runner can see, so the tool schema and the backend
+// validator can share one definition. They still reach importers as `@jungle/shared` exports.
+//
+// A status older than this is rendered dimmed with a "may be out of date" hint. Statuses are never
+// auto-deleted on age — an agent legitimately sits on "Waiting on PR review" overnight — but after
+// this long the UI stops presenting it as current. The real freshness mechanism is that the runner
+// shows the agent its own status every turn, so it can update or clear it (see runner.ts).
+export const STATUS_STALE_AFTER_MS = 12 * 60 * 60 * 1000;

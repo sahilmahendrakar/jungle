@@ -10,6 +10,11 @@ export type Kind = "human" | "agent";
 // Offline = a self-hosted agent whose device/daemon is not connected (the backend cannot wake it —
 // queued work waits until the device comes back online). Offline is distinct from Sleeping, which
 // the platform CAN wake on demand.
+//
+// This is PRESENCE — "is it here, can it respond right now?" — and it is computed, not stored.
+// Do not confuse it with the agent's self-set `status_text` below, which is the Slack-style
+// "what I'm working on" line. The two are complementary and both render at once: presence is the
+// colored dot, status_text is the sentence next to it.
 export type AgentStatus = "working" | "idle" | "sleeping" | "waking" | "offline";
 
 // The provisioners an agent's runner can run under. 'docker'/'fly' are cloud sandboxes the backend
@@ -53,6 +58,16 @@ export interface ParticipantBase {
   // True for the workspace's one @jungle default agent (migrations/044). Clients use it to hide
   // rename/delete, which the backend refuses anyway (services/agentAdmin.ts).
   jungle_default?: boolean;
+  // --- Self-set status (migrations/046; agents only, null for humans) ---
+  // The Slack-style "what I'm working on" line the agent writes for itself with the set_status
+  // tool: short prose ("Fixing the login redirect"), an optional emoji, and when it was set.
+  // Unlike `status` (presence, computed per-request) this is STORED — it survives turns, restarts,
+  // and sleep, which is the whole point: it's what an idle agent is still in the middle of.
+  // The backend serializes all three as null once status_expires_at has passed, so clients never
+  // have to reason about expiry. Age is always rendered; see STATUS_STALE_AFTER_MS.
+  status_text?: string | null;
+  status_emoji?: string | null;
+  status_updated_at?: string | null;
 }
 
 // A participant as sent to clients: the public row plus a live `status` (agents only, computed

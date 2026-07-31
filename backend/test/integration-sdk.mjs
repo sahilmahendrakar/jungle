@@ -2,6 +2,7 @@
 // Drives the API as a dev-bypass human, DMs a freshly created sdk agent, and checks:
 //   1. agent replies via send_message         2. Bash tool -> confirmation card -> allow
 //   3. rapid double-message both consumed     4. interrupt stops a long turn
+//   5. set_status persists/broadcasts, and a human can clear it
 // Run:  node test/integration-sdk.mjs <backendPort> <humanParticipantId>
 // Assumes the backend is already running on that port with AUTH_DEV_BYPASS=1.
 import WebSocket from "ws";
@@ -119,6 +120,52 @@ async function main() {
   const hist = await api("GET", `/agents/${agent.id}/events?participantId=${HUMAN}&limit=50`);
   check("events history endpoint", Array.isArray(hist.events) && hist.events.length > 0 && !!hist.runner,
     `events=${hist.events?.length} runner=${JSON.stringify(hist.runner)}`);
+
+  // 8. self-set status (set_status tool -> participant_updated -> HTTP clear)
+  post(`@${HANDLE} set your status to exactly "Testing the status feature" with the 🧪 emoji, then tell me you did.`);
+  const statusSet = await waitFor(
+    "participant_updated carrying a status",
+    (f) =>
+      f.type === "participant_updated" &&
+      f.participant?.id === agent.id &&
+      /testing the status/i.test(f.participant?.status_text ?? ""),
+  );
+  check("set_status persists + broadcasts", true, JSON.stringify(statusSet.participant.status_text));
+  check(
+    "status carries an emoji and a set-at timestamp",
+    !!statusSet.participant.status_emoji && !!statusSet.participant.status_updated_at,
+    `emoji=${statusSet.participant.status_emoji} at=${statusSet.participant.status_updated_at}`,
+  );
+  // The runner_token must not ride along on the status broadcast either (it goes through the
+  // same publicParticipant serializer as every other participant payload — verify, don't assume).
+  check("status broadcast does not leak runner_token", !statusSet.participant.runner_token);
+
+  const listed = await api("GET", `/participants?participantId=${HUMAN}`);
+  const rowAfterSet = listed.find((p) => p.id === agent.id);
+  check(
+    "status visible on the participants list",
+    /testing the status/i.test(rowAfterSet?.status_text ?? ""),
+    `status_text=${rowAfterSet?.status_text}`,
+  );
+  // status_expires_at is server-side bookkeeping — it must never reach a client.
+  check("status_expires_at is not serialized", !("status_expires_at" in (rowAfterSet ?? {})));
+
+  await api("DELETE", `/agents/${agent.id}/status?participantId=${HUMAN}`);
+  const cleared = await waitFor(
+    "participant_updated after clear",
+    (f) => f.type === "participant_updated" && f.participant?.id === agent.id && !f.participant?.status_text,
+  );
+  check(
+    "human clear wipes text, emoji and timestamp together",
+    !cleared.participant.status_text &&
+      !cleared.participant.status_emoji &&
+      !cleared.participant.status_updated_at,
+    JSON.stringify({
+      text: cleared.participant.status_text,
+      emoji: cleared.participant.status_emoji,
+      at: cleared.participant.status_updated_at,
+    }),
+  );
 
   ws.close();
   log(`DONE: ${pass} passed, ${fail} failed  (agent=${agent.id} handle=@${HANDLE} dm=${dm.id})`);

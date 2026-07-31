@@ -97,6 +97,15 @@ alter table participants add column if not exists jungle_default boolean not nul
 create unique index if not exists participants_ws_jungle_default_idx
   on participants (workspace_id) where jungle_default;
 
+-- Agent self-set status (migrations/046_agent_status.sql): the Slack-style "what I'm working on"
+-- line an agent writes with the set_status tool. Distinct from the computed presence `status`
+-- clients see (working/idle/sleeping/…), which is never stored — this one persists across turns,
+-- restarts and sleep on purpose. status_expires_at is enforced at read time, not by a sweeper.
+alter table participants add column if not exists status_text       text;
+alter table participants add column if not exists status_emoji      text;
+alter table participants add column if not exists status_updated_at timestamptz;
+alter table participants add column if not exists status_expires_at timestamptz;
+
 -- Operator-supplied Claude subscription (Max/Pro) OAuth token from `claude setup-token`, set by an
 -- allowlisted operator on their own human participant row. Agents that operator CREATED then
 -- authenticate their CLI child with it instead of the org API key. Server-only — never serialized

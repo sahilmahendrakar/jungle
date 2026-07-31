@@ -9,6 +9,7 @@ import { surfaceConfirmCard } from "./confirmations";
 import { recordDeliverables } from "./deliverables";
 import * as scheduler from "./scheduler";
 import * as workflows from "./workflows";
+import * as agentAdmin from "./agentAdmin";
 import * as liana from "./liana";
 import { ApiError } from "../http/errors";
 
@@ -517,6 +518,23 @@ export function buildRunnerHooks(): runners.RunnerHooks {
       await db.deleteSchedule(id);
       broadcastWorkspace(row.workspace_id, { type: "schedule_changed", scheduleId: id, action: "deleted" });
       return { ok: true };
+    },
+    // A runner's set_status -> validate + persist + broadcast via the one writer in agentAdmin.
+    // notifyRunner:false — the agent is the one who asked, and gets the stored status back in the
+    // tool result, so pushing status_changed at it would just be an echo.
+    setSelfStatus: async (agent, input) => {
+      try {
+        const status = await agentAdmin.writeAgentStatus(
+          agent.id,
+          agent.workspace_id,
+          { text: input.text, emoji: input.emoji, clearAfterMinutes: input.clearAfterMinutes },
+          { notifyRunner: false },
+        );
+        return { ok: true, status };
+      } catch (e) {
+        if (e instanceof ApiError) return { ok: false, error: e.message };
+        throw e;
+      }
     },
     // The workflow_* builder tools (Architect's draft/finalize family) — thin dispatch onto
     // services/workflows.ts, which owns validation and the compile step.

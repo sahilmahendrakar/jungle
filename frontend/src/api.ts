@@ -549,6 +549,18 @@ export function updateAgent(
   });
 }
 
+// Clear an agent's self-set status. The escape hatch for a line that's obviously gone stale.
+// Clear-only by design — the status is the agent's own voice, so humans can take a wrong one
+// down but can't write one. The agent's runner is told, so it stops being shown the old status.
+export function clearAgentStatus(id: string): Promise<{ ok: boolean }> {
+  return request(`/api/agents/${id}/status`, {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to clear status",
+  });
+}
+
 // Permanently delete an agent: tears down its runner/container and removes all of its data
 // (its DMs and the messages it sent). Irreversible.
 export function deleteAgent(id: string): Promise<{ ok: boolean; error?: string }> {

@@ -48,6 +48,7 @@ import {
   type ScheduleCreateResult,
   type ScheduleListResult,
   type ScheduleCancelResult,
+  type SetStatusResult,
 } from "./send-message-tool.js";
 import { createGmailMcpServer } from "./gmail-tool.js";
 import { createDriveMcpServer } from "./drive-tool.js";
@@ -65,6 +66,7 @@ import {
 } from "./files.js";
 import {
   PROTOCOL_VERSION,
+  type AgentSelfStatus,
   type BackendToRunner,
   type ConfigureFrame,
   type EnqueueAttachment,
@@ -115,6 +117,10 @@ const SAFE_TOOLS = new Set([
   // min interval, prompt cap) and full human visibility/undo on the Scheduled page — a confirm
   // card would be noise, not safety.
   "mcp__jungle__schedule_create", "mcp__jungle__schedule_list", "mcp__jungle__schedule_cancel",
+  // set_status writes one short line on the agent's own profile — no side effects outside Jungle,
+  // fully visible, and a human can clear it in one click. Gating it behind a confirmation card
+  // would make agents stop bothering, which defeats the entire point of having a status.
+  "mcp__jungle__set_status",
   // Workflow builder tools: bounded jungle-app operations (drafts are inert; finalize is the
   // Architect's explicit job, done on the user's say-so in conversation) with full visibility
   // on the Workflows page. Same reasoning as the schedule tools.
@@ -236,6 +242,11 @@ export class Runner {
   // always sends one post-migration, so this is only undefined against an old backend).
   private effort: EffortLevel | undefined = undefined;
   private systemPromptAppend = "";
+  // The agent's own Slack-style status, mirrored from the backend (`configure`, `status_changed`,
+  // and its own set_status results). Held here for one reason: it's replayed into every turn's
+  // system prompt, which is what keeps a status from going stale — the agent sees what it told
+  // everyone it was doing and can correct it. null = no status set.
+  private selfStatus: AgentSelfStatus | null = null;
   private configured = false;
 
   // Gmail integration state (from `configure`; token refreshed by `gmail_credentials`). null =
@@ -329,6 +340,7 @@ export class Runner {
   private pendingScheduleCreate = new Map<string, (r: ScheduleCreateResult) => void>();
   private pendingScheduleList = new Map<string, (r: ScheduleListResult) => void>();
   private pendingScheduleCancel = new Map<string, (r: ScheduleCancelResult) => void>();
+  private pendingSetStatus = new Map<string, (r: SetStatusResult) => void>();
   private pendingWorkflowTool = new Map<
     string,
     (r: { ok: boolean; error?: string; text?: string; draftId?: string; workflowId?: string }) => void
@@ -473,6 +485,24 @@ export class Runner {
         }
         break;
       }
+      case "set_status_result": {
+        // Mirror what the backend actually STORED (null = cleared), not what the agent asked for,
+        // so a rejected or trimmed write can't leave the replayed status disagreeing with what
+        // everyone else sees. `ok:false` leaves the cached copy alone — nothing changed.
+        if (frame.result.ok) this.selfStatus = frame.result.status ?? null;
+        const resolve = this.pendingSetStatus.get(frame.id);
+        if (resolve) {
+          this.pendingSetStatus.delete(frame.id);
+          resolve(frame.result);
+        }
+        break;
+      }
+      case "status_changed": {
+        // A human cleared (or changed) the status from the profile. Adopt it so the next turn
+        // shows the agent the truth rather than a status that no longer exists.
+        this.selfStatus = frame.status ?? null;
+        break;
+      }
       case "schedule_list_result": {
         const resolve = this.pendingScheduleList.get(frame.id);
         if (resolve) {
@@ -541,6 +571,10 @@ export class Runner {
     this.permissionMode = frame.permissionMode;
     this.effort = frame.effort as EffortLevel | undefined;
     this.systemPromptAppend = frame.systemPromptAppend ?? "";
+    // The status outlives this process (it's a DB column), so a reconnect must re-adopt it —
+    // otherwise a restarted container shows the agent no status and its stale line never gets
+    // corrected. Absent field (old backend) = none.
+    this.selfStatus = frame.status ?? null;
     if (frame.git) {
       // Finish repo/credential setup BEFORE allowing turns: the system prompt tells the
       // agent the repo is already in its workspace, so it must actually be there. Items
@@ -774,6 +808,7 @@ export class Runner {
       "mcp__jungle__schedule_create",
       "mcp__jungle__schedule_list",
       "mcp__jungle__schedule_cancel",
+      "mcp__jungle__set_status",
       "mcp__jungle__workflow_list_templates",
       "mcp__jungle__workflow_draft_create",
       "mcp__jungle__workflow_draft_get",
@@ -832,7 +867,8 @@ export class Runner {
       this.systemPromptAppend +
       (memoryIndex
         ? `\n\n— Your memory index (current MEMORY.md; Read linked memory files when relevant) —\n${memoryIndex}`
-        : "");
+        : "") +
+      this.statusReminder();
     const abortController = new AbortController();
     this.activeAbortController = abortController;
     // Child env for the SDK's CLI subprocess. For a non-Anthropic model, point the CLI at that
@@ -1020,6 +1056,35 @@ export class Runner {
   // Build the in-process "jungle" SDK-MCP server (send_message, read_history, schedule_*), wired
   // to this runner's backend bridges. A fresh instance is used per turn and per reconnect — each
   // query() binds a server to its own transport, so instances must not be shared across connections.
+  // The freshness mechanism for statuses. A status persists across turns and sleep on purpose,
+  // which is exactly what lets it rot — "Fixing the login bug" three days after the fix shipped
+  // makes every surface showing it a lie. No TTL can tell the difference between a stale status
+  // and a legitimately long-running one, but the agent can: so show it its own status, with an
+  // age, at the top of every turn, and ask it to reconcile. Costs a couple of lines of prompt.
+  private statusReminder(): string {
+    if (!this.selfStatus) {
+      return (
+        `\n\n— Your status —\nYou have no status set. If this turn is you picking up a task or ` +
+        `starting a project, set one with set_status so people can see what you're on.`
+      );
+    }
+    const { text, emoji, updatedAt } = this.selfStatus;
+    const age = Date.now() - new Date(updatedAt).getTime();
+    const mins = Math.max(0, Math.round(age / 60_000));
+    const ago =
+      mins < 60
+        ? `${mins} minute${mins === 1 ? "" : "s"} ago`
+        : mins < 60 * 24
+          ? `${Math.round(mins / 60)} hour${Math.round(mins / 60) === 1 ? "" : "s"} ago`
+          : `${Math.round(mins / (60 * 24))} day${Math.round(mins / (60 * 24)) === 1 ? "" : "s"} ago`;
+    return (
+      `\n\n— Your status —\nEveryone in the workspace currently sees your status as ` +
+      `"${[emoji, text].filter(Boolean).join(" ")}", set ${ago}. If that's no longer what you're ` +
+      `doing, update it with set_status now — or clear it (text:"") if you're done and nothing is ` +
+      `outstanding. If it's still accurate, leave it alone.`
+    );
+  }
+
   private buildJungleServer() {
     return createJungleMcpServer({
       sendMessage: (id, input) => this.bridgeSendMessage(id, input),
@@ -1028,6 +1093,7 @@ export class Runner {
       scheduleCreate: (id, input) => this.bridgeScheduleCreate(id, input),
       scheduleList: (id) => this.bridgeScheduleList(id),
       scheduleCancel: (id, input) => this.bridgeScheduleCancel(id, input),
+      setStatus: (id, input) => this.bridgeSetStatus(id, input),
       workflowTool: (frameType, id, input) => this.bridgeWorkflowTool(frameType, id, input),
       services: this.servicesMgr,
     });
@@ -1512,6 +1578,25 @@ export class Runner {
       }
       setTimeout(() => {
         if (this.pendingScheduleCreate.delete(id)) {
+          resolve({ ok: false, error: "timed out waiting for backend" });
+        }
+      }, 60_000).unref?.();
+    });
+  }
+
+  private bridgeSetStatus(
+    id: string,
+    input: { text: string; emoji?: string; clearAfterMinutes?: number },
+  ): Promise<SetStatusResult> {
+    return new Promise((resolve) => {
+      this.pendingSetStatus.set(id, resolve);
+      const sent = this.conn.send({ type: "set_status", id, input });
+      if (!sent) {
+        this.pendingSetStatus.delete(id);
+        resolve({ ok: false, error: "backend unreachable" });
+      }
+      setTimeout(() => {
+        if (this.pendingSetStatus.delete(id)) {
           resolve({ ok: false, error: "timed out waiting for backend" });
         }
       }, 60_000).unref?.();

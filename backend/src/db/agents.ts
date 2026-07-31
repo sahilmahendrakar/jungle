@@ -20,11 +20,19 @@ export interface AgentRow {
   // True for a persistent per-user Liana conductor: the sweeper compacts these at 40% and
   // suspends (not stops) them on idle. See services/liana.ts and runners.ts sweepOnce.
   liana_conductor: boolean;
+  // The agent's self-set status (migrations/046) — carried on `configure` so a reconnecting
+  // runner can remind the agent what it last said it was doing. Read through db.selfStatusOf,
+  // which applies the expiry.
+  status_text: string | null;
+  status_emoji: string | null;
+  status_updated_at: string | null;
+  status_expires_at: string | null;
 }
 
 // The column list backing every AgentRow query (kept in one place so the shape can't drift).
 const AGENT_COLUMNS = `id, workspace_id, handle, display_name, repo, model, mode, effort, runtime,
-                       runner_token, runner_provider, runner_meta, persona, liana_conductor`;
+                       runner_token, runner_provider, runner_meta, persona, liana_conductor,
+                       status_text, status_emoji, status_updated_at, status_expires_at`;
 
 // The workspace an agent belongs to (for scoping workspace-wide broadcasts of its events/status).
 export async function getAgentWorkspaceId(agentId: string): Promise<string | null> {

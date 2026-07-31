@@ -10,16 +10,35 @@ import { ApiError } from "./errors";
 // configured). Participant reads are `select *`, so both would otherwise ride along in every
 // participant list. memory/memory_updated_at aren't secret (GET /api/agents/:id/memory serves
 // them) but the MEMORY.md mirror can be ~12KB per agent — too fat for every list, so they go too.
+// status_expires_at is dropped too: it's a server-side bookkeeping detail, and expiry is applied
+// HERE (see below) so no client ever has to reason about it.
 export function publicParticipant<T extends { runner_token?: unknown }>(
   p: T,
-): Omit<T, "runner_token" | "claude_oauth_token" | "memory" | "memory_updated_at"> {
+): Omit<
+  T,
+  "runner_token" | "claude_oauth_token" | "memory" | "memory_updated_at" | "status_expires_at"
+> {
   const {
     runner_token: _secret,
     claude_oauth_token: _sub,
     memory: _mem,
     memory_updated_at: _memAt,
+    status_expires_at: expiresAt,
     ...pub
-  } = p as T & { claude_oauth_token?: unknown; memory?: unknown; memory_updated_at?: unknown };
+  } = p as T & {
+    claude_oauth_token?: unknown;
+    memory?: unknown;
+    memory_updated_at?: unknown;
+    status_expires_at?: Date | string | null;
+  };
+  // Self-set status expiry is enforced on the way out rather than by a background sweeper: the
+  // row can sit expired in the table indefinitely and still never be shown. This is the ONE place
+  // it's applied, which is why every participant payload — HTTP list, profile, WS broadcast —
+  // must go through this function. The overlay is spread rather than assigned because `pub`'s
+  // property types are generic in T, so TS won't narrow them to accept a plain null.
+  if (db.selfStatusExpired(expiresAt)) {
+    return { ...pub, status_text: null, status_emoji: null, status_updated_at: null } as typeof pub;
+  }
   return pub;
 }
 

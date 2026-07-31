@@ -6,7 +6,10 @@ import {
   getIntegrationType,
   DEFAULT_AGENT_MODE,
   PERSONA_MAX_LENGTH,
+  STATUS_TEXT_MAX_LENGTH,
+  STATUS_EMOJI_MAX_LENGTH,
 } from "@jungle/shared";
+import type { AgentSelfStatus } from "@jungle/shared";
 import { providerConfigured } from "../providers";
 import * as db from "../db";
 import * as runners from "../runners";
@@ -296,6 +299,57 @@ export async function detachIntegrationAs(
   await runners.reconfigure(agent.id);
   // …and scrub the key from the agent's roster seats (mirror of the attach's sync).
   await syncRosterIntegration(agent.id, key, "detach");
+}
+
+// --- Self-set status (the Slack-style "what I'm working on" line) ---
+
+// Validate + persist an agent's status and broadcast the updated participant. The ONE writer:
+// both the agent's set_status tool (via the orchestrator's runner hook) and a human hitting Clear
+// on the profile land here, so validation, the broadcast, and the runner push can't get out of
+// step between the two paths.
+//
+// `notifyRunner` distinguishes them. When the agent set it, its tool result already carries the
+// stored status, so pushing status_changed back would be a redundant round trip. When a HUMAN
+// cleared it, the runner's cached copy is now wrong and must be corrected — otherwise the agent
+// keeps being shown a status nobody else can see.
+export async function writeAgentStatus(
+  agentId: string,
+  workspaceId: string,
+  input: { text?: string | null; emoji?: string; clearAfterMinutes?: number },
+  opts: { notifyRunner: boolean },
+): Promise<AgentSelfStatus | null> {
+  // Empty/whitespace text clears — the tool has no separate clear verb on purpose.
+  const raw = input.text == null ? "" : String(input.text).trim();
+  if (raw.length > STATUS_TEXT_MAX_LENGTH) {
+    throw new ApiError(400, `status must be ${STATUS_TEXT_MAX_LENGTH} characters or fewer`);
+  }
+  const emoji = String(input.emoji ?? "").trim();
+  if (emoji.length > STATUS_EMOJI_MAX_LENGTH) {
+    throw new ApiError(400, `status emoji must be ${STATUS_EMOJI_MAX_LENGTH} characters or fewer`);
+  }
+  // A "clear after" in the past (or absurdly far out) would either hide the status instantly or
+  // amount to no expiry at all; both are more surprising than refusing.
+  let expiresAt: Date | null = null;
+  if (raw && input.clearAfterMinutes != null) {
+    const mins = Number(input.clearAfterMinutes);
+    if (!Number.isFinite(mins) || mins <= 0 || mins > 60 * 24 * 30) {
+      throw new ApiError(400, "clearAfterMinutes must be between 1 and 43200 (30 days)");
+    }
+    expiresAt = new Date(Date.now() + mins * 60_000);
+  }
+  const updated = await db.setAgentStatus(agentId, {
+    text: raw || null,
+    emoji: emoji || null,
+    expiresAt,
+  });
+  if (!updated) throw new ApiError(404, "agent not found");
+  const status = db.selfStatusOf(updated);
+  broadcastWorkspace(workspaceId, {
+    type: "participant_updated",
+    participant: publicParticipant(updated),
+  });
+  if (opts.notifyRunner) runners.pushSelfStatus(agentId, status);
+  return status;
 }
 
 // Delete an agent entirely: tear down its runner + container/volume, then remove all of its data.

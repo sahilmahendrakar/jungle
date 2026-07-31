@@ -53,6 +53,19 @@ router.patch(
   }),
 );
 
+// Clear an agent's self-set status. The escape hatch for an obviously stale line ("Fixing the
+// login bug", set three days ago) — any workspace member can clear it from the agent's profile.
+// Deliberately clear-only, and deliberately not part of the config PATCH above: the status is the
+// AGENT's voice, so humans get to take a wrong one down but not to put words in its mouth.
+router.delete(
+  "/api/agents/:id/status",
+  wrap(async (req, res) => {
+    const { agent } = await requireAgent(req);
+    await agentAdmin.writeAgentStatus(agent.id, agent.workspace_id, { text: null }, { notifyRunner: true });
+    res.json({ ok: true });
+  }),
+);
+
 // This agent's attached integrations (github's repo, etc.) — the settings page's integrations list.
 router.get(
   "/api/agents/:id/integrations",

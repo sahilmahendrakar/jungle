@@ -4,6 +4,7 @@ import type { Participant } from "../../api";
 import type { LiveTurn } from "../../ws/useLiveTurns";
 import { STATUS_DOT, STATUS_LABEL, STATUS_RANK, type ToolConfirm } from "../../lib/chat";
 import { buildItems, liveSummary } from "./activity/sdkEvents";
+import { AgentStatusLine } from "./AgentStatusLine";
 import { PersonAvatar, EmptyState } from "./panels";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -55,10 +56,16 @@ function RosterRow({
               title={STATUS_LABEL[status]}
             />
           </div>
-          <div className="truncate text-xs text-muted-foreground">
-            {now ?? STATUS_LABEL[status]}
+          {/* One line, best available answer to "what's it on?": the agent's own status if it
+              set one, else the live tool line, else just the presence label. */}
+          <div className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
+            {agent.status_text ? (
+              <AgentStatusLine agent={agent} />
+            ) : (
+              <span className="truncate">{now ?? STATUS_LABEL[status]}</span>
+            )}
             {pendingConfirms > 0 && (
-              <span className="ml-1 font-medium text-amber-600 dark:text-amber-500">
+              <span className="shrink-0 font-medium text-amber-600 dark:text-amber-500">
                 · {pendingConfirms} to approve
               </span>
             )}

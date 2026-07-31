@@ -36,7 +36,44 @@ try {
     "agent card shows a status pill",
     (await page.locator('[data-testid="agent-card-status"]').count()) > 0,
   );
+
+  // The team page groups by attention: "Working now" cards on top, then Agents, then People.
+  // The seed has no live turn, so Working is absent — and MUST be, not rendered empty.
+  check(
+    "team: working section hidden when nobody is working",
+    (await page.locator('[data-testid="team-section-working"]').count()) === 0,
+  );
+  const agentsSection = page.locator('[data-testid="team-section-agents"]');
+  check("team: agents section renders", await agentsSection.isVisible());
+  const peopleSection = page.locator('[data-testid="team-section-people"]');
+  check("team: people section renders", await peopleSection.isVisible());
+  // Humans are never agent cards, and idle agents render as rows rather than full cards.
+  check(
+    "team: humans render as person rows, not agent entries",
+    (await agentsSection.locator('[data-testid="person-card"]').count()) === 0,
+  );
+  check(
+    "team: idle agents use the compact row variant",
+    (await page.locator('[data-testid="agent-card"][data-variant="row"]').count()) > 0,
+  );
+  // The section count in the heading must match what's actually under it — it's the number
+  // people read instead of counting.
+  const agentsTitleCount = Number(
+    await page.locator('[data-testid="team-agents-title"]').getAttribute("data-count"),
+  );
+  check(
+    "team: agents heading count matches the rows below it",
+    agentsTitleCount === (await agentsSection.locator('[data-testid="agent-card"]').count()),
+  );
   await shot(page, "agents-home");
+
+  // Search matches names, and (new) whatever an agent says it's working on.
+  await page.locator('[data-testid="team-search"]').fill("zzz-no-such-teammate");
+  await page.waitForTimeout(300);
+  check("team: no-results state on a miss", await page.locator('[data-testid="team-no-results"]').isVisible());
+  await page.locator('[data-testid="team-clear-search"]').click();
+  await page.waitForTimeout(300);
+  check("team: clearing search restores the sections", await agentsSection.isVisible());
 
   // --- Deliverables feed ---
   await page.locator('[data-testid="deliverables-nav"]').click();

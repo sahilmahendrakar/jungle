@@ -10,6 +10,11 @@ import { randomUUID } from "node:crypto";
 import { log } from "./log.js";
 import { MAX_FILES_PER_MESSAGE, type UploadedAttachment } from "./files.js";
 import { createServiceTools, type ServiceOps } from "./service-tools.js";
+import {
+  STATUS_TEXT_MAX_LENGTH,
+  STATUS_EMOJI_MAX_LENGTH,
+  type AgentSelfStatus,
+} from "./protocol.js";
 
 export interface SendMessageResult {
   ok: boolean;
@@ -40,6 +45,12 @@ export interface ScheduleListResult {
 export interface ScheduleCancelResult {
   ok: boolean;
   error?: string;
+}
+
+export interface SetStatusResult {
+  ok: boolean;
+  error?: string;
+  status?: AgentSelfStatus | null;
 }
 
 // Injected by the runner: forwards the frame and returns a promise resolved when
@@ -79,6 +90,13 @@ export type ScheduleCancelBridge = (
   input: { scheduleId: string },
 ) => Promise<ScheduleCancelResult>;
 
+// Injected by the runner: forward a set_status frame and await its result. Also the runner's cue
+// to update the status it replays to the agent each turn.
+export type SetStatusBridge = (
+  id: string,
+  input: { text: string; emoji?: string; clearAfterMinutes?: number },
+) => Promise<SetStatusResult>;
+
 // Injected by the runner: forward one workflow_* builder frame (list_templates/draft_create/
 // draft_get/draft_set/finalize) and await its correlated workflow_tool_result.
 export type WorkflowToolBridge = (
@@ -102,6 +120,7 @@ export interface JungleBridges {
   scheduleCreate: ScheduleCreateBridge;
   scheduleList: ScheduleListBridge;
   scheduleCancel: ScheduleCancelBridge;
+  setStatus: SetStatusBridge;
   workflowTool: WorkflowToolBridge;
   services: ServiceOps;
 }
@@ -397,6 +416,81 @@ export function createJungleMcpServer(bridges: JungleBridges) {
     },
   );
 
+  const setStatusTool = tool(
+    "set_status",
+    "Set your status — the Slack-style one-liner everyone in the workspace sees next to your " +
+      "name (Team page, profile, hover card). Set it the MOMENT you pick up a task, before doing " +
+      'the work: text:"Fixing the login redirect bug", emoji:"🔧". Update it when you switch ' +
+      'tasks, and pass text:"" to CLEAR it when you\'re done and nothing is outstanding — a ' +
+      "leftover status misleads everyone. Be specific (\"Reviewing PR #412\", not \"Working\"). " +
+      "This notifies nobody and is NOT a way to talk to people: anything someone needs to read " +
+      "is a send_message.",
+    {
+      text: z
+        .string()
+        .max(STATUS_TEXT_MAX_LENGTH)
+        .describe(
+          `What you're working on, ${STATUS_TEXT_MAX_LENGTH} chars max, e.g. "Fixing the login ` +
+            'redirect bug". Pass an empty string to clear your status.',
+        ),
+      emoji: z
+        .string()
+        .max(STATUS_EMOJI_MAX_LENGTH)
+        .optional()
+        .describe('A single emoji to show alongside the text, e.g. "🔧". Optional.'),
+      clearAfterMinutes: z
+        .number()
+        .int()
+        .min(1)
+        .max(60 * 24 * 30)
+        .optional()
+        .describe(
+          "Auto-clear the status this many minutes from now. Omit for no expiry (the normal " +
+            "case — clear it yourself when the work is done).",
+        ),
+    },
+    async (args) => {
+      const id = randomUUID();
+      try {
+        const result = await withTimeout(
+          bridges.setStatus(id, {
+            text: args.text,
+            ...(args.emoji !== undefined ? { emoji: args.emoji } : {}),
+            ...(args.clearAfterMinutes !== undefined
+              ? { clearAfterMinutes: args.clearAfterMinutes }
+              : {}),
+          }),
+          SEND_TIMEOUT_MS,
+        );
+        if (result.ok) {
+          const s = result.status;
+          return {
+            content: [
+              {
+                type: "text",
+                text: s
+                  ? `Status set to "${[s.emoji, s.text].filter(Boolean).join(" ")}" — everyone in the workspace can see it.`
+                  : "Status cleared.",
+              },
+            ],
+          };
+        }
+        return {
+          content: [{ type: "text", text: `Failed to set status: ${result.error ?? "unknown error"}` }],
+          isError: true,
+        };
+      } catch (err) {
+        log.error("set_status tool failed", { err: String(err) });
+        return {
+          content: [
+            { type: "text", text: `Failed to set status: ${err instanceof Error ? err.message : String(err)}` },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
   // --- workflow_* builder tools (used mainly by the workspace's Architect agent) ---
   // One shared executor: forward the frame, read back the rendered result text.
   const runWorkflowTool = async (frameType: string, input: Record<string, unknown>) => {
@@ -502,6 +596,7 @@ export function createJungleMcpServer(bridges: JungleBridges) {
       scheduleCreateTool,
       scheduleListTool,
       scheduleCancelTool,
+      setStatusTool,
       workflowListTemplatesTool,
       workflowDraftCreateTool,
       workflowDraftGetTool,
