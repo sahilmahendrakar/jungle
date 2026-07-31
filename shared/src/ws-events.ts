@@ -242,7 +242,22 @@ export type ServerEvent =
   | WorkflowChangedEvent
   | WorkflowRunChangedEvent
   | DeliverableCreatedEvent
+  | BrowserSigninChangedEvent
   | SlackLinkChangedEvent;
+
+// A browser sign-in request changed state. Fans out to the owning participant so the sign-in card
+// in chat flips from "waiting" to "connected" (or "expired") without a refresh — the same
+// live-update discipline the rest of the app follows, and the reason a completed sign-in doesn't
+// leave a stale "please log in" card sitting in the channel.
+export interface BrowserSigninChangedEvent {
+  type: "browser_signin_changed";
+  requestId: string;
+  site: string;
+  siteLabel: string;
+  status: "pending" | "completed" | "expired" | "failed";
+  // Who must act — used to scope the fan-out; other members never see the card change.
+  participantId: string;
+}
 
 // ---- Client -> server ----
 

@@ -376,6 +376,83 @@ export function disconnectIntegration(key: string): Promise<{ ok: boolean }> {
   });
 }
 
+// --- browser integration ---------------------------------------------------------------------
+
+export interface BrowserProfileRecord {
+  connectionId: string;
+  site: string;
+  siteLabel: string;
+  needsReconnect: boolean;
+  lastVerifiedAt: string | null;
+}
+
+export function getBrowserProfiles(): Promise<{
+  configured: boolean;
+  sites: Array<{ key: string; label: string }>;
+  profiles: BrowserProfileRecord[];
+}> {
+  return request(`/api/browser/profiles`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load browser profiles",
+  });
+}
+
+export function startBrowserSignin(site: string): Promise<{
+  requestId: string;
+  url: string;
+  siteLabel: string;
+  expiresAt: string;
+}> {
+  return request(`/api/browser/signin`, {
+    method: "POST",
+    json: { site },
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to start sign-in",
+  });
+}
+
+export function getBrowserSignin(id: string): Promise<{
+  id: string;
+  site: string;
+  siteLabel: string;
+  status: "pending" | "completed" | "expired" | "failed";
+  expiresAt: string;
+  createdAt: string;
+}> {
+  return request(`/api/browser/signin/${encodeURIComponent(id)}`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load sign-in request",
+  });
+}
+
+// The live-view URL is fetched SEPARATELY from status, and never cached or stored: it is a bearer
+// capability for a browser that is about to hold a real logged-in session. Treat the response as
+// secret — don't log it, don't put it in a query string, don't persist it.
+export function getBrowserSigninView(id: string): Promise<{
+  requestId: string;
+  siteLabel: string;
+  liveViewUrl: string;
+  expiresAt: string;
+}> {
+  return request(`/api/browser/signin/${encodeURIComponent(id)}/view`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "this sign-in link is no longer open",
+  });
+}
+
+export function disconnectBrowserProfile(connectionId: string): Promise<{ ok: boolean }> {
+  return request(`/api/browser/profiles/${encodeURIComponent(connectionId)}`, {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to disconnect",
+  });
+}
+
 // One connection under an integration key, for the multi-account read model (a user can hold
 // several — e.g. two X accounts, two Notion workspaces).
 export interface IntegrationConnectionRecord {

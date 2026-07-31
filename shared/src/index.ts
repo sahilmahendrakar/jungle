@@ -6,6 +6,7 @@ export * from "./host-protocol.js";
 export * from "./constants.js";
 export * from "./spend.js";
 export * from "./integrations.js";
+export * from "./browser.js";
 export * from "./schedules.js";
 export * from "./workflows.js";
 export * from "./workflow-templates.js";

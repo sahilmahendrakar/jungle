@@ -30,7 +30,7 @@ import type { ResolveConfigCtx } from "./types";
 
 // Rule 4: the human an agent ultimately belongs to. created_by can point at another agent (an agent
 // that creates agents), so walk up; `seen` guards a cycle from a bad backfill.
-async function ownerOf(agent: db.Participant): Promise<db.Participant | null> {
+export async function ownerOf(agent: db.Participant): Promise<db.Participant | null> {
   const seen = new Set<string>([agent.id]);
   let at: db.Participant | null = agent;
   while (at?.created_by && !seen.has(at.created_by)) {

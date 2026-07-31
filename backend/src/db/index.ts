@@ -15,6 +15,7 @@ export * from "./github";
 export * from "./google";
 export * from "./integrations";
 export * from "./connections";
+export * from "./browser";
 export * from "./schedules";
 export * from "./workflows";
 export * from "./deliverables";

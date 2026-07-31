@@ -11,6 +11,7 @@ import threadsRouter from "./http/routes/threads";
 import githubRouter from "./http/routes/github";
 import googleRouter from "./http/routes/google";
 import integrationsRouter from "./http/routes/integrations";
+import browserRouter from "./http/routes/browser";
 import schedulesRouter from "./http/routes/schedules";
 import workflowsRouter from "./http/routes/workflows";
 import workfeedRouter from "./http/routes/workfeed";
@@ -71,6 +72,7 @@ export function createApp(): express.Express {
   app.use(githubRouter);
   app.use(googleRouter);
   app.use(integrationsRouter);
+  app.use(browserRouter);
   app.use(schedulesRouter);
   app.use(workflowsRouter);
   app.use(workfeedRouter);

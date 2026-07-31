@@ -36,7 +36,10 @@ export interface ConnectionType {
   key: string; // "github" | "google" | <integration key>
   name: string;
   description: string;
-  kind: "github" | "google" | "integration";
+  // Which connect flow serves it. "browser" is the odd one out: there is no OAuth round-trip at
+  // all — the user logs into the real site by hand inside a cloud browser and what we persist is
+  // a Browserbase context id, not a token. See shared/src/browser.ts.
+  kind: "github" | "google" | "integration" | "browser";
 }
 
 export interface IntegrationType {
@@ -169,6 +172,19 @@ export const INTEGRATION_TYPES: IntegrationType[] = [
     allowMultiple: true,
   },
   {
+    key: "browser",
+    name: "Browser",
+    description:
+      "Drive a real, logged-in browser in the cloud for sites with no API — LinkedIn, X posting, and the like. You sign in once by hand; the agent reuses the session.",
+    connectionKey: "browser",
+    configFields: [],
+    // Deliberately NOT connection: "oauth". The connect flow is a live-view sign-in, which has no
+    // authorize URL and no callback code, so it gets its own card and routes rather than bending
+    // the OAuth lifecycle. Storage still reuses integration_connections (see migration 047).
+    allowMultiple: true, // one connection per site, and a user may hold several
+    settings: [{ kind: "approval", key: "requireApproval", label: "Ask me before it acts in the browser" }],
+  },
+  {
     // Jungle itself, as an integration: mounts Jungle's own MCP server (backend /mcp) into the
     // agent with an agent-bound API token, so the agent can manage the workspace — create
     // channels and agents, build/run workflows, manage schedules. The key is "jungle-admin"
@@ -216,6 +232,14 @@ export const CONNECTION_TYPES: ConnectionType[] = [
     name: "Gmail",
     description: "Agents read, search & send email from this Gmail account.",
     kind: "google",
+  },
+  {
+    key: "browser",
+    name: "Browser",
+    description: "Sign into a site once in a cloud browser; agents reuse that logged-in session.",
+    // Listed explicitly rather than derived from the oauth filter below — the browser connection
+    // is established by a human logging in inside a live view, not by an OAuth consent screen.
+    kind: "browser",
   },
   ...INTEGRATION_TYPES.filter((t) => t.connection === "oauth" && !t.comingSoon).map(
     (t): ConnectionType => ({ key: t.key, name: t.name, description: t.description, kind: "integration" }),

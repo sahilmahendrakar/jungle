@@ -83,6 +83,32 @@ export interface ReadHistoryFrame {
   };
 }
 
+// The browser_* tools, as ONE frame discriminated by `tool` (the browser surface is a handful of
+// verbs over the same session, unlike the workflow builder's genuinely distinct operations).
+//
+// Every browser verb is a round-trip to the BACKEND rather than work done in the runner, because
+// the only Browserbase credential is a long-lived account API key. Shipping that into every agent
+// container would break "the backend is the sole holder of the provider key", and unlike OAuth
+// there is no short-lived token to mint instead. So the backend owns the Browserbase client, the
+// session lifecycle, and the per-site domain allowlist; the runner just asks.
+export interface BrowserToolFrame {
+  type: "browser_tool";
+  id: string;
+  // No "screenshot" verb in v1, deliberately. Reading the page as text + named interactive
+  // elements is cheaper, more reliable for an LLM, and keeps us off pixels — the same ladder the
+  // rest of the computer-use work follows. Add it only once a real task is blocked without it.
+  tool: "signin" | "status" | "navigate" | "read" | "act";
+  input: {
+    site?: string;
+    url?: string;
+    // act: a natural-language description of the target ("the Connect button"), resolved
+    // server-side against the accessibility tree. Never a raw selector — see services/browser.ts.
+    action?: "click" | "type" | "press";
+    target?: string;
+    text?: string;
+  };
+}
+
 // Schedule tools (schedule_create / schedule_list / schedule_cancel): the agent manages its own
 // standing scheduled turns. Same request/result correlation as read_history — a runner-chosen
 // `id`. All validation (cron/timezone/caps) happens backend-side; the tool passes raw strings.
@@ -243,6 +269,7 @@ export type RunnerToBackend =
   | EventFrame
   | SendMessageFrame
   | ReadHistoryFrame
+  | BrowserToolFrame
   | ScheduleCreateFrame
   | ScheduleListFrame
   | ScheduleCancelFrame
@@ -334,6 +361,14 @@ export interface ConfigureFrame {
   // connected account and its address. Read-only in-process MCP server (analytics_* tools); the
   // token is refreshed mid-session via IntegrationCredentialsFrame keyed "google-analytics".
   analytics?: { accessToken: string; email: string };
+  // The agent's attached Browser integration, if any. Unlike every other grant here this carries
+  // NO credential — the Browserbase API key stays in the backend and each browser_* tool call is a
+  // round-trip (see BrowserToolFrame). What the runner needs is only which sites it can drive and
+  // whether acting needs a human, so it can advertise the right tools and gate browser_act.
+  browser?: {
+    sites: Array<{ site: string; label: string; needsReconnect: boolean }>;
+    requireApproval: boolean;
+  };
 }
 
 // A file attached to the message that produced an inbox item. `url` is an origin-relative
@@ -399,6 +434,22 @@ export interface ReadHistoryResultFrame {
   type: "read_history_result";
   id: string;
   result: { ok: boolean; error?: string; text?: string; oldestSeq?: string | null };
+}
+
+export interface BrowserToolResultFrame {
+  type: "browser_tool_result";
+  id: string;
+  result: {
+    ok: boolean;
+    error?: string;
+    // Rendered text for the model: page content, an action confirmation, or a status listing.
+    text?: string;
+    // Set when the site has no usable session. The runner turns this into an instruction to call
+    // browser_signin rather than letting the agent retry a navigation that cannot succeed.
+    needsSignin?: boolean;
+    // The sign-in request the backend created, when tool was "signin".
+    requestId?: string;
+  };
 }
 
 export interface ScheduleCreateResultFrame {
@@ -474,6 +525,7 @@ export type BackendToRunner =
   | SetEffortFrame
   | SendMessageResultFrame
   | ReadHistoryResultFrame
+  | BrowserToolResultFrame
   | ScheduleCreateResultFrame
   | ScheduleListResultFrame
   | ScheduleCancelResultFrame

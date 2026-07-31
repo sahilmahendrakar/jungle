@@ -45,6 +45,7 @@ import { ActivityView } from "./Activity";
 import { AgentsHome } from "./AgentsHome";
 import { Environments } from "./Environments";
 import { LinkDevice } from "./LinkDevice";
+import { BrowserSignin } from "./BrowserSignin";
 import { SearchDialog } from "./SearchDialog";
 import { navigate, usePath } from "./route";
 import { Home } from "./Home";
@@ -206,6 +207,11 @@ export function App({
   const agentsOpen = path === "/agents" || path === "/team";
   const environmentsOpen = path === "/environments";
   const linkOpen = path === "/link";
+  // /browser-signin/<request id> — the page an agent links to when it needs a human to log into a
+  // site inside its cloud browser.
+  const browserSigninId = path.startsWith("/browser-signin/")
+    ? path.slice("/browser-signin/".length)
+    : null;
   // Operator-only platform usage/spend. Routed like any other main-column view; the backend
   // re-checks the allowlist, so a non-operator who lands here just sees the error card.
   const adminOpen = path === "/admin";
@@ -221,6 +227,7 @@ export function App({
     agentsOpen ||
     environmentsOpen ||
     linkOpen ||
+    !!browserSigninId ||
     adminOpen;
   // Reading "am I on an overlay view" from long-lived callbacks without re-binding them.
   const overlayViewRef = useRef(false);
@@ -1262,6 +1269,13 @@ export function App({
         />
       ) : linkOpen ? (
         <LinkDevice
+          sidebarOpen={sidebarOpen}
+          onOpenDrawer={() => setDrawerOpen(true)}
+          onExpandSidebar={() => setSidebarOpen(true)}
+        />
+      ) : browserSigninId ? (
+        <BrowserSignin
+          requestId={browserSigninId}
           sidebarOpen={sidebarOpen}
           onOpenDrawer={() => setDrawerOpen(true)}
           onExpandSidebar={() => setSidebarOpen(true)}

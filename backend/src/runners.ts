@@ -18,6 +18,8 @@ import { signedPath } from "./attachments";
 import { provisionerFor } from "./provisioner";
 import * as hostcontrol from "./hostcontrol";
 import { adapterFor } from "./integrations";
+import { ownerOf } from "./integrations/backing";
+import { runBrowserTool } from "./services/browser";
 import * as spend from "./services/spend";
 
 export type { AgentStatus };
@@ -1164,6 +1166,30 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
           }
         }
         send(conn, { type: "read_history_result", id: frame.id, result });
+        break;
+      }
+      case "browser_tool": {
+        // Browser verbs execute HERE, not in the runner: Browserbase's only credential is a
+        // long-lived account API key, and unlike OAuth there's no short-lived token to hand a
+        // container instead. Keeping it backend-side also puts the per-site domain allowlist
+        // somewhere a prompt-injected agent cannot reach.
+        //
+        // The profile belongs to the agent's human OWNER, not the agent — so an agent can only
+        // ever drive a session that a person signed into for it, and revoking is "disconnect it
+        // in Settings".
+        let result: { ok: boolean; error?: string; text?: string; needsSignin?: boolean; requestId?: string };
+        const me = await db.getParticipant(agentId);
+        const owner = me ? await ownerOf(me) : null;
+        if (!owner) {
+          result = { ok: false, error: "No human owner for this agent, so there is no browser profile to use." };
+        } else {
+          try {
+            result = await runBrowserTool(owner, agentId, frame.tool, frame.input ?? {});
+          } catch (e) {
+            result = { ok: false, error: String((e as Error).message ?? e) };
+          }
+        }
+        send(conn, { type: "browser_tool_result", id: frame.id, result });
         break;
       }
       case "schedule_create": {

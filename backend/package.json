@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.112.3",
+    "@browserbasehq/sdk": "^2.16.0",
     "@jungle/shared": "*",
     "cron-parser": "^5.6.1",
     "dotenv": "^17.4.2",
@@ -25,6 +26,7 @@
     "firebase-admin": "^13.10.0",
     "image-size": "^2.0.2",
     "pg": "^8.22.0",
+    "playwright-core": "^1.61.1",
     "ws": "^8.21.0"
   }
 }

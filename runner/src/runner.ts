@@ -50,6 +50,12 @@ import {
   type ScheduleCancelResult,
 } from "./send-message-tool.js";
 import { createGmailMcpServer } from "./gmail-tool.js";
+import {
+  createBrowserMcpServer,
+  BROWSER_READ_TOOLS,
+  BROWSER_WRITE_TOOLS,
+  type BrowserToolResult,
+} from "./browser-tool.js";
 import { createDriveMcpServer } from "./drive-tool.js";
 import { createCalendarMcpServer } from "./calendar-tool.js";
 import { createXMcpServer } from "./x-tool.js";
@@ -109,6 +115,12 @@ const SAFE_TOOLS = new Set([
   // X (Twitter) is read-only by design — every x_* tool runs without a confirmation.
   "mcp__x__x_my_recent_tweets", "mcp__x__x_mentions", "mcp__x__x_replies_to_me",
   "mcp__x__x_notifications", "mcp__x__x_search", "mcp__x__x_get_user",
+  // Browser reads: looking at a page changes nothing, and every reachable URL is already fenced to
+  // the profile's own domains by the backend. browser_signin is safe for a subtler reason — it
+  // only produces a link that a HUMAN must open and act on, so the confirmation is the sign-in
+  // itself. browser_act is deliberately absent: that one acts on a real logged-in account.
+  "mcp__browser__browser_status", "mcp__browser__browser_signin",
+  "mcp__browser__browser_navigate", "mcp__browser__browser_read",
   // Google Analytics is read-only by design — every analytics_* tool runs without a confirmation.
   "mcp__ganalytics__analytics_list_properties", "mcp__ganalytics__analytics_run_report",
   // Schedule tools are bounded jungle-app operations with backend-enforced guardrails (caps,
@@ -257,6 +269,12 @@ export class Runner {
   // X integration attached. The x MCP server reads the token live per call, so a refresh applies
   // without rebuilding.
   private xSettings: { account: string } | null = null;
+  // The browser integration's grant. Note it holds NO credential: the Browserbase key stays in the
+  // backend and every browser_* call round-trips there (see browser-tool.ts). What we keep is only
+  // what the runner needs locally — whether to mount the server at all, and whether browser_act
+  // should route through the confirmation card.
+  private browserSettings: { sites: Array<{ site: string; label: string; needsReconnect: boolean }>; requireApproval: boolean } | null =
+    null;
 
   // Google Analytics integration state (in-process, read-only, like X): settings from `configure`;
   // the token lives in integrationTokens under key "google-analytics".
@@ -326,6 +344,7 @@ export class Runner {
   // In-flight request/response correlation.
   private pendingSendMessages = new Map<string, (r: SendMessageResult) => void>();
   private pendingReadHistory = new Map<string, (r: ReadHistoryResult) => void>();
+  private pendingBrowserTool = new Map<string, (r: BrowserToolResult) => void>();
   private pendingScheduleCreate = new Map<string, (r: ScheduleCreateResult) => void>();
   private pendingScheduleList = new Map<string, (r: ScheduleListResult) => void>();
   private pendingScheduleCancel = new Map<string, (r: ScheduleCancelResult) => void>();
@@ -465,6 +484,14 @@ export class Runner {
         }
         break;
       }
+      case "browser_tool_result": {
+        const resolve = this.pendingBrowserTool.get(frame.id);
+        if (resolve) {
+          this.pendingBrowserTool.delete(frame.id);
+          resolve(frame.result);
+        }
+        break;
+      }
       case "schedule_create_result": {
         const resolve = this.pendingScheduleCreate.get(frame.id);
         if (resolve) {
@@ -589,6 +616,10 @@ export class Runner {
     } else {
       this.xSettings = null;
     }
+    // Browser: capability metadata only — there is no token to seed, by design.
+    this.browserSettings = frame.browser
+      ? { sites: frame.browser.sites, requireApproval: frame.browser.requireApproval }
+      : null;
     // Google Analytics (in-process, read-only, like X): hold the account + seed its token under
     // "google-analytics".
     if (frame.analytics) {
@@ -805,6 +836,14 @@ export class Runner {
     }
     // X: in-process, read-only server. All tools auto-allowed (nothing to approve).
     const xServer = this.xSettings ? this.buildXServer() : null;
+    // Browser: reads (and the sign-in request, which only produces a link for a human) are
+    // auto-allowed; browser_act is auto-allowed only when the owner turned approval off, else it
+    // routes through the confirmation card like every other write tool.
+    const browserServer = this.browserSettings ? this.buildBrowserServer() : null;
+    if (browserServer) {
+      allowedTools.push(...BROWSER_READ_TOOLS);
+      if (!this.browserSettings!.requireApproval) allowedTools.push(...BROWSER_WRITE_TOOLS);
+    }
     if (xServer) allowedTools.push(...X_READ_TOOLS);
     // Google Analytics: in-process, read-only server (like X). All tools auto-allowed.
     const analyticsServer = this.analyticsSettings ? this.buildAnalyticsServer() : null;
@@ -818,6 +857,7 @@ export class Runner {
     if (driveServer) mcpServers.gdrive = driveServer;
     if (calendarServer) mcpServers.gcalendar = calendarServer;
     if (xServer) mcpServers.x = xServer;
+    if (browserServer) mcpServers.browser = browserServer;
     if (analyticsServer) mcpServers.ganalytics = analyticsServer;
     for (const grant of this.mcpIntegrations) {
       const token = this.integrationTokens.get(grant.key) ?? grant.accessToken;
@@ -1088,6 +1128,12 @@ export class Runner {
     return createXMcpServer(() => this.integrationTokens.get("x") ?? null);
   }
 
+  // The in-process "browser" SDK-MCP server (browser_*). No token to close over — every verb is a
+  // backend round-trip, so all it needs is the bridge.
+  private buildBrowserServer() {
+    return createBrowserMcpServer((id, tool, input) => this.bridgeBrowserTool(id, tool, input));
+  }
+
   // The in-process "ganalytics" SDK-MCP server (analytics_*), same live-token pattern as X.
   private buildAnalyticsServer() {
     return createAnalyticsMcpServer(() => this.integrationTokens.get("google-analytics") ?? null);
@@ -1109,6 +1155,7 @@ export class Runner {
       if (this.driveSettings) servers.gdrive = this.buildDriveServer();
       if (this.calendarSettings) servers.gcalendar = this.buildCalendarServer();
       if (this.xSettings) servers.x = this.buildXServer();
+      if (this.browserSettings) servers.browser = this.buildBrowserServer();
       if (this.analyticsSettings) servers.ganalytics = this.buildAnalyticsServer();
       // Re-mount remote-MCP integrations too, with the current token per key.
       for (const grant of this.mcpIntegrations) {
@@ -1473,6 +1520,31 @@ export class Runner {
           resolve({ ok: false, error: "timed out waiting for backend" });
         }
       }, 60_000).unref?.();
+    });
+  }
+
+  // ---- browser_* bridge ----
+
+  // One bridge for the whole browser_* family: the verb varies, the correlation doesn't (every
+  // reply arrives as browser_tool_result). The local timeout is longer than the other bridges'
+  // because the backend is driving a real page load on the far side.
+  private bridgeBrowserTool(
+    id: string,
+    tool: "signin" | "status" | "navigate" | "read" | "act",
+    input: { site?: string; url?: string; action?: "click" | "type" | "press"; target?: string; text?: string },
+  ): Promise<BrowserToolResult> {
+    return new Promise((resolve) => {
+      this.pendingBrowserTool.set(id, resolve);
+      const sent = this.conn.send({ type: "browser_tool", id, tool, input });
+      if (!sent) {
+        this.pendingBrowserTool.delete(id);
+        resolve({ ok: false, error: "backend unreachable" });
+      }
+      setTimeout(() => {
+        if (this.pendingBrowserTool.delete(id)) {
+          resolve({ ok: false, error: "timed out waiting for backend" });
+        }
+      }, 95_000).unref?.();
     });
   }
 

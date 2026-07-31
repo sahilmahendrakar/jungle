@@ -701,3 +701,30 @@ create unique index if not exists slack_installs_team_kind_idx on slack_installs
 -- Fast lookup of "does this agent already have a DM bound for this Slack user".
 create index if not exists slack_channel_links_dm_idx
   on slack_channel_links (dm_agent_id, dm_slack_user_id) where dm_agent_id is not null;
+
+-- --- Browser integration (migrations/047_browser_integration.sql) ---
+-- A logged-in browser profile is NOT stored here: it's an integration_connections row with
+-- integration_key 'browser' and the Browserbase context id as its access_token. Only the sign-in
+-- handshake needs its own table, because a human has to sit in front of a live browser for up to
+-- ~14 minutes while the backend watches its cookie jar.
+
+create table if not exists browser_signin_requests (
+  id              uuid primary key default gen_random_uuid(),
+  participant_id  uuid not null references participants(id) on delete cascade,
+  agent_id        uuid references participants(id) on delete cascade,
+  site            text not null,
+  context_id      text not null,
+  session_id      text,
+  status          text not null default 'pending'
+                    check (status in ('pending', 'completed', 'expired', 'failed')),
+  connection_id   uuid references integration_connections(id) on delete set null,
+  expires_at      timestamptz not null,
+  created_at      timestamptz not null default now(),
+  completed_at    timestamptz
+);
+
+create index if not exists browser_signin_requests_participant_idx
+  on browser_signin_requests (participant_id, status);
+
+create index if not exists browser_signin_requests_pending_idx
+  on browser_signin_requests (expires_at) where status = 'pending';
