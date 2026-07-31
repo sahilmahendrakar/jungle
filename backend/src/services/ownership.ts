@@ -54,10 +54,6 @@ export async function ownerOf(agent: db.Participant): Promise<db.Participant | n
   return walkCreatedBy(agent);
 }
 
-export async function ownerIdOf(agent: db.Participant): Promise<string | null> {
-  return (await ownerOf(agent))?.id ?? null;
-}
-
 // The owner to assign to an agent that `actor` is creating. A human owns what they make; an AGENT
 // passes its OWN owner down, which is the whole fix — @jungle creating an agent assigns the human
 // behind @jungle, so the new agent runs on that person's subscription instead of the org key.

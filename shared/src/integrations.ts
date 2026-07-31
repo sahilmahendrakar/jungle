@@ -259,24 +259,11 @@ export function getIntegrationType(key: string): IntegrationType | undefined {
   return INTEGRATION_TYPES.find((t) => t.key === key);
 }
 
-export function isKnownIntegration(key: string): boolean {
-  return INTEGRATION_TYPES.some((t) => t.key === key);
-}
-
 // --- Settings-descriptor helpers (the single source of truth for per-workflow integration config) ---
 
 // The settings an integration exposes (empty for read-only integrations).
 export function settingsFor(key: string): IntegrationSettingField[] {
   return getIntegrationType(key)?.settings ?? [];
-}
-
-// Config keys that MUST be present for the integration to actually grant its tools (v1: github's
-// repo). A github integration with no repo attaches silently but mints no git tools — the intake
-// slot-fill and the web UI use this to prompt for the missing value instead of failing quietly.
-export function requiredSettingKeys(key: string): string[] {
-  return settingsFor(key)
-    .filter((s): s is Extract<IntegrationSettingField, { required: true }> => "required" in s && s.required === true)
-    .map((s) => s.key);
 }
 
 // The write-approval field for an integration, if any (gmail → requireSendApproval, other write

@@ -62,22 +62,6 @@ export const browserSite = (key: string): BrowserSite | undefined =>
 
 export type BrowserSigninStatus = "pending" | "completed" | "expired" | "failed";
 
-// What the frontend needs to render a sign-in card in chat and the live-view page. Note the
-// absence of the live-view URL: that is a bearer capability minted per-view by the brokered route
-// after authorizing the viewer, and it never travels through a message or a list payload.
-export interface BrowserSigninRequest {
-  id: string;
-  site: BrowserSiteKey;
-  siteLabel: string;
-  status: BrowserSigninStatus;
-  // The participant who must log in — the only one the brokered route will mint a URL for.
-  participantId: string;
-  // The agent that asked, when this came from a browser_signin tool call.
-  agentId: string | null;
-  expiresAt: string;
-  createdAt: string;
-}
-
 // The brokered live-view payload, returned ONLY to the owning participant by
 // GET /api/browser/signin/:id/view. Short-lived by construction: it dies with the session.
 export interface BrowserSigninView {
@@ -85,19 +69,6 @@ export interface BrowserSigninView {
   siteLabel: string;
   liveViewUrl: string;
   expiresAt: string;
-}
-
-// A connected browser profile, as surfaced in Settings → Connections. `needsReconnect` is the
-// state that matters operationally: the row still exists but the site has invalidated the session,
-// which is invisible unless we say so (the failure mode that makes agents quietly hallucinate
-// instead of reporting they are logged out).
-export interface BrowserProfileSummary {
-  connectionId: string;
-  site: BrowserSiteKey;
-  siteLabel: string;
-  needsReconnect: boolean;
-  lastVerifiedAt: string | null;
-  createdAt: string;
 }
 
 // Per-agent config stored in agent_integrations.config for integration_key 'browser'.

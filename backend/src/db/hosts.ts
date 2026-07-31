@@ -177,20 +177,6 @@ export async function listHostsByOwner(uid: string): Promise<RunnerHostRow[]> {
   return rows;
 }
 
-// The devices a requester may assign an agent to when creating it in `workspaceId`: their own
-// devices, plus devices explicitly shared into this workspace under the workspace_members policy.
-export async function assignableHosts(uid: string, workspaceId: string): Promise<RunnerHostRow[]> {
-  const { rows } = await pool.query<RunnerHostRow>(
-    `select ${HOST_COLUMNS} from runner_hosts
-     where revoked_at is null
-       and (owner_uid = $1
-            or (assign_policy = 'workspace_members' and $2 = any(shared_workspace_ids)))
-     order by created_at desc`,
-    [uid, workspaceId],
-  );
-  return rows;
-}
-
 // Whether `uid` may assign an agent (being created in `workspaceId`) to host `hostId`.
 export async function canAssignHost(hostId: string, uid: string, workspaceId: string): Promise<boolean> {
   const host = await getHost(hostId);

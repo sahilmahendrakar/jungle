@@ -21,8 +21,6 @@ export const SERVER_PRESETS = {
   prod: PROD_API,
   preprod: PREPROD_API,
 } as const;
-export type ServerPreset = keyof typeof SERVER_PRESETS;
-
 function envBase(): string {
   const fromEnv = process.env.EXPO_PUBLIC_API_URL?.replace(/\/+$/, "");
   return fromEnv || PROD_API;

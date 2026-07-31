@@ -151,16 +151,6 @@ export async function sweepStaleSignins(): Promise<void> {
   if (closed.length) console.log(`browser: swept ${closed.length} stale sign-in request(s)`);
 }
 
-// Release everything (process shutdown). Best-effort and parallel — we're on the way out.
-export async function shutdownBrowserSessions(): Promise<void> {
-  const all = [...pool.values()];
-  pool.clear();
-  await Promise.allSettled(all.map((s) => {
-    clearTimeout(s.idleTimer);
-    return releaseSession(s);
-  }));
-}
-
 // --- liveness ---------------------------------------------------------------------------------
 
 // Is this profile still logged in? Navigate somewhere that requires auth and see whether we stay.

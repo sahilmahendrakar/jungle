@@ -386,33 +386,6 @@ export interface BrowserProfileRecord {
   lastVerifiedAt: string | null;
 }
 
-export function getBrowserProfiles(): Promise<{
-  configured: boolean;
-  sites: Array<{ key: string; label: string }>;
-  profiles: BrowserProfileRecord[];
-}> {
-  return request(`/api/browser/profiles`, {
-    auth: true,
-    devAuth: true,
-    errorMessage: "failed to load browser profiles",
-  });
-}
-
-export function startBrowserSignin(site: string): Promise<{
-  requestId: string;
-  url: string;
-  siteLabel: string;
-  expiresAt: string;
-}> {
-  return request(`/api/browser/signin`, {
-    method: "POST",
-    json: { site },
-    auth: true,
-    devAuth: true,
-    errorMessage: "failed to start sign-in",
-  });
-}
-
 export function getBrowserSignin(id: string): Promise<{
   id: string;
   site: string;
@@ -441,15 +414,6 @@ export function getBrowserSigninView(id: string): Promise<{
     auth: true,
     devAuth: true,
     errorMessage: "this sign-in link is no longer open",
-  });
-}
-
-export function disconnectBrowserProfile(connectionId: string): Promise<{ ok: boolean }> {
-  return request(`/api/browser/profiles/${encodeURIComponent(connectionId)}`, {
-    method: "DELETE",
-    auth: true,
-    devAuth: true,
-    errorMessage: "failed to disconnect",
   });
 }
 

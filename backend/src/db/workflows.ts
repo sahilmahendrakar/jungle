@@ -1,4 +1,3 @@
-import type { PoolClient } from "pg";
 import type { Workflow, WorkflowRole, WorkflowRun, WorkflowStatus, WorkflowTrigger } from "@jungle/shared";
 import { pool } from "./pool";
 
@@ -255,14 +254,3 @@ export async function workflowRunLastActivity(run: WorkflowRunRow): Promise<stri
   return rows[0]?.last ?? run.started_at;
 }
 
-// --- Ticker helper (mirrors claimDueSchedules' locking discipline) ---
-
-// Schedule rows that back workflow cron triggers are claimed by the same scheduler transaction;
-// this resolves which workflow a claimed row fires (see services/scheduler.ts branch).
-export async function getWorkflowForSchedule(client: PoolClient, scheduleId: string): Promise<WorkflowRow | null> {
-  const { rows } = await client.query<WorkflowRow>(
-    `select w.* from workflows w join schedules s on s.workflow_id = w.id where s.id = $1`,
-    [scheduleId],
-  );
-  return rows[0] ?? null;
-}
