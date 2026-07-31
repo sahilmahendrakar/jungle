@@ -433,6 +433,36 @@ export function disconnectSlack(): Promise<{ ok: boolean }> {
   });
 }
 
+// --- Slack AGENT app (@jungle's Slack DM) ---
+// A second Slack app alongside the mirror above, with its own install (see docs/slack-agent-app.md).
+
+export function getSlackAgentStatus(): Promise<SlackStatus> {
+  return request<SlackStatus>(`/api/slack/agent/status`, {
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to load Slack agent status",
+  });
+}
+
+export function slackAgentInstallUrl(opts?: { popup?: boolean }): Promise<{ url: string }> {
+  return request(`/api/slack/agent/install-url`, {
+    method: "POST",
+    json: { popup: opts?.popup === true },
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to start Slack agent install",
+  });
+}
+
+export function disconnectSlackAgent(): Promise<{ ok: boolean }> {
+  return request(`/api/slack/agent/install`, {
+    method: "DELETE",
+    auth: true,
+    devAuth: true,
+    errorMessage: "failed to disconnect the Slack agent app",
+  });
+}
+
 export function listSlackChannels(): Promise<SlackChannelInfo[]> {
   return request<SlackChannelInfo[]>(`/api/slack/channels`, {
     auth: true,
