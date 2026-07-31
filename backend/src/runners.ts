@@ -10,6 +10,7 @@ import type {
   PermissionMode,
   AgentServiceInfo,
   SpendBlock,
+  AgentSelfStatus,
 } from "@jungle/shared";
 import { isSdkMode, catalogEntry } from "@jungle/shared";
 import { resolveProvider } from "./providers";
@@ -91,6 +92,11 @@ export interface ScheduleCreateResult {
   scheduleId?: string;
   nextRunAt?: string;
 }
+export interface SetStatusInput {
+  text?: string;
+  emoji?: string;
+  clearAfterMinutes?: number;
+}
 export interface ScheduleListResult {
   ok: boolean;
   error?: string;
@@ -99,6 +105,12 @@ export interface ScheduleListResult {
 export interface ScheduleCancelResult {
   ok: boolean;
   error?: string;
+}
+
+export interface SetStatusResult {
+  ok: boolean;
+  error?: string;
+  status?: AgentSelfStatus | null;
 }
 
 export interface RunnerHooks {
@@ -128,6 +140,13 @@ export interface RunnerHooks {
     agent: { id: string; handle: string; workspace_id: string },
     input: { scheduleId?: string },
   ) => Promise<ScheduleCancelResult>;
+  // The agent writes its own Slack-style status line (set_status tool). Named setSELFStatus, not
+  // setStatus, to keep it clearly apart from onStatusChanged below — that one is live PRESENCE.
+  // Validation + persistence + the participant_updated broadcast live in the orchestrator.
+  setSelfStatus: (
+    agent: { id: string; handle: string; workspace_id: string },
+    input: SetStatusInput,
+  ) => Promise<SetStatusResult>;
   // The workflow_* builder tools (drafts + finalize). Implemented by services/workflows.ts via
   // the orchestrator's buildRunnerHooks, like the schedule_* family.
   workflowTool: (
@@ -456,6 +475,23 @@ export function systemPromptAppend(
     `10 schedules per agent, recurring at most every 15 minutes. When someone asks you to ` +
     `"remind me", "check every morning", or "do X weekly", use these tools — never just promise ` +
     `to remember. (Schedules are for future ACTIONS; MEMORY.md is for durable FACTS.)\n\n` +
+    `— Your status: what you're working on —\n` +
+    `You have a status line, exactly like a Slack status: a short phrase, plus an optional emoji, ` +
+    `that everyone in the workspace sees next to your name — on the Team page, in your profile, ` +
+    `and whenever someone hovers you. Set it with set_status.\n` +
+    `• Set it the MOMENT you pick up a task or start a project, before you do the work, not after: ` +
+    `text:"Fixing the login redirect bug", emoji:"🔧". That's the whole point — people should be ` +
+    `able to see what you're on without asking you.\n` +
+    `• Be specific and human. "Reviewing PR #412" or "Drafting the launch post", never "Working" ` +
+    `or "Busy" — a vague status is worse than none, because it looks informative and isn't.\n` +
+    `• Update it when you switch to something else, and CLEAR it (set_status with text:"") when ` +
+    `you're done and nothing is outstanding. A leftover status is a lie about what you're doing.\n` +
+    `• It persists across turns and while you sleep, which is exactly why it can go stale. You'll ` +
+    `be shown your current status at the start of every turn — when it no longer matches reality, ` +
+    `fix it right then.\n` +
+    `• It is NOT how you talk to people: it's one glanceable line, not a message and not a ` +
+    `progress report. Anything someone needs to READ is a send_message. Setting your status ` +
+    `notifies nobody, so never use it to answer, to hand off, or to say something matters.\n\n` +
     `— Long-running processes: services —\n` +
     `For anything that must keep running after your current work ends — dev servers, file ` +
     `watchers, tunnels — use your service tools: service_start (also restarts), service_stop, ` +
@@ -532,6 +568,10 @@ async function buildConfigure(agent: db.AgentRow): Promise<ConfigureFrame> {
     // Anthropic rather than silently misrouting.
     provider: resolveProvider(agent.model ?? null),
     systemPromptAppend: "",
+    // What the agent last told everyone it was doing. The runner replays this to the agent each
+    // turn, so a container that restarted (or a Fly machine that idle-stopped overnight) comes
+    // back able to update or clear a status it would otherwise have forgotten it set.
+    status: db.selfStatusOf(agent),
   };
   // Operator subscription auth (migrations/041): if the operator who CREATED this agent has stored
   // a `claude setup-token` token, bill turns to that subscription instead of the org API key. Only
@@ -848,6 +888,15 @@ export function setModel(agentId: string, model: string): void {
 export function setEffort(agentId: string, effort: string): void {
   const conn = conns.get(agentId);
   if (conn) send(conn, { type: "set_effort", effort });
+}
+
+// Tell a connected runner its self-set status changed from outside (a human hit Clear on the
+// profile). The runner shows the agent its own status every turn, so without this push the agent
+// would keep seeing — and acting on — a status that no longer exists anywhere else. No-op when
+// offline: the next `configure` carries the current status anyway.
+export function pushSelfStatus(agentId: string, status: AgentSelfStatus | null): void {
+  const conn = conns.get(agentId);
+  if (conn) send(conn, { type: "status_changed", status });
 }
 
 // Rebuild + push a fresh `configure` to a connected runner. Persona/display-name edits live in
@@ -1276,6 +1325,24 @@ async function handleFrame(conn: RunnerConn, raw: string): Promise<void> {
           }
         }
         send(conn, { type: "browser_tool_result", id: frame.id, result });
+        break;
+      }
+      case "set_status": {
+        const agent = await db.getAgentRow(agentId);
+        let result: SetStatusResult;
+        if (!hooks || !agent) {
+          result = { ok: false, error: "backend not ready" };
+        } else {
+          try {
+            result = await hooks.setSelfStatus(
+              { id: agent.id, handle: agent.handle, workspace_id: agent.workspace_id },
+              (frame.input ?? {}) as SetStatusInput,
+            );
+          } catch (e) {
+            result = { ok: false, error: String((e as Error).message ?? e) };
+          }
+        }
+        send(conn, { type: "set_status_result", id: frame.id, result });
         break;
       }
       case "schedule_create": {

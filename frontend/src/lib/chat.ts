@@ -1,5 +1,5 @@
 // Pure helpers, constants, and view types shared across the chat UI (extracted from App.tsx).
-import { DEFAULT_AGENT_MODE, DEFAULT_MODEL, MODEL_CATALOG } from "@jungle/shared";
+import { DEFAULT_AGENT_MODE, DEFAULT_MODEL, MODEL_CATALOG, STATUS_STALE_AFTER_MS } from "@jungle/shared";
 import type { AgentStatus, Attachment, Message } from "../api";
 
 // Shown on a model that's gated behind a paid plan (catalog `requiresUpgrade`).
@@ -181,6 +181,31 @@ export const fmtRelative = (iso: string | null | undefined): string => {
   else return new Date(t).toLocaleDateString([], { month: "short", day: "numeric" });
   return future ? `in ${text}` : `${text} ago`;
 };
+
+// Bare age for the self-set status line ("12m", "2h", "3d") — no "ago", because it renders after a
+// "·" separator where the suffix would just be noise. Beyond a week it goes absolute, same as
+// fmtRelative: at that point the exact date is more informative than "63d".
+export const fmtAge = (iso: string | null | undefined): string => {
+  if (!iso) return "";
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return "";
+  const mins = Math.max(0, Math.round((Date.now() - t) / 60_000));
+  if (mins < 1) return "now";
+  if (mins < 60) return `${mins}m`;
+  if (mins < 60 * 24) return `${Math.round(mins / 60)}h`;
+  if (mins < 60 * 24 * 7) return `${Math.round(mins / (60 * 24))}d`;
+  return new Date(t).toLocaleDateString([], { month: "short", day: "numeric" });
+};
+
+// A self-set status older than STATUS_STALE_AFTER_MS is still SHOWN — it may well be accurate, and
+// deleting an agent's own words on a timer would be worse — but it's rendered dimmed with a hint,
+// so nobody reads a day-old line as "right now". The real correction path is the agent itself:
+// the runner replays its status to it every turn.
+export function statusIsStale(updatedAt: string | null | undefined): boolean {
+  if (!updatedAt) return false;
+  const t = new Date(updatedAt).getTime();
+  return !Number.isNaN(t) && Date.now() - t > STATUS_STALE_AFTER_MS;
+}
 
 // Status priority for a channel row with several agent members: the most noteworthy wins.
 export const STATUS_RANK: Record<AgentStatus, number> = { working: 0, waking: 1, idle: 2, sleeping: 3, offline: 4 };

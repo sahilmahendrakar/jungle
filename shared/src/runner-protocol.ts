@@ -138,6 +138,42 @@ export interface ScheduleCancelFrame {
   input: { scheduleId: string };
 }
 
+// Bounds on a self-set status. These live in the PROTOCOL rather than alongside the other
+// validation limits in constants.ts because all three consumers need them and the runner can only
+// see this file (it ships a generated verbatim copy — see runner/scripts/sync-protocol.mjs — and
+// cannot import @jungle/shared). The tool schema, the backend validator, and the profile UI all
+// read them from here.
+//
+// 100 matches Slack's own status limit: it has to fit one line in a hover card or a roster row,
+// and a status that needs more than that is a send_message. The emoji bound is generous enough for
+// a ZWJ sequence (👨‍💻) while still refusing a second status line smuggled in as "emoji".
+export const STATUS_TEXT_MAX_LENGTH = 100;
+export const STATUS_EMOJI_MAX_LENGTH = 16;
+
+// An agent's self-set status as it travels on the wire: the line, the optional emoji, and when it
+// was set (ISO-8601, so the runner can tell the agent "you set this 6 hours ago").
+export interface AgentSelfStatus {
+  text: string;
+  emoji?: string | null;
+  updatedAt: string;
+}
+
+// The set_status tool: the agent writes its own Slack-style "what I'm working on" line. Same
+// id-correlated round trip as the schedule_* family. An empty/whitespace `text` CLEARS the status
+// (and any emoji with it) — there is deliberately no second clear_status tool. Length limits
+// (STATUS_TEXT_MAX_LENGTH / STATUS_EMOJI_MAX_LENGTH) are enforced backend-side.
+export interface SetStatusFrame {
+  type: "set_status";
+  id: string;
+  input: {
+    text: string;
+    emoji?: string;
+    // Auto-clear this many minutes from now (Slack's "clear after"). Omitted = no expiry: the
+    // status stands until the agent changes it or a human clears it from the profile.
+    clearAfterMinutes?: number;
+  };
+}
+
 // Workflow-builder tools (workflow_* on the jungle MCP server): how the Architect agent (and
 // any agent, though only the Architect is prompted to) creates and shapes workflow DRAFTS and
 // finalizes them into live teams. Same request/result correlation as the schedule_* family.
@@ -273,6 +309,7 @@ export type RunnerToBackend =
   | ScheduleCreateFrame
   | ScheduleListFrame
   | ScheduleCancelFrame
+  | SetStatusFrame
   | WorkflowListTemplatesFrame
   | WorkflowDraftCreateFrame
   | WorkflowDraftGetFrame
@@ -369,6 +406,12 @@ export interface ConfigureFrame {
     sites: Array<{ site: string; label: string; needsReconnect: boolean }>;
     requireApproval: boolean;
   };
+  // The agent's CURRENT self-set status (null/absent = none). Carried on configure because the
+  // status outlives the runner: a container that restarts, or a Fly machine that idle-stopped
+  // overnight, must come back knowing what it told everyone it was doing — otherwise it shows the
+  // agent nothing each turn and the stale line never gets corrected. Updated mid-session by
+  // StatusChangedFrame.
+  status?: AgentSelfStatus | null;
 }
 
 // A file attached to the message that produced an inbox item. `url` is an origin-relative
@@ -472,12 +515,29 @@ export interface ScheduleCancelResultFrame {
   result: { ok: boolean; error?: string };
 }
 
+export interface SetStatusResultFrame {
+  type: "set_status_result";
+  id: string;
+  // `status` echoes what was actually stored (null = cleared), so the runner's cached copy — the
+  // one it shows itself each turn — can never drift from the backend's after a rejected or
+  // truncated write.
+  result: { ok: boolean; error?: string; status?: AgentSelfStatus | null };
+}
+
 export interface ConfirmResultFrame {
   type: "confirm_result";
   id: string;
   result: "allow" | "deny";
   denyMessage?: string;
   updatedInput?: Record<string, unknown>;
+}
+
+// The agent's status changed from OUTSIDE the agent — today only a human hitting Clear on the
+// profile, or an expiry lapsing. Pushed so the runner's cached copy stays true; without it the
+// agent would keep being shown (and reasoning about) a status nobody can see anymore.
+export interface StatusChangedFrame {
+  type: "status_changed";
+  status: AgentSelfStatus | null;
 }
 
 export interface GitCredentialsFrame {
@@ -529,6 +589,8 @@ export type BackendToRunner =
   | ScheduleCreateResultFrame
   | ScheduleListResultFrame
   | ScheduleCancelResultFrame
+  | SetStatusResultFrame
+  | StatusChangedFrame
   | WorkflowToolResultFrame
   | ConfirmResultFrame
   | GitCredentialsFrame

@@ -73,7 +73,9 @@ export interface ChannelCreatedEvent {
   channelId: string;
 }
 
-// A participant's editable fields changed (profile save). Carries the public participant.
+// A participant's editable fields changed. Two sources: a human saving the profile form, and an
+// agent calling set_status (which is why this can fire many times a minute during a busy turn —
+// clients replace the roster entry, they don't refetch). Carries the public participant.
 export interface ParticipantUpdatedEvent {
   type: "participant_updated";
   participant: Participant;

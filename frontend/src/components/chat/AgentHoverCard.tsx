@@ -4,6 +4,7 @@ import type { Participant } from "../../api";
 import type { LiveTurn } from "../../ws/useLiveTurns";
 import { STATUS_DOT, STATUS_LABEL } from "../../lib/chat";
 import { buildItems, liveSummary } from "./activity/sdkEvents";
+import { AgentStatusLine } from "./AgentStatusLine";
 import { PersonAvatar } from "./panels";
 import { Button } from "@/components/ui/button";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
@@ -78,6 +79,10 @@ function CardInner({ agent, ctx }: { agent: Participant; ctx: AgentCardCtx }) {
           {STATUS_LABEL[status]}
         </span>
       </div>
+      {/* What it's on, then what it's doing this second. The self-set status comes FIRST and in
+          foreground weight because it's the task-level answer people came here for; the live tool
+          line below it is supporting detail that only exists mid-turn. */}
+      <AgentStatusLine agent={agent} emphasis className="mt-2" />
       {agent.status === "working" && (
         <div className="mt-2 rounded-lg border bg-muted/40 px-2.5 py-1.5">
           <AgentLiveLine turn={turn} />

@@ -25,6 +25,7 @@ import {
   deleteAgent,
   compactAgent,
   clearAgentContext,
+  clearAgentStatus,
   attachmentUrl,
   getAgentMemory,
   getAgentServices,
@@ -45,6 +46,7 @@ import {
   validateIntegrations,
   type IntegrationDraft,
 } from "./IntegrationsEditor";
+import { AgentStatusLine } from "./AgentStatusLine";
 import { useConnections, BrandTile } from "@/lib/connections";
 import {
   fmtBytes,
@@ -496,6 +498,7 @@ export function ParticipantProfilePanel({
 
         {isAgent ? (
           <div className="space-y-4">
+            <StatusCard person={person} />
             <div className="space-y-1.5">
               <Label htmlFor="profile-name">Display name</Label>
               <Input
@@ -800,6 +803,61 @@ function RecentMessagesCard({
 // lands — including the one the runner sends after a requested compaction finishes.
 // Where this agent runs: a cloud sandbox, or one of the creator's own devices (self-hosted). For a
 // self-hosted agent we show the host details the runner reported (runner_meta.host) + which device.
+// The agent's self-set status on its profile. Read-only plus a Clear button: the status is the
+// agent's own voice (it writes it with set_status when it picks up work), so a human can take
+// down a line that's gone stale but can't put words in its mouth. The empty state explains where
+// the line comes from rather than showing a blank field, so "no status" doesn't read as broken.
+function StatusCard({ person }: { person: Participant }) {
+  const [clearing, setClearing] = useState(false);
+  const [err, setErr] = useState("");
+  const has = !!person.status_text;
+
+  async function clear() {
+    if (clearing) return;
+    setClearing(true);
+    setErr("");
+    try {
+      // No local state update: the backend broadcasts participant_updated, which is what refreshes
+      // `person` here and every other surface at once.
+      await clearAgentStatus(person.id);
+    } catch (e) {
+      setErr(String((e as Error).message ?? e));
+    } finally {
+      setClearing(false);
+    }
+  }
+
+  return (
+    <div data-testid="profile-status" className="rounded-lg border bg-card p-3">
+      <div className="flex items-center gap-2">
+        <div className="min-w-0 flex-1">
+          {has ? (
+            <AgentStatusLine agent={person} emphasis />
+          ) : (
+            <span className="text-xs text-muted-foreground/70">
+              No status set — {person.display_name} sets one when it picks up a task.
+            </span>
+          )}
+        </div>
+        {has && (
+          <Button
+            variant="ghost"
+            size="sm"
+            data-testid="profile-status-clear"
+            onClick={clear}
+            disabled={clearing}
+            className="h-7 shrink-0 text-xs text-muted-foreground"
+            title="Clear this status (use when it's obviously out of date)"
+          >
+            {clearing ? "Clearing…" : "Clear"}
+          </Button>
+        )}
+      </div>
+      {err && <p className="mt-1.5 text-xs text-destructive">{err}</p>}
+    </div>
+  );
+}
+
 export function EnvironmentCard({ person }: { person: Participant }) {
   const selfHosted = person.runner_provider === "self_hosted";
   const host = (person.runner_meta as { host?: { hostname?: string; platform?: string; arch?: string } } | null)?.host;
