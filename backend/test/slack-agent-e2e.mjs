@@ -20,6 +20,8 @@ const HUMAN = "11111111-1111-1111-1111-1111111111a1";
 const JUNGLE = "22222222-2222-2222-2222-2222222222a1";
 const MIRROR_CHAN = "33333333-3333-3333-3333-3333333333a1";
 const WS2 = "00000000-0000-0000-0000-0000000000a2"; // a workspace with no @jungle
+const WS3 = "00000000-0000-0000-0000-0000000000a3"; // connected only AFTER an event arrives
+const JUNGLE3 = "22222222-2222-2222-2222-2222222222a3";
 const TEAM = "TAGENT";
 const TEAM2 = "TAGENT2";
 const IM = "D1"; // the Slack IM between the user and the agent app's bot
@@ -212,6 +214,40 @@ async function run() {
     const { rows } = await db.query(
       `select count(*)::int n from slack_channel_links where slack_team_id=$1`, [TEAM2]);
     assert(rows[0].n === 0, "no DM binding created when there is no agent", `links=${rows[0].n}`);
+  }
+
+  // J) an event that arrives BEFORE the workspace is connected must not burn its event id —
+  //    otherwise connecting later can't help, because Slack's retry is deduped away. This is the
+  //    exact shape of the first real-world failure: app installed in Slack, never connected in
+  //    Jungle, DMs silently swallowed.
+  {
+    const evId = "EvA-unconnected-1";
+    const ev = imEvent({ user: "U7", text: "before connect", channel: "D3", ts: `${Date.now()}.000700`, event_id: evId });
+    ev.team_id = "TNOTCONNECTED";
+    await signedFetch(ev);
+    await sleep(800);
+    const { rows: burned } = await db.query(`select count(*)::int n from slack_events where event_id=$1`, [evId]);
+    assert(burned[0].n === 0, "event id NOT consumed when the workspace isn't connected", `rows=${burned[0].n}`);
+
+    // Now connect that workspace and replay the same event id: it must be processed, not deduped.
+    await db.query(`insert into workspaces (id, name) values ($1,'Late Connect WS') on conflict (id) do nothing`, [WS3]);
+    await db.query(
+      `insert into participants (id, kind, workspace_id, handle, display_name, runner_token, jungle_default)
+       values ($1,'agent',$2,'jungle','Jungle','rt-jungle3',true) on conflict (id) do nothing`, [JUNGLE3, WS3]);
+    await db.query(
+      `insert into slack_installs (workspace_id, team_id, team_name, bot_token, bot_user_id, bot_id, kind)
+       values ($1,'TNOTCONNECTED','Late Team','xoxb-agent3','UAGENT3','BAGENT3','agent')
+       on conflict (workspace_id, kind) do update set bot_token=excluded.bot_token`, [WS3]);
+    await signedFetch(ev);
+    await sleep(1200);
+    const { rows: link } = await db.query(
+      `select jungle_channel_id from slack_channel_links where dm_agent_id=$1 and dm_slack_user_id='U7'`, [JUNGLE3]);
+    assert(link.length === 1, "the same event succeeds once the workspace is connected", `links=${link.length}`);
+    if (link[0]) {
+      const { rows: m } = await db.query(
+        `select count(*)::int n from messages where channel_id=$1 and body='before connect'`, [link[0].jungle_channel_id]);
+      assert(m[0].n === 1, "the replayed message was persisted", `count=${m[0].n}`);
+    }
   }
 
   console.log(`\n${pass} assertions passed`);

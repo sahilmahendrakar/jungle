@@ -54,13 +54,21 @@ export async function processAgentAppEvent(payload: AgentEventEnvelope): Promise
   const ev = payload.event;
   if (!ev) return;
 
-  // Dedupe (Events API is at-least-once) BEFORE dispatching, so a retry can't double-post a turn.
-  if (!(await db.recordSlackEvent(payload.event_id))) return;
-
   const install = await db.getSlackInstallByTeam(payload.team_id, "agent");
-  if (!install || install.status !== "active") return;
+  if (!install || install.status !== "active") {
+    // The app is installed in Slack but the workspace was never connected in Jungle (or was
+    // disconnected). Loud, because the symptom is a person messaging us and getting silence, and
+    // there is nothing else anywhere that would explain it.
+    console.warn(
+      `slack agent: dropped ${ev.type} from team ${payload.team_id} — no active 'agent' install. ` +
+        `Connect the workspace in Jungle: Settings → Slack → "Talk to @jungle in Slack".`,
+    );
+    return;
+  }
 
   if (ev.type === "app_home_opened") {
+    // No dedupe: publishing the Home tab is idempotent, and burning the event id here would be
+    // pure downside.
     await publishAppHome(install, ev.user);
     return;
   }
@@ -71,6 +79,12 @@ export async function processAgentAppEvent(payload: AgentEventEnvelope): Promise
 
   // Echo drop: our own posts (and any other bot's) carry a bot_id. Also guard on our bot user id.
   if (ev.bot_id || !ev.user || ev.user === install.bot_user_id) return;
+
+  // Dedupe LAST, immediately before the first side effect (the Events API is at-least-once, and a
+  // retry must not double-post a turn). Deliberately not earlier: recording the id is itself a
+  // side effect, so doing it before the checks above meant a misconfigured workspace permanently
+  // consumed the id — Slack's retry, and any later fix, would then be silently dropped too.
+  if (!(await db.recordSlackEvent(payload.event_id))) return;
 
   await handleDirectMessage(install, payload.team_id, ev);
 }
