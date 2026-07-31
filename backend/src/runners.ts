@@ -22,6 +22,15 @@ import * as spend from "./services/spend";
 
 export type { AgentStatus };
 
+// Runner-socket heartbeat. Both ends probe: this side to reap dead registry entries, the runner
+// side (runner/src/connection.ts) to notice the drop and reconnect. Without it a half-open socket
+// — backend restart, NAT/proxy reaping an idle flow — leaves the runner believing it is still
+// connected forever, so it never re-dials and the agent is stuck "waking" on every message.
+const HEARTBEAT_MS = 25_000;
+
+// `__alive` is the heartbeat's liveness flag: set on connect and on each pong, cleared on probe.
+type WsWithAlive = WebSocket & { __alive?: boolean };
+
 // The SDK-runner side of Jungle. A runner is a per-agent container that dials INTO the backend
 // at GET /api/runner?token=<runner_token> (WS upgrade) and speaks docs/runner-protocol.md.
 // The backend authenticates by matching the token to participants.runner_token (sdk agents
@@ -1335,8 +1344,31 @@ export function init(
   // app's WebSocketServer keeps handling the default path.
   const rwss = new WebSocketServer({ noServer: true });
   rwss.on("connection", (ws: WebSocket, _req: IncomingMessage, token: string) => {
+    // See HEARTBEAT_MS. Mark alive on connect (a socket that has never been probed must not be
+    // reaped by the first sweep) and refresh on every pong.
+    (ws as WsWithAlive).__alive = true;
+    ws.on("pong", () => {
+      (ws as WsWithAlive).__alive = true;
+    });
     void accept(ws, token);
   });
+  // A runner socket whose TCP connection died without a FIN leaves this side holding a dead
+  // registry entry at readyState OPEN — every enqueue "delivers" into the void. Terminate anything
+  // that missed the previous ping (not close: there's nobody left to finish a closing handshake),
+  // which fires `close` and frees the agent's slot so the next wake can reconnect it.
+  const heartbeat = setInterval(() => {
+    for (const ws of rwss.clients) {
+      const w = ws as WsWithAlive;
+      if (w.__alive === false) {
+        ws.terminate();
+        continue;
+      }
+      w.__alive = false;
+      ws.ping();
+    }
+  }, HEARTBEAT_MS);
+  heartbeat.unref();
+  rwss.on("close", () => clearInterval(heartbeat));
   server.on("upgrade", (req: IncomingMessage, socket: internal.Duplex, head: Buffer) => {
     let pathname = "";
     try {

@@ -10,12 +10,22 @@ export interface ConnectionHandlers {
   onClose: () => void;
 }
 
+// Liveness probe interval. A runner is silent while idle, so nothing else on this socket would
+// ever reveal that the TCP connection died without a FIN (a backend restart, a NAT/proxy reaping
+// an idle flow). Such a socket sits at readyState OPEN forever: `close` never fires, so the
+// reconnect below is never scheduled and the agent is unreachable until its machine is restarted
+// — it just shows "waking" on every message. Probing turns that into an ordinary reconnect, and
+// the traffic doubles as a keepalive that stops the idle-reap case from happening at all.
+const HEARTBEAT_MS = 25_000;
+
 export class Connection {
   private ws: WebSocket | null = null;
   private closed = false;
   private backoffMs = 500;
   private readonly maxBackoffMs = 30_000;
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private heartbeat: NodeJS.Timeout | null = null;
+  private awaitingPong = false;
 
   constructor(
     private readonly wsUrl: string,
@@ -42,7 +52,14 @@ export class Connection {
     ws.on("open", () => {
       this.backoffMs = 500;
       log.info("backend connection open");
+      this.startHeartbeat(ws);
       this.handlers.onOpen();
+    });
+
+    // The backend answers protocol pings automatically (it's a `ws` server), so a missed pong
+    // means the socket is gone.
+    ws.on("pong", () => {
+      this.awaitingPong = false;
     });
 
     ws.on("message", (data) => {
@@ -62,6 +79,7 @@ export class Connection {
 
     ws.on("close", (code) => {
       log.warn("backend connection closed", { code });
+      this.stopHeartbeat();
       this.ws = null;
       this.handlers.onClose();
       // Terminal closes: 4001 = the backend rejected our token; 4003 = the agent was deleted /
@@ -80,6 +98,31 @@ export class Connection {
       log.warn("backend connection error", { err: String(err) });
       // 'close' fires after 'error'; reconnect is scheduled there.
     });
+  }
+
+  // Probe every interval; a probe that goes unanswered by the next one means the socket is dead.
+  // terminate (not close) — there's nobody left to complete a closing handshake with — which fires
+  // `close` and so runs the ordinary onClose + reconnect path.
+  private startHeartbeat(ws: WebSocket): void {
+    this.stopHeartbeat();
+    this.awaitingPong = false;
+    this.heartbeat = setInterval(() => {
+      if (this.ws !== ws) return;
+      if (this.awaitingPong) {
+        log.warn("no pong from backend; terminating socket");
+        ws.terminate();
+        return;
+      }
+      this.awaitingPong = true;
+      ws.ping();
+    }, HEARTBEAT_MS);
+    this.heartbeat.unref?.();
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeat) clearInterval(this.heartbeat);
+    this.heartbeat = null;
+    this.awaitingPong = false;
   }
 
   private scheduleReconnect(): void {
@@ -110,6 +153,7 @@ export class Connection {
   close(): void {
     this.closed = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.stopHeartbeat();
     this.ws?.close();
   }
 }
