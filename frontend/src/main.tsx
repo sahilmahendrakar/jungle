@@ -7,6 +7,7 @@ import { AuthGate } from "./AuthGate";
 import { Privacy } from "./Privacy";
 import { ThemeProvider } from "./theme";
 import { usePath } from "./route";
+import { Analytics } from "./analytics";
 import "@fontsource-variable/inter/index.css";
 import "@fontsource-variable/jetbrains-mono/index.css";
 import "./index.css";
@@ -31,6 +32,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <ThemeProvider>
       <Root />
+      <Analytics />
     </ThemeProvider>
   </React.StrictMode>,
 );
