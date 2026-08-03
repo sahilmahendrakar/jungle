@@ -53,11 +53,6 @@ export function isAgentDeviceOnline(agentId: string): boolean {
   return !!h && hostConns.has(h);
 }
 
-// Whether we track a device for this agent at all (i.e. it's a self-hosted agent).
-export function agentIsSelfHosted(agentId: string): boolean {
-  return agentHost.has(agentId);
-}
-
 // Whether the agent's device reports it as currently running a runner child (from host_hello /
 // run/stop bookkeeping). Used by SelfHostedProvisioner.status() at boot reconcile.
 export function isRunningOnDevice(agentId: string): boolean {
@@ -72,11 +67,6 @@ export function setAgentHost(agentId: string, hostId: string): void {
 }
 export function clearAgentHost(agentId: string): void {
   agentHost.delete(agentId);
-}
-
-// Seed the agentId->hostId map at boot from the self-hosted agents in the DB.
-export function seedAgentHost(agentId: string, hostId: string): void {
-  agentHost.set(agentId, hostId);
 }
 
 // Send a control frame to a device. Returns false if the device isn't connected (caller decides

@@ -30,10 +30,6 @@ export type DeliveryChannel = (typeof DELIVERY_CHANNELS)[number];
 
 const LIANA_WEB_URL = (process.env.LIANA_WEB_URL ?? "http://localhost:3000").replace(/\/$/, "");
 
-export function lianaConfigured(): boolean {
-  return Boolean(process.env.LIANA_SLACK_CLIENT_ID && process.env.LIANA_SLACK_SIGNING_SECRET);
-}
-
 // ============================ Model resolution ============================
 
 // Liana's conductor (the persistent per-user agent she talks through) runs on Haiku 4.5: first-

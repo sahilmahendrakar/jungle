@@ -87,10 +87,6 @@ let activeWorkspaceId: string | null = null;
 export function setActiveWorkspaceId(id: string | null) {
   activeWorkspaceId = id;
 }
-export function getActiveWorkspaceId(): string | null {
-  return activeWorkspaceId;
-}
-
 interface RequestOpts {
   method?: string;
   json?: unknown;

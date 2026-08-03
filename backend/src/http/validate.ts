@@ -24,8 +24,3 @@ export function optInt(v: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
-// Assert `value` is one of `allowed`, else 400. Returns the narrowed value.
-export function oneOf<T extends string>(value: string, allowed: readonly T[], field: string): T {
-  if ((allowed as readonly string[]).includes(value)) return value as T;
-  throw new ApiError(400, `unsupported ${field}: ${value}`);
-}

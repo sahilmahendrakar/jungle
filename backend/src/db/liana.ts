@@ -42,10 +42,6 @@ export async function getLianaInstall(teamId: string): Promise<LianaInstall | nu
   return rows[0] ?? null;
 }
 
-export async function setLianaInstallStatus(teamId: string, status: "active" | "revoked"): Promise<void> {
-  await pool.query(`update liana_slack_installs set status = $2 where team_id = $1`, [teamId, status]);
-}
-
 export interface LianaWorkflowRow {
   workflow_id: string;
   // Slack ownership context — null for workflows created by accounts with no Slack install
@@ -424,16 +420,6 @@ export async function getLianaOwnerByAgentId(agentId: string): Promise<string | 
     [agentId],
   );
   return rows[0]?.participant_id ?? null;
-}
-
-// Flip the per-owner rollout flag for the Liana-agent path (upsert).
-export async function setLianaAgentEnabled(participantId: string, enabled: boolean): Promise<void> {
-  await pool.query(
-    `insert into liana_settings (participant_id, agent_enabled)
-     values ($1, $2)
-     on conflict (participant_id) do update set agent_enabled = excluded.agent_enabled, updated_at = now()`,
-    [participantId, enabled],
-  );
 }
 
 export async function upsertLianaSettings(

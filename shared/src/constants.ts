@@ -91,8 +91,6 @@ export function isAllowedModel(model: string): model is AllowedModel {
 // support (e.g. Haiku 4.5) silently ignore it — the CLI downgrades for the selected model.
 export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh"] as const;
 export type EffortLevel = (typeof EFFORT_LEVELS)[number];
-export const DEFAULT_EFFORT: EffortLevel = "medium";
-
 export function isAllowedEffort(effort: string): effort is EffortLevel {
   return (EFFORT_LEVELS as readonly string[]).includes(effort);
 }
